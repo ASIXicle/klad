@@ -6,6 +6,8 @@ use klad_brush::BrushSet;
 use klad_core::bundle::{Bundle, write_atomic};
 use klad_core::ops::Op;
 use klad_render::export::{Options, Target, detail_of, render};
+use klad_render::maps::Map;
+use klad_render::shaders::Effect;
 use klad_render::sprites::{self, Animation, Pixels, Placed, Rect, Run, Scene, Sheet, SpriteFrames, Texture};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,6 +21,22 @@ pub struct Look {
     pub depth: u8,
     pub background: bool,
     pub variant: Option<String>,
+    pub maps: Vec<Map>,
+    pub invert: bool,
+}
+
+impl Look {
+    pub fn plain(scale: f32, depth: u8) -> Self {
+        Self {
+            layer: None,
+            scale,
+            depth,
+            background: false,
+            variant: None,
+            maps: Vec::new(),
+            invert: false,
+        }
+    }
 }
 
 pub fn tagged(path: &Path, tag: &str) -> PathBuf {
@@ -49,6 +67,7 @@ pub struct Pictures {
     pub source: (u32, u32),
     pub trims: Vec<Rect>,
     pub cut: Vec<Pixels>,
+    pub maps: Vec<(Map, Vec<Pixels>)>,
     pub animations: Vec<(Animation, Vec<Run>)>,
     pub firsts: Vec<u32>,
     pub frames: usize,
@@ -71,6 +90,10 @@ impl Name {
             0 => self.file(".png"),
             _ => self.file(&format!("-{}.png", i + 1)),
         }
+    }
+
+    fn map_page(&self, i: usize, map: Map) -> PathBuf {
+        tagged(&self.page(i), map.suffix())
     }
 }
 
@@ -101,6 +124,9 @@ pub fn pictures(bundle: &Bundle, animations: Vec<Animation>, look: &Look) -> Res
     let start = Instant::now();
     let doc = &bundle.doc;
     let layer = look.layer.as_deref().map(|k| doc.find_layer(k)).transpose()?;
+    if layer.is_some() && !look.maps.is_empty() {
+        bail!("light maps are made for the whole picture: leave out --layer, or export the layer without --maps");
+    }
     let target = layer.map_or(Target::Frame, Target::Layer);
     let options = Options {
         scale: look.scale,
@@ -119,7 +145,7 @@ pub fn pictures(bundle: &Bundle, animations: Vec<Animation>, look: &Look) -> Res
     let brushes = BrushSet::for_bundle(bundle)?;
     let (w, h) = (doc.canvas.width, doc.canvas.height);
     let work: Vec<_> = unique.iter().map(|&f| (f, frame_cels(doc, f, &[]))).collect();
-    let mut made: BTreeMap<u32, (Rect, Pixels)> = BTreeMap::new();
+    let mut made: BTreeMap<u32, (Rect, Pixels, Vec<Pixels>)> = BTreeMap::new();
     batches(work, w as usize * h as usize * 8)
         .into_iter()
         .try_for_each(|batch| {
@@ -141,7 +167,17 @@ pub fn pictures(bundle: &Bundle, animations: Vec<Animation>, look: &Look) -> Res
                     let image = render(doc, *frame, &rasters, &target, options)?;
                     let pixels = Pixels::of(&image, look.depth)?;
                     let trim = pixels.trim();
-                    Ok((*frame, (trim, pixels.crop(trim))))
+                    let maps = match look.maps.is_empty() {
+                        true => Vec::new(),
+                        false => {
+                            let mut set = klad_render::maps::render(doc, *frame, &rasters, look.scale)?;
+                            if look.invert {
+                                set.invert_depth();
+                            }
+                            look.maps.iter().map(|m| Pixels::of_map(&set, *m).crop(trim)).collect()
+                        }
+                    };
+                    Ok((*frame, (trim, pixels.crop(trim), maps)))
                 })
                 .collect::<Result<Vec<_>>>()?;
             made.extend(done);
@@ -150,14 +186,19 @@ pub fn pictures(bundle: &Bundle, animations: Vec<Animation>, look: &Look) -> Res
     let mut by_hash: BTreeMap<(u64, [u32; 4]), usize> = BTreeMap::new();
     let mut trims = Vec::new();
     let mut cut = Vec::new();
+    let mut map_cuts: Vec<Vec<Pixels>> = look.maps.iter().map(|_| Vec::new()).collect();
     let mut firsts = Vec::new();
     let index_of: BTreeMap<u32, usize> = made
         .into_iter()
-        .map(|(frame, (trim, pixels))| {
-            let key = (pixels.hash(), [trim.x, trim.y, trim.w, trim.h]);
+        .map(|(frame, (trim, pixels, maps))| {
+            let hash = maps
+                .iter()
+                .fold(pixels.hash(), |h, m| klad_core::rng::fnv(h, &m.hash().to_le_bytes()));
+            let key = (hash, [trim.x, trim.y, trim.w, trim.h]);
             let index = *by_hash.entry(key).or_insert_with(|| {
                 trims.push(trim);
                 cut.push(pixels);
+                map_cuts.iter_mut().zip(maps).for_each(|(list, m)| list.push(m));
                 firsts.push(frame);
                 trims.len() - 1
             });
@@ -180,6 +221,7 @@ pub fn pictures(bundle: &Bundle, animations: Vec<Animation>, look: &Look) -> Res
         source,
         trims,
         cut,
+        maps: look.maps.iter().copied().zip(map_cuts).collect(),
         animations,
         firsts,
         frames: frames.len(),
@@ -193,6 +235,42 @@ struct Pages {
     sizes: Vec<(u32, u32)>,
     files: Vec<PathBuf>,
     hashes: Vec<u64>,
+    maps: Vec<(Map, Vec<PathBuf>, Vec<u64>)>,
+}
+
+fn page_set(
+    files: Vec<PathBuf>,
+    cut: &[Pixels],
+    placed: &[Placed],
+    sizes: &[(u32, u32)],
+    blank: impl Fn(u32, u32) -> Pixels + Sync,
+) -> Result<(Vec<PathBuf>, Vec<u64>)> {
+    let encoded = sizes
+        .par_iter()
+        .enumerate()
+        .map(|(i, &(w, h))| {
+            let mut page = blank(w, h);
+            cut.iter()
+                .zip(placed)
+                .filter(|(_, at)| at.page == i)
+                .for_each(|(cut, at)| {
+                    let all = Rect {
+                        x: 0,
+                        y: 0,
+                        w: cut.width,
+                        h: cut.height,
+                    };
+                    page.blit(cut, all, at.x, at.y);
+                });
+            let hash = page.hash();
+            Ok((page.png()?, hash))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    files
+        .iter()
+        .zip(&encoded)
+        .try_for_each(|(file, (bytes, _))| write_atomic(file, bytes))?;
+    Ok((files, encoded.iter().map(|(_, h)| *h).collect()))
 }
 
 fn write_pages(name: &Name, pics: &Pictures, packing: &Packing, depth: u8) -> Result<Pages> {
@@ -213,49 +291,49 @@ fn write_pages(name: &Name, pics: &Pictures, packing: &Packing, depth: u8) -> Re
         );
     }
     let (placed, pages) = sprites::pack(&sizes, packing.padding, packing.max)?;
-    let encoded = pages
-        .par_iter()
-        .enumerate()
-        .map(|(i, &(w, h))| {
-            let mut page = Pixels::blank(w, h, depth);
-            pics.cut
-                .iter()
-                .zip(&placed)
-                .filter(|(_, at)| at.page == i)
-                .for_each(|(cut, at)| {
-                    let all = Rect {
-                        x: 0,
-                        y: 0,
-                        w: cut.width,
-                        h: cut.height,
-                    };
-                    page.blit(cut, all, at.x, at.y);
-                });
-            let hash = page.hash();
-            Ok((page.png()?, hash))
+    let (files, hashes) = page_set(
+        (0..pages.len()).map(|i| name.page(i)).collect(),
+        &pics.cut,
+        &placed,
+        &pages,
+        |w, h| Pixels::blank(w, h, depth),
+    )?;
+    let maps = pics
+        .maps
+        .iter()
+        .map(|(map, cut)| {
+            let first = cut.first().cloned();
+            let (files, hashes) = page_set(
+                (0..pages.len()).map(|i| name.map_page(i, *map)).collect(),
+                cut,
+                &placed,
+                &pages,
+                |w, h| first.as_ref().map_or(Pixels::blank(w, h, 8), |f| f.blank_like(w, h)),
+            )?;
+            Ok((*map, files, hashes))
         })
         .collect::<Result<Vec<_>>>()?;
-    let files: Vec<PathBuf> = (0..pages.len()).map(|i| name.page(i)).collect();
-    files
-        .iter()
-        .zip(&encoded)
-        .try_for_each(|(file, (bytes, _))| write_atomic(file, bytes))?;
     Ok(Pages {
         placed,
         sizes: pages,
-        hashes: encoded.iter().map(|(_, h)| *h).collect(),
+        hashes,
         files,
+        maps,
     })
 }
 
 fn remove_stale_pages(name: &Name, kept: usize) {
-    (kept..)
-        .map(|i| name.page(i))
-        .take_while(|p| p.exists())
-        .for_each(|page| {
-            let _ = fs::remove_file(&page);
-            let _ = fs::remove_file(page.with_extension("png.import"));
-        });
+    let gone = |page: PathBuf| {
+        let _ = fs::remove_file(&page);
+        let _ = fs::remove_file(page.with_extension("png.import"));
+    };
+    (kept..).map(|i| name.page(i)).take_while(|p| p.exists()).for_each(gone);
+    Map::ALL.iter().for_each(|map| {
+        (kept..)
+            .map(|i| name.map_page(i, *map))
+            .take_while(|p| p.exists())
+            .for_each(gone);
+    });
 }
 
 fn file_name(path: &Path) -> String {
@@ -323,16 +401,33 @@ pub fn sheet(path: &Path, spec: &str, look: &Look, packing: &Packing, out: Optio
         scale: look.scale,
         depth: look.depth,
     });
+    let mut json = json;
+    if !pages.maps.is_empty() {
+        json["meta"]["maps"] = pages
+            .maps
+            .iter()
+            .map(|(map, files, _)| {
+                (
+                    map.name().to_string(),
+                    files.iter().map(|f| serde_json::Value::from(file_name(f))).collect(),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+            .into();
+    }
     let text = serde_json::to_string_pretty(&json)? + "\n";
     let json_path = name.file(".json");
     write_atomic(&json_path, text.as_bytes())?;
+    let map_files = || pages.maps.iter().flat_map(|(_, f, h)| f.iter().zip(h));
     pages.files.iter().for_each(|f| println!("{}", f.display()));
+    map_files().for_each(|(f, _)| println!("{}", f.display()));
     println!("{}", json_path.display());
     eprintln!("{}", summary(&pics, &pages));
     pages
         .files
         .iter()
         .zip(&pages.hashes)
+        .chain(map_files())
         .for_each(|(f, h)| eprintln!("hash {h:016x}  {}", file_name(f)));
     eprintln!(
         "hash {:016x}  {}",
@@ -368,22 +463,28 @@ pub fn frames(path: &Path, spec: &str, look: &Look, out: Option<PathBuf>) -> Res
     fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
     let pics = pictures(&bundle, animations, look)?;
     let (sw, sh) = pics.source;
-    let encoded = pics
-        .cut
-        .par_iter()
-        .zip(&pics.trims)
-        .map(|(cut, trim)| {
-            let mut full = Pixels::blank(sw, sh, look.depth);
-            let all = Rect {
-                x: 0,
-                y: 0,
-                w: cut.width,
-                h: cut.height,
-            };
-            full.blit(cut, all, trim.x, trim.y);
-            full.png()
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let whole = |cut: &[Pixels]| -> Result<Vec<Vec<u8>>> {
+        cut.par_iter()
+            .zip(&pics.trims)
+            .map(|(cut, trim)| {
+                let mut full = cut.blank_like(sw, sh);
+                let all = Rect {
+                    x: 0,
+                    y: 0,
+                    w: cut.width,
+                    h: cut.height,
+                };
+                full.blit(cut, all, trim.x, trim.y);
+                full.png()
+            })
+            .collect()
+    };
+    let encoded = whole(&pics.cut)?;
+    let maps: Vec<(Map, Vec<Vec<u8>>)> = pics
+        .maps
+        .iter()
+        .map(|(map, cut)| Ok((*map, whole(cut)?)))
+        .collect::<Result<_>>()?;
     let sequence: Vec<usize> = pics
         .animations
         .iter()
@@ -392,10 +493,12 @@ pub fn frames(path: &Path, spec: &str, look: &Look, out: Option<PathBuf>) -> Res
                 .flat_map(|r| std::iter::repeat_n(r.picture, r.frames as usize))
         })
         .collect();
-    sequence
-        .iter()
-        .enumerate()
-        .try_for_each(|(i, &p)| write_atomic(&dir.join(format!("{prefix}-{i:04}.png")), &encoded[p]))?;
+    sequence.iter().enumerate().try_for_each(|(i, &p)| {
+        write_atomic(&dir.join(format!("{prefix}-{i:04}.png")), &encoded[p])?;
+        maps.iter().try_for_each(|(map, bytes)| {
+            write_atomic(&dir.join(format!("{prefix}-{i:04}{}.png", map.suffix())), &bytes[p])
+        })
+    })?;
     println!("{}", dir.display());
     eprintln!(
         "{} frames as {prefix}-0000.png to {prefix}-{:04}.png, {} pictures ({} composed), {:.0} ms",
@@ -414,10 +517,9 @@ pub fn gif(path: &Path, spec: &str, look: &Look, dither: bool, out: Option<PathB
     let animations = sprites::animations(&bundle.doc, spec)?;
     let look = Look {
         layer: look.layer.clone(),
-        scale: look.scale,
-        depth: 8,
         background: look.background,
         variant: look.variant.clone(),
+        ..Look::plain(look.scale, 8)
     };
     let stem = stem_for(&bundle, &look);
     let pics = pictures(&bundle, animations, &look)?;
@@ -609,21 +711,44 @@ pub fn tileset(path: &Path, dir: Option<PathBuf>, store: bool, look: &Look, fram
         16 => klad_render::export::png16(&image)?,
         _ => klad_render::export::png8(&image)?,
     };
-    let uid = read(&tres)
-        .and_then(|t| sprites::header_uid(&t))
-        .unwrap_or_else(|| sprites::uid_for(&tres.to_string_lossy()));
+    let uid = kept_uid(&tres);
+    let lighting = match doc.maps.is_some() && layer.is_none() {
+        true => {
+            let set = klad_render::maps::render(doc, frame, &rasters, look.scale)?;
+            let files: Vec<PathBuf> = [Map::Normal, Map::Specular]
+                .iter()
+                .map(|map| {
+                    let file = tagged(&png, map.suffix());
+                    write_atomic(&file, &Pixels::of_map(&set, *map).png()?)?;
+                    Ok(file)
+                })
+                .collect::<Result<_>>()?;
+            Some((
+                sprites::Lighting {
+                    normal: texture_of(&files[0]),
+                    specular: Some(texture_of(&files[1])),
+                },
+                files,
+            ))
+        }
+        false => None,
+    };
     let text = sprites::tile_set(&sprites::TileSet {
         uid: &uid,
-        texture: &Texture {
-            path: file_name(&png),
-            uid: read(&png.with_extension("png.import")).and_then(|t| sprites::import_uid(&t)),
-        },
+        texture: &texture_of(&png),
         tile: [cell_width, cell_height],
         tiles: &tiles,
+        lighting: lighting.as_ref().map(|(l, _)| l),
+        shininess: klad_core::maps::godot_shininess(klad_render::maps::settings(doc).shininess),
+        nearest: doc.pixel_art(),
     });
     write_atomic(&png, &bytes)?;
     write_atomic(&tres, text.as_bytes())?;
     println!("{}", png.display());
+    lighting
+        .iter()
+        .flat_map(|(_, files)| files)
+        .for_each(|f| println!("{}", f.display()));
     println!("{}", tres.display());
     eprintln!(
         "{} tiles of {cell_width}x{cell_height} ({columns} across, {rows} down, {} empty left out)",
@@ -636,7 +761,97 @@ pub fn tileset(path: &Path, dir: Option<PathBuf>, store: bool, look: &Look, fram
     Ok(())
 }
 
-pub fn godot(path: &Path, dir: Option<PathBuf>, store: bool, look: &Look, packing: &Packing) -> Result<()> {
+#[derive(Clone, Debug, Default)]
+pub struct Extras {
+    pub occluders: Option<f32>,
+    pub shaders: Vec<Effect>,
+}
+
+pub fn glows(doc: &klad_core::doc::Document) -> bool {
+    doc.all_layers()
+        .iter()
+        .any(|l| l.visible && (l.emissive || l.map == Some(klad_core::maps::Role::Emission)))
+}
+
+pub fn lit_maps(doc: &klad_core::doc::Document, shaders: &[Effect]) -> Result<Vec<Map>> {
+    if doc.maps.is_none() {
+        if !shaders.is_empty() {
+            bail!("the shaders read the light maps, and this drawing's maps are off: klad maps <bundle> --on");
+        }
+        return Ok(Vec::new());
+    }
+    let mut maps = vec![Map::Normal, Map::Specular];
+    if glows(doc) {
+        maps.push(Map::Emission);
+    }
+    maps.extend(shaders.iter().map(|e| e.map()));
+    maps.sort();
+    maps.dedup();
+    Ok(maps)
+}
+
+pub fn texture_of(file: &Path) -> Texture {
+    Texture {
+        path: file_name(file),
+        uid: read(&file.with_extension("png.import")).and_then(|t| sprites::import_uid(&t)),
+    }
+}
+
+pub fn kept_uid(file: &Path) -> String {
+    read(file)
+        .and_then(|t| sprites::header_uid(&t))
+        .unwrap_or_else(|| sprites::uid_for(&file.to_string_lossy()))
+}
+
+pub fn shader_file(dir: &Path, stem: &str, effects: &[Effect], nearest: bool) -> Result<Option<(PathBuf, String)>> {
+    if effects.is_empty() {
+        return Ok(None);
+    }
+    let file = dir.join(format!("{stem}-maps.gdshader"));
+    write_atomic(&file, klad_render::shaders::source(effects, nearest).as_bytes())?;
+    let kept = file.with_extension("gdshader.uid");
+    let uid = match read(&kept)
+        .map(|t| t.trim().to_string())
+        .filter(|t| t.starts_with("uid://"))
+    {
+        Some(uid) => uid,
+        None => {
+            let uid = sprites::uid_for(&format!("shader {}", file.display()));
+            write_atomic(&kept, format!("{uid}\n").as_bytes())?;
+            uid
+        }
+    };
+    Ok(Some((file, uid)))
+}
+
+pub fn occluder_shapes(cut: &[Pixels], trims: &[Rect], tolerance: f32) -> Vec<Vec<klad_render::occluders::Polygon>> {
+    cut.par_iter()
+        .zip(trims)
+        .map(|(pixels, trim)| {
+            let (w, h) = (pixels.width as usize, pixels.height as usize);
+            let alpha: Vec<f32> = (0..w * h)
+                .map(|i| pixels.alpha((i % w) as u32, (i / w) as u32))
+                .collect();
+            klad_render::occluders::polygons(&alpha, w, h, tolerance)
+                .into_iter()
+                .map(|ring| {
+                    ring.into_iter()
+                        .map(|[x, y]| [x + trim.x as f32, y + trim.y as f32])
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub fn godot(
+    path: &Path,
+    dir: Option<PathBuf>,
+    store: bool,
+    look: &Look,
+    packing: &Packing,
+    extras: &Extras,
+) -> Result<()> {
     let start = Instant::now();
     check_look(look)?;
     let mut bundle = Bundle::open(path)?;
@@ -648,24 +863,34 @@ pub fn godot(path: &Path, dir: Option<PathBuf>, store: bool, look: &Look, packin
         dir: target.clone(),
         stem: stem.clone(),
     };
-    let pics = pictures(&bundle, animations, look)?;
+    let wanted = lit_maps(doc, &extras.shaders)?;
+    let look = Look {
+        layer: look.layer.clone(),
+        variant: look.variant.clone(),
+        maps: wanted,
+        invert: false,
+        ..*look
+    };
+    let pics = pictures(&bundle, animations, &look)?;
     let pages = write_pages(&name, &pics, packing, look.depth)?;
     remove_stale_pages(&name, pages.files.len());
-    let textures: Vec<Texture> = pages
-        .files
-        .iter()
-        .map(|f| Texture {
-            path: file_name(f),
-            uid: read(&f.with_extension("png.import")).and_then(|t| sprites::import_uid(&t)),
-        })
-        .collect();
-    let (tres, tscn) = (name.file(".tres"), name.file(".tscn"));
-    let uid = |file: &Path| {
-        read(file)
-            .and_then(|t| sprites::header_uid(&t))
-            .unwrap_or_else(|| sprites::uid_for(&file.to_string_lossy()))
+    let textures: Vec<Texture> = pages.files.iter().map(|f| texture_of(f)).collect();
+    let map_pages = |map: Map| pages.maps.iter().find(|(m, _, _)| *m == map).map(|(_, f, _)| f);
+    let nearest = doc.pixel_art();
+    let lighting: Vec<sprites::Lighting> = match map_pages(Map::Normal) {
+        Some(normals) => normals
+            .iter()
+            .enumerate()
+            .map(|(i, n)| sprites::Lighting {
+                normal: texture_of(n),
+                specular: map_pages(Map::Specular).and_then(|s| s.get(i)).map(|s| texture_of(s)),
+            })
+            .collect(),
+        None => Vec::new(),
     };
-    let (frames_uid, scene_uid) = (uid(&tres), uid(&tscn));
+    let settings = klad_render::maps::settings(doc);
+    let (tres, tscn) = (name.file(".tres"), name.file(".tscn"));
+    let (frames_uid, scene_uid) = (kept_uid(&tres), kept_uid(&tscn));
     let frames_text = sprites::sprite_frames(&SpriteFrames {
         uid: &frames_uid,
         textures: &textures,
@@ -673,7 +898,33 @@ pub fn godot(path: &Path, dir: Option<PathBuf>, store: bool, look: &Look, packin
         trims: &pics.trims,
         placed: &pages.placed,
         animations: &pics.animations,
+        lighting: &lighting,
+        shininess: klad_core::maps::godot_shininess(settings.shininess),
+        nearest,
     });
+    let mut written = vec![tres.clone(), tscn.clone()];
+    let glow = match map_pages(Map::Emission) {
+        Some(files) => {
+            let file = name.file("-glow.tres");
+            let uid = kept_uid(&file);
+            let glow_textures: Vec<Texture> = files.iter().map(|f| texture_of(f)).collect();
+            let text = sprites::sprite_frames(&SpriteFrames {
+                uid: &uid,
+                textures: &glow_textures,
+                source: pics.source,
+                trims: &pics.trims,
+                placed: &pages.placed,
+                animations: &pics.animations,
+                lighting: &[],
+                shininess: 0.0,
+                nearest,
+            });
+            write_atomic(&file, text.as_bytes())?;
+            written.push(file.clone());
+            Some((file_name(&file), uid))
+        }
+        None => None,
+    };
     let (w, h) = (doc.canvas.width as f32, doc.canvas.height as f32);
     let [ox, oy] = doc.timeline.origin.unwrap_or([w / 2.0, h / 2.0]);
     let (sx, sy) = (pics.source.0 as f32 / w, pics.source.1 as f32 / h);
@@ -682,21 +933,72 @@ pub fn godot(path: &Path, dir: Option<PathBuf>, store: bool, look: &Look, packin
         .first()
         .map(|(a, _)| a.name.clone())
         .ok_or_else(|| anyhow!("nothing to export"))?;
+    let per_frame = |of: &dyn Fn(usize) -> usize| -> Vec<(String, Vec<usize>)> {
+        pics.animations
+            .iter()
+            .map(|(a, runs)| (a.name.clone(), runs.iter().map(|r| of(r.picture)).collect()))
+            .collect()
+    };
+    let shapes = extras
+        .occluders
+        .map(|tolerance| occluder_shapes(&pics.cut, &pics.trims, tolerance * look.scale.max(1.0)));
+    let pictures_by_frame = per_frame(&|p| p);
+    let pages_by_frame = per_frame(&|p| pages.placed[p].page);
+    let shader = shader_file(&target, &stem, &extras.shaders, nearest)?;
+    let shader_textures: Vec<(String, Vec<Texture>)> = extras
+        .shaders
+        .iter()
+        .filter_map(|e| {
+            map_pages(e.map()).map(|files| (e.uniform().to_string(), files.iter().map(|f| texture_of(f)).collect()))
+        })
+        .collect();
     let scene_text = sprites::scene(&Scene {
         uid: &scene_uid,
-        node: &sprites::node_name(&stem_for(&bundle, look)),
+        node: &sprites::node_name(&stem_for(&bundle, &look)),
         frames_path: &file_name(&tres),
         frames_uid: &frames_uid,
         animation: &first,
         origin: [ox * sx, oy * sy],
-        pixel: bundle.doc.pixel_art(),
+        pixel: nearest,
+        glow: glow.as_ref().map(|(p, u)| (p.as_str(), u.as_str())),
+        shadows: shapes.as_ref().map(|shapes| sprites::Shadows {
+            shapes,
+            pictures: &pictures_by_frame,
+        }),
+        material: shader.as_ref().map(|(file, uid)| sprites::Material {
+            shader: (
+                file.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+                uid.as_str(),
+            ),
+            params: &[],
+            textures: &shader_textures,
+            pages: &pages_by_frame,
+        }),
     });
     write_atomic(&tres, frames_text.as_bytes())?;
     write_atomic(&tscn, scene_text.as_bytes())?;
+    if let Some((file, _)) = &shader {
+        written.push(file.clone());
+    }
+    if let Some(maps) = &doc.maps {
+        let file = name.file("_lit.tscn");
+        let text = sprites::lit_scene(&sprites::LitScene {
+            uid: &kept_uid(&file),
+            node: &sprites::node_name(&stem_for(&bundle, &look)),
+            sprite: (&file_name(&tscn), &scene_uid),
+            origin: [ox, oy],
+            size: [w, h],
+            scale: look.scale,
+            maps,
+        })?;
+        write_atomic(&file, text.as_bytes())?;
+        written.push(file);
+    }
     pages
         .files
         .iter()
-        .chain([&tres, &tscn])
+        .chain(pages.maps.iter().flat_map(|(_, f, _)| f))
+        .chain(&written)
         .for_each(|f| println!("{}", f.display()));
     let names: Vec<String> = pics
         .animations
@@ -714,6 +1016,21 @@ pub fn godot(path: &Path, dir: Option<PathBuf>, store: bool, look: &Look, packin
         .collect();
     eprintln!("{}", summary(&pics, &pages));
     eprintln!("animations: {}", names.join(", "));
+    if !pages.maps.is_empty() {
+        let maps: Vec<&str> = pages.maps.iter().map(|(m, _, _)| m.name()).collect();
+        eprintln!(
+            "lit: {} maps on every page, a CanvasTexture each; {} to try it with the drawing's lights",
+            maps.join(", "),
+            file_name(&name.file("_lit.tscn"))
+        );
+    }
+    if let Some(shapes) = &shapes {
+        eprintln!(
+            "shadows: {} occluder polygons over {} pictures",
+            shapes.iter().map(Vec::len).sum::<usize>(),
+            shapes.len()
+        );
+    }
     eprintln!(
         "pictures {:.0} ms, {:.0} ms in all",
         pics.ms,
@@ -764,7 +1081,7 @@ func _init():
 
     fn godot_run(binary: &str, project: &Path, args: &[&str]) -> String {
         let out = Command::new(binary)
-            .args(["--headless", "--path"])
+            .args(["--headless", "--quit-after", "600", "--path"])
             .arg(project)
             .args(args)
             .output()
@@ -822,13 +1139,7 @@ func _init():
     }
 
     fn look(scale: f32) -> Look {
-        Look {
-            layer: None,
-            scale,
-            depth: 8,
-            background: false,
-            variant: None,
-        }
+        Look::plain(scale, 8)
     }
 
     const PACKING: Packing = Packing { padding: 2, max: 4096 };
@@ -957,7 +1268,15 @@ func _init():
         .unwrap();
         fs::write(project.join("check.gd"), CHECK).unwrap();
         let path = hop(&dir);
-        godot(&path, Some(project.join("art")), false, &look(2.0), &PACKING).unwrap();
+        godot(
+            &path,
+            Some(project.join("art")),
+            false,
+            &look(2.0),
+            &PACKING,
+            &Extras::default(),
+        )
+        .unwrap();
         assert_eq!(
             Bundle::open(&path).unwrap().doc.export.godot.as_deref(),
             Some("game/art")
@@ -1022,7 +1341,7 @@ func _init():
             Stroke::new(1, "ink", [0.1, 0.3, 0.9, 1.0], 12.0, 1).with_points(&[(40.0, 10.0, 1.0)], 0.0),
         ]);
         bundle.write_marks("l1", "c3", &moved).unwrap();
-        godot(&path, None, false, &look(2.0), &PACKING).unwrap();
+        godot(&path, None, false, &look(2.0), &PACKING, &Extras::default()).unwrap();
         assert_eq!((uids(&tres), uids(&tscn)), (frames_uid.clone(), scene_uid.clone()));
         let text = fs::read_to_string(&tres).unwrap();
         assert!(
@@ -1155,5 +1474,194 @@ func _init():
         assert_eq!(rel("/work/art", "/work/art/godot"), "godot");
         assert_eq!(rel("/work/art", "/work/art"), ".");
         assert_eq!(rel("/a/b/c", "/x"), "../../../x");
+    }
+
+    const LIT: &str = r#"extends SceneTree
+
+func _init():
+	var out := {}
+	var frames: SpriteFrames = load("res://art/hop.tres")
+	var t: AtlasTexture = frames.get_frame_texture("hop", 0)
+	var canvas: CanvasTexture = t.atlas
+	out["atlas"] = t.atlas.get_class()
+	out["maps"] = [canvas.normal_texture.get_width() == canvas.diffuse_texture.get_width(), canvas.specular_texture != null, snapped(canvas.specular_shininess, 0.001)]
+	var sprite: AnimatedSprite2D = load("res://art/hop.tscn").instantiate()
+	root.add_child(sprite)
+	var glow: AnimatedSprite2D = sprite.get_node("glow")
+	out["glow"] = [glow.material.light_mode, glow.sprite_frames.get_frame_count("hop"), glow.offset == sprite.offset]
+	var shadows = sprite.get_node("shadows")
+	var first: OccluderPolygon2D = shadows.shapes[0][0]
+	out["shadows"] = [shadows.get_child(0) is LightOccluder2D, shadows.shapes.size(), first.polygon.size() > 2, first.cull_mode]
+	var shader: Shader = sprite.material.shader
+	out["shader"] = shader.get_shader_uniform_list().size()
+	out["params"] = sprite.material.get_shader_parameter("depth_map") != null
+	var lit = load("res://art/hop_lit.tscn").instantiate()
+	var kinds := []
+	for c in lit.get_children():
+		kinds.append(c.get_class())
+	out["lit"] = kinds
+	lit.free()
+	print("RESULT ", JSON.stringify(out))
+	quit()
+"#;
+
+    #[test]
+    fn godot_lights_the_sprite_through_canvas_textures_with_glow_shadows_and_shaders() {
+        let dir = std::env::temp_dir().join(format!("draw-godot-lit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("game");
+        fs::create_dir_all(project.join("art")).unwrap();
+        let path = hop(&dir);
+        let mut bundle = Bundle::open(&path).unwrap();
+        bundle
+            .apply(
+                &klad_core::ops::parse_lines(
+                    r##"{"op":"maps","surface":{"bevel":4},"lights":[{"at":[10,10],"height":40}]}
+{"op":"add","layer":{"id":"lamp","kind":"vector","name":"lamp","emissive":true,"cels":[{"frame":0,"nodes":[{"id":"n1","type":"ellipse","cx":50,"cy":10,"rx":5,"ry":5,"fill":"#ffd040"}]}]}}
+{"op":"set","id":"l1","shine":0.5}"##,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let extras = Extras {
+            occluders: Some(1.5),
+            shaders: Effect::list("all").unwrap(),
+        };
+        let shown = |shaders: bool| Extras {
+            shaders: if shaders { extras.shaders.clone() } else { Vec::new() },
+            ..extras.clone()
+        };
+        godot(
+            &path,
+            Some(project.join("art")),
+            false,
+            &look(1.0),
+            &PACKING,
+            &shown(true),
+        )
+        .unwrap();
+        let art = project.join("art");
+        [
+            "hop_n.png",
+            "hop_s.png",
+            "hop_e.png",
+            "hop_d.png",
+            "hop_h.png",
+            "hop_o.png",
+            "hop-glow.tres",
+            "hop_lit.tscn",
+            "hop-maps.gdshader",
+        ]
+        .iter()
+        .for_each(|f| assert!(art.join(f).exists(), "{f} is written"));
+        let normal = fs::read(art.join("hop_n.png")).unwrap();
+        assert!(
+            !normal.windows(4).any(|w| w == b"sRGB"),
+            "a normal map is data, with no colour profile"
+        );
+        assert!(fs::read(art.join("hop.png")).unwrap().windows(4).any(|w| w == b"sRGB"));
+        let depth = fs::read(art.join("hop_d.png")).unwrap();
+        assert_eq!((depth[24], depth[25]), (16, 4), "depth is 16-bit grey with alpha");
+        let tres = fs::read_to_string(art.join("hop.tres")).unwrap();
+        assert!(tres.contains("[sub_resource type=\"CanvasTexture\" id=\"CanvasTexture_1\"]"));
+        assert!(tres.contains("atlas = SubResource(\"CanvasTexture_1\")"));
+        let uids = |f: &str| sprites::header_uid(&fs::read_to_string(art.join(f)).unwrap()).unwrap();
+        let before = (uids("hop-glow.tres"), uids("hop_lit.tscn"));
+        godot(&path, None, false, &look(1.0), &PACKING, &shown(true)).unwrap();
+        assert_eq!(
+            (uids("hop-glow.tres"), uids("hop_lit.tscn")),
+            before,
+            "re-exports keep their uids"
+        );
+        let Some(binary) = godot_binary() else {
+            eprintln!("no godot on PATH (or $GODOT): skipping the import check");
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        };
+        fs::write(
+            project.join("project.godot"),
+            "config_version=5\n\n[application]\n\nconfig/name=\"klad lit\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("lit.gd"), LIT).unwrap();
+        godot_run(&binary, &project, &["--import"]);
+        let text = godot_run(&binary, &project, &["--script", "res://lit.gd"]);
+        assert!(!text.contains("SHADER ERROR"), "the shader compiles:\n{text}");
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("RESULT "))
+            .unwrap_or_else(|| panic!("no result from godot:\n{text}"));
+        let got: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(got["atlas"], "CanvasTexture", "{got}");
+        assert_eq!(got["maps"], serde_json::json!([true, true, 0.372]));
+        assert_eq!(
+            got["glow"],
+            serde_json::json!([1, 3, true]),
+            "an unshaded glow child plays the same frames"
+        );
+        assert_eq!(got["shadows"][0], true);
+        assert_eq!(got["shadows"][2], true);
+        assert_eq!(
+            got["shadows"][3], 2,
+            "only the edges facing away cast, so the sprite does not shadow itself"
+        );
+        assert!(got["shader"].as_u64().unwrap() >= 10, "{got}");
+        assert_eq!(got["params"], true);
+        assert_eq!(
+            got["lit"],
+            serde_json::json!(["CanvasModulate", "AnimatedSprite2D", "PointLight2D", "Camera2D"])
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sheets_and_frames_carry_their_maps_in_the_same_places() {
+        let dir = std::env::temp_dir().join(format!("draw-sprites-maps-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = hop(&dir);
+        let mut bundle = Bundle::open(&path).unwrap();
+        bundle
+            .apply(&klad_core::ops::parse_lines(r#"{"op":"maps","surface":{"bevel":3}}"#).unwrap())
+            .unwrap();
+        let mapped = Look {
+            maps: Map::list("normal,depth,emission").unwrap(),
+            ..look(1.0)
+        };
+        sheet(&path, "all", &mapped, &PACKING, None).unwrap();
+        let read = |f: &str| {
+            let bytes = fs::read(dir.join(f)).unwrap();
+            let size = (
+                u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+                u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+            );
+            (bytes, size)
+        };
+        let (colour, size) = read("hop-sheet.png");
+        let (normal, normal_size) = read("hop-sheet_n.png");
+        assert_eq!(size, normal_size, "the map page is the colour page's size");
+        let decode = |bytes: &[u8]| klad_render::assets::decode(bytes).unwrap();
+        let (c, n) = (decode(&colour), decode(&normal));
+        let covered = |p: &klad_render::assets::Rgba, i: usize| p.pixels[i * 4 + 3] > 0;
+        let same = (0..(size.0 * size.1) as usize)
+            .filter(|i| covered(&c, *i) == covered(&n, *i))
+            .count();
+        assert!(
+            same as f32 > 0.99 * (size.0 * size.1) as f32,
+            "every picture sits in the same place on both pages"
+        );
+        let json: Value = serde_json::from_str(&fs::read_to_string(dir.join("hop-sheet.json")).unwrap()).unwrap();
+        assert_eq!(json["meta"]["maps"]["normal"], serde_json::json!(["hop-sheet_n.png"]));
+        frames(&path, "hop", &mapped, None).unwrap();
+        assert!(dir.join("hop-hop/hop-0000_n.png").exists() && dir.join("hop-hop/hop-0005_d.png").exists());
+        let flat = Look {
+            layer: Some("ball".into()),
+            ..mapped
+        };
+        assert!(
+            sheet(&path, "all", &flat, &PACKING, None).is_err(),
+            "maps are for the whole picture"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -3197,10 +3197,13 @@ impl Editor {
                 self.brush
             )
         })?;
-        let def = match &self.custom {
+        let mut def = match &self.custom {
             Some(def) => def.clone(),
             None => self.tuning.shape(base),
         };
+        if self.tilted_brush() {
+            def.color = Some(klad_core::brushes::ColorDef::tilted());
+        }
         Ok((pick_id(&self.brush, &def, &self.embedded), def))
     }
 
@@ -3807,6 +3810,7 @@ impl Editor {
             },
         ));
         self.map_overlay(ui, view, rect);
+        self.occluder_overlay(ui, view, rect);
         self.parallax(ui, view, rect);
         self.prepare_typing(&ctx, view, rect);
         let hover = ui
@@ -5213,12 +5217,16 @@ impl Editor {
         });
         self.set(&id, props)?;
         self.depth_section(ui, &layer)?;
+        self.light_section(ui, &layer)?;
         self.adjust_section(ui, &layer)?;
         self.effects_section(ui, &layer)?;
         self.animation_section(ui, &id)
     }
 
     fn colour_panel(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        if self.on_normal_layer() {
+            return self.normal_panel(ui);
+        }
         let mut picked: Option<[f32; 4]> = None;
         let mut hsva = self.hsva;
         ui.horizontal(|ui| {

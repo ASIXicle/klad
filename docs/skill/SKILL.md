@@ -211,6 +211,27 @@ klad font art.klad ~/fonts/Signage.ttf               a font file of your own
 - Text: `font=` takes a family that comes with klad (`klad fonts`: sans, serif, mono, display, handwriting and pixel families such as Inter, Cinzel, Bangers, Caveat, Press Start 2P), a family and style (`"Barlow Bold"`, `"Inter Black"`), or a font file already in the bundle. The file is copied into the bundle's `fonts/` folder with its licence, so the drawing renders the same on every machine; the node then names the file (`Cinzel.ttf`). A family klad does not ship but Google Fonts has is downloaded first (`klad fonts --search`, `--get`). Families that come in every weight take `weight=` (100 to 900, 400 regular, 700 bold); `"Inter Bold"` sets it. Text is shaped like a browser does it (kerning, ligatures, accents). `text` takes new lines (`$'line one\nline two'` in bash), `x` is the left, centre or right of each line (`align`), `y` the top of the first line; `tracking` is extra px between letters, `leading` the line height as a multiple of the size; fill and `stroke` colour and outline it, and a gradient fill gilds it.
 - Lettering on a prop (a sign, a label): put the text on a vector layer clipped to the board's paint layer so it never leaves the board, give that layer a small `shadow` effect for depth, and lay a few faint grain strokes over it on a multiply layer clipped to the same base so the letters sit in the surface (`samples/sign`). The user types text in the editor with T and picks fonts from a list drawn in each font.
 
+## Light maps
+
+```
+klad maps art.klad --on bevel=10 profile=round        the drawing's surface; klad surface art.klad g2 bevel=6 gives a top layer its own
+klad set art.klad l7 map=height                       a height layer: paint white to raise, black to lower (by range px)
+klad stroke art.klad l8 --normal nw --brush soft --size 30 --path 'M...'   a normal layer paints directions
+klad set art.klad l3 shine=0.5 specular=#ffe0b0       the specular map; emissive=true makes a layer glow; z=12 brings it nearer
+klad lights art.klad --add point --at 300,120 --height 120
+klad render art.klad --lit --scale 0.5                the picture lit through its maps; --map normal|height|specular|emission|depth|occlusion shows one
+klad check art.klad --maps --all                      what reads wrong under light
+klad export art.klad --godot ../game/art --occluders --shaders occlusion
+```
+
+- When a game wants them: the user says the game lights its sprites (Godot's `PointLight2D`, a day and night cycle, torches, a player's lamp). A painted picture that is only ever shown as it is needs none. Turn them on per drawing; they change nothing in the picture.
+- The order: turn the maps on and set the surface (bevel about the width of the rounded edge you want, `pillow` for soft forms, `chamfer` for cut stone, `flat` where only paint should shape it); give a part that stands apart (a head over a body, a crate in front of a wall) a surface of its own; shape what the bevel cannot with height layers (soft brushes make slopes, hard ones plateaus); set shine and glow; light it (`klad lights`, `klad render --lit`), from two sides, and look; `klad check --maps --all`; export.
+- Reading a normal map render: flat facing out is lilac `#8080ff`; red grows where the surface faces right, falls where it faces left; green grows where it faces up, falls where it faces down; blue under 128 faces into the picture, which is wrong (`check` reports it). A rim that shows on only some sides, or a bright edge where two parts meet, means a surface needs its own or a height layer is off.
+- Lit renders: light from the side the picture's own shading comes from, or the light will fight the paint. Dark materials hardly change under light; judge them on the normal map.
+- Normal layers paint directions: `--normal` takes `out` (flattens), `n`, `ne`, `e`, `se`, `s`, `sw`, `w`, `nw`, `n-steep` and the like, or x,y (how far the surface leans right and down). They mix over the drawing's own normals by their alpha, so a soft brush blends.
+- Pixel art: the maps step by whole pixels with normals from a palette of 9 directions (`klad surface sprite.klad --directions 17` for 17); paint a normal pixel layer with `klad pixel ... --normal nw`. Keep the bevel at 1 to 3 px.
+- Exports: `--maps normal,specular` (or `all`) writes the maps beside a PNG, frames or a sheet in the same layout (`art_n.png`); with the maps on, `--godot` makes the sprite lit by Godot's lights and writes `<name>_lit.tscn` to try it. `--occluders` adds shadows from the silhouette, `--shaders fog,rim,occlusion` a sample shader that reads the depth, height or occlusion map.
+
 ## Path points
 
 ```

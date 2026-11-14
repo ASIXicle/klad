@@ -3,12 +3,13 @@ use crate::color;
 use crate::messages::Tone;
 use crate::theme::Hint;
 use anyhow::Result;
-use egui::{Color32, Key, Mesh, Rect, TextureHandle, TextureOptions, pos2, vec2};
+use egui::{Color32, Key, Mesh, Rect, Sense, Stroke, TextureHandle, TextureOptions, pos2, vec2};
 use klad_core::doc::{Document, Kind, Layer};
-use klad_core::maps::{Light, LightKind, Maps, Profile, Role, Surface};
+use klad_core::maps::{Light, LightKind, Maps, Profile, Role, Surface, decoded, encoded, leaning, palette};
 use klad_core::ops::Op;
 use klad_render::Frame;
 use klad_render::maps::{Lit, Map};
+use klad_render::occluders::Polygon;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -40,13 +41,94 @@ struct Want {
     kind: Option<Map>,
 }
 
+type Traced = ((u64, u32), Vec<Polygon>);
+type Tracing = ((u64, u32), Receiver<Result<Vec<Polygon>>>);
+
 #[derive(Default)]
 pub(super) struct MapsView {
     pub(super) show: Option<Show>,
+    pub(super) outlines: bool,
+    pub(super) tilt: bool,
     want: Option<Want>,
     job: Option<(Want, Receiver<Result<Ready>>)>,
     lit: Option<(Want, Arc<Lit>)>,
     texture: Option<(Want, Option<[f32; 2]>, usize, TextureHandle)>,
+    traced: Option<Traced>,
+    tracing: Option<Tracing>,
+}
+
+fn sphere(ui: &mut egui::Ui, current: [f32; 3], size: f32) -> (egui::Response, Option<[f32; 3]>) {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "the direction"));
+    let (c, r) = (rect.center(), size * 0.5 - 3.0);
+    let (rings, around) = (16usize, 48usize);
+    let mut mesh = Mesh::default();
+    let colour = |x: f32, y: f32| {
+        let [cr, cg, cb] = encoded(leaning(x, y)).map(|v| (v * 255.0).round() as u8);
+        Color32::from_rgb(cr, cg, cb)
+    };
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: c,
+        uv: egui::epaint::WHITE_UV,
+        color: colour(0.0, 0.0),
+    });
+    (1..=rings).for_each(|k| {
+        let rho = k as f32 / rings as f32;
+        (0..around).for_each(|a| {
+            let t = a as f32 / around as f32 * std::f32::consts::TAU;
+            let (x, y) = (rho * t.cos(), rho * t.sin());
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: c + vec2(x, y) * r,
+                uv: egui::epaint::WHITE_UV,
+                color: colour(x, y),
+            });
+        });
+    });
+    let at = |k: usize, a: usize| (1 + (k - 1) * around + a % around) as u32;
+    (0..around).for_each(|a| mesh.indices.extend([0, at(1, a), at(1, a + 1)]));
+    (2..=rings).for_each(|k| {
+        (0..around).for_each(|a| {
+            mesh.indices.extend([
+                at(k - 1, a),
+                at(k, a),
+                at(k, a + 1),
+                at(k - 1, a),
+                at(k, a + 1),
+                at(k - 1, a + 1),
+            ])
+        })
+    });
+    let painter = ui.painter_at(rect);
+    painter.add(mesh);
+    painter.circle_stroke(c, r, Stroke::new(1.0, Color32::from_gray(30)));
+    let mark = c + vec2(current[0], -current[1]) * r;
+    painter.circle_stroke(mark, 5.0, Stroke::new(2.5, Color32::from_black_alpha(200)));
+    painter.circle_stroke(mark, 5.0, Stroke::new(1.2, Color32::WHITE));
+    let picked = (response.clicked() || response.dragged())
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+        .map(|p| {
+            let d = (p - c) / r;
+            leaning(d.x, d.y)
+        });
+    (response, picked)
+}
+
+fn lean_words(n: [f32; 3]) -> String {
+    let angle = n[2].clamp(-1.0, 1.0).acos().to_degrees();
+    if angle < 1.0 {
+        return "facing out".into();
+    }
+    let side = |v: f32, plus: &str, minus: &str| match v {
+        v if v > 0.15 => plus.to_string(),
+        v if v < -0.15 => minus.to_string(),
+        _ => String::new(),
+    };
+    let way: Vec<String> = [side(n[1], "up", "down"), side(n[0], "right", "left")]
+        .into_iter()
+        .filter(|w| !w.is_empty())
+        .collect();
+    format!("leaning {} by {angle:.0} degrees", way.join(" and "))
 }
 
 fn preview_scale(doc: &Document) -> f32 {
@@ -70,11 +152,13 @@ fn pointer_light(doc: &Document, at: [f32; 2]) -> Light {
     }
 }
 
-pub(super) const NEXT: [Option<Map>; 5] = [
+pub(super) const NEXT: [Option<Map>; 7] = [
     Some(Map::Normal),
     Some(Map::Height),
     Some(Map::Specular),
     Some(Map::Emission),
+    Some(Map::Depth),
+    Some(Map::Occlusion),
     None,
 ];
 
@@ -255,6 +339,243 @@ impl Editor {
         }
     }
 
+    pub(super) fn on_normal_layer(&self) -> bool {
+        self.scene.active_layer().is_some_and(|l| l.map == Some(Role::Normal))
+    }
+
+    pub(super) fn tilted_brush(&self) -> bool {
+        self.maps.tilt && self.on_normal_layer()
+    }
+
+    pub(super) fn normal_panel(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        let current = decoded([self.color[0], self.color[1], self.color[2]]);
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            let (response, picked) = sphere(ui, current, 150.0);
+            response.hint(
+                "the direction the surface faces: click or drag where the light should catch it; the middle faces out",
+            );
+            chosen = picked;
+            ui.vertical(|ui| {
+                color::swatch(ui, self.color, false, 44.0).hint("the direction as a normal map colour");
+                ui.label(lean_words(current));
+                if ui
+                    .button("flatten")
+                    .hint("facing out (#8080ff): painting it takes the normals back towards flat")
+                    .clicked()
+                {
+                    chosen = Some([0.0, 0.0, 1.0]);
+                }
+                ui.checkbox(&mut self.maps.tilt, "direction from pen tilt")
+                    .hint("each dab paints the way the pen leans: lean it the way the surface faces");
+            });
+        });
+        let doc = &self.scene.bundle.doc;
+        let directions = match klad_render::maps::settings(doc).surface.directions_for(doc.pixel_art()) {
+            0 => 9,
+            d => d,
+        };
+        ui.label(match doc.pixel_art() {
+            true => "normal palette",
+            false => "directions",
+        });
+        ui.horizontal_wrapped(|ui| {
+            palette(directions).into_iter().for_each(|(name, n)| {
+                let [r, g, b] = encoded(n);
+                let close = current.iter().zip(n).map(|(a, b)| a * b).sum::<f32>() > 0.999;
+                let swatch = color::swatch(ui, [r, g, b, 1.0], close, 24.0);
+                swatch.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name.as_str()));
+                if swatch.hint(format!("{name}: {}", lean_words(n))).clicked() {
+                    chosen = Some(n);
+                }
+            });
+        });
+        ui.label(
+            egui::RichText::new(
+                "a normal layer paints directions: any brush, its colour the way the surface faces, mixed over the drawing's own normals by how much it covers",
+            )
+            .color(crate::theme::WEAK),
+        );
+        if let Some(n) = chosen {
+            let [r, g, b] = encoded(n);
+            self.pick_new_colour([r, g, b, 1.0]);
+        }
+        Ok(())
+    }
+
+    pub(super) fn light_section(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
+        if self.scene.bundle.doc.maps.is_none()
+            || layer.map.is_some()
+            || matches!(layer.kind(), Kind::Adjust | Kind::Bones)
+        {
+            return Ok(());
+        }
+        ui.separator();
+        let id = layer.id.clone();
+        let mut props: Vec<(String, Value)> = Vec::new();
+        let paint = self.color;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("light");
+            if let Some(v) = self.number(
+                ui,
+                &format!("{id}.shine"),
+                "shine ",
+                layer.shine.unwrap_or(0.0),
+                0.0..=1.0,
+                0.01,
+                "how shiny it is under light, the specular map: 0 matte, 1 as shiny as it gets",
+            ) {
+                props.push(("shine".into(), if v <= 0.0 { Value::Null } else { json!(v) }));
+            }
+            let tint = layer.specular.as_deref().and_then(color::rgba_of).unwrap_or([1.0; 4]);
+            if color::swatch(ui, tint, false, crate::theme::TARGET)
+                .hint(format!(
+                    "the colour of its shine, {}; click to use the current colour",
+                    layer.specular.as_deref().unwrap_or("#ffffff")
+                ))
+                .clicked()
+            {
+                props.push(("specular".into(), json!(color::hex(paint))));
+            }
+            let mut glow = layer.emissive;
+            if ui
+                .checkbox(&mut glow, "emissive")
+                .hint(
+                    "it glows: drawn at full brightness whatever the light, in the emission map (windows, eyes, fire)",
+                )
+                .changed()
+            {
+                props.push(("emissive".into(), if glow { json!(true) } else { Value::Null }));
+            }
+            if let Some(v) = self.number(
+                ui,
+                &format!("{id}.z"),
+                "z ",
+                layer.z.unwrap_or(0.0),
+                -2000.0..=2000.0,
+                0.5,
+                "px nearer than the rest of its plane, for the depth map (below 0: farther)",
+            ) {
+                props.push(("z".into(), if v == 0.0 { Value::Null } else { json!(v) }));
+            }
+        });
+        self.set(&id, props)
+    }
+
+    pub(super) fn occluder_overlay(&mut self, ui: &egui::Ui, view: crate::view::View, rect: Rect) {
+        if !self.maps.outlines {
+            return;
+        }
+        let key = (self.scene.bundle.doc.rev, self.scene.frame);
+        if let Some((asked, rx)) = &self.maps.tracing
+            && let Ok(done) = rx.try_recv()
+        {
+            let asked = *asked;
+            self.maps.tracing = None;
+            match done {
+                Ok(rings) => self.maps.traced = Some((asked, rings)),
+                Err(e) => {
+                    self.maps.outlines = false;
+                    self.say(Tone::Error, format!("the occluders could not be traced: {e:#}"));
+                    return;
+                }
+            }
+        }
+        let stale = self.maps.traced.as_ref().is_none_or(|(k, _)| *k != key);
+        if stale && self.maps.tracing.is_none() {
+            let doc = self.scene.bundle.doc.clone();
+            let rasters = self.scene.rasters_now();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let options = klad_render::export::Options {
+                    scale: 1.0,
+                    background: false,
+                    references: false,
+                    detail: 1.0,
+                };
+                let traced =
+                    klad_render::export::render(&doc, key.1, &rasters, &klad_render::export::Target::Frame, options)
+                        .and_then(|image| klad_render::read_rgba8(&image))
+                        .map(|picture| {
+                            let alpha: Vec<f32> = picture.rgba.chunks(4).map(|p| p[3] as f32 / 255.0).collect();
+                            klad_render::occluders::polygons(
+                                &alpha,
+                                picture.width as usize,
+                                picture.height as usize,
+                                klad_render::occluders::TOLERANCE,
+                            )
+                        });
+                let _ = tx.send(traced);
+                ctx.request_repaint();
+            });
+            self.maps.tracing = Some((key, rx));
+        }
+        if self.maps.tracing.is_some() {
+            ui.ctx().request_repaint();
+        }
+        let Some((_, rings)) = &self.maps.traced else {
+            return;
+        };
+        let painter = ui.painter().with_clip_rect(rect);
+        rings.iter().for_each(|ring| {
+            let mut points: Vec<egui::Pos2> = ring.iter().map(|p| self.screen(view, rect, vec2(p[0], p[1]))).collect();
+            if let Some(first) = points.first().copied() {
+                points.push(first);
+            }
+            painter.add(egui::Shape::line(
+                points.clone(),
+                Stroke::new(3.0, Color32::from_black_alpha(160)),
+            ));
+            painter.add(egui::Shape::line(
+                points,
+                Stroke::new(1.5, Color32::from_rgb(255, 215, 50)),
+            ));
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) fn occluders_traced(&self) -> Option<usize> {
+        self.maps.traced.as_ref().map(|(_, rings)| rings.len())
+    }
+
+    fn findings_list(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        let Some(found) = self.checks.maps.clone() else {
+            return Ok(());
+        };
+        ui.separator();
+        ui.label(egui::RichText::new("Checked").strong());
+        if found.is_empty() {
+            ui.label("the light maps look right on every frame");
+            return Ok(());
+        }
+        let mut go = None;
+        found.iter().for_each(|f| {
+            let [x, y, w, h] = f.area.map(|v| v.round());
+            if ui
+                .selectable_label(
+                    f.frame == self.scene.frame,
+                    format!("frame {}  {}  at {x},{y} {w}x{h}", f.frame, f.kind),
+                )
+                .hint(&f.note)
+                .clicked()
+            {
+                go = Some((f.frame, f.area));
+            }
+        });
+        if let Some((frame, area)) = go {
+            self.go_to(frame)?;
+            self.frame_area(area);
+        }
+        Ok(())
+    }
+
+    fn frame_area(&mut self, area: [f32; 4]) {
+        if let Some(view) = self.view.as_mut() {
+            view.center = vec2(area[0] + area[2] / 2.0, area[1] + area[3] / 2.0);
+        }
+    }
+
     fn set_maps(&mut self, maps: Option<Maps>) -> Result<()> {
         self.apply(vec![Op::Maps(maps)])
     }
@@ -393,7 +714,18 @@ impl Editor {
                 show = None;
             }
             Map::ALL.iter().for_each(|m| {
-                if ui.selectable_label(show == Some(Show::Map(*m)), m.name()).clicked() {
+                if ui
+                    .selectable_label(show == Some(Show::Map(*m)), m.name())
+                    .hint(match m {
+                        Map::Normal => "which way each pixel faces, as Godot reads it (green up)",
+                        Map::Height => "how high the surface rises, white highest",
+                        Map::Specular => "how shiny it is, and in what colour",
+                        Map::Emission => "what glows whatever the light",
+                        Map::Depth => "how near each pixel is: the plane's depth, z and height, near is white",
+                        Map::Occlusion => "creases and the foot of raised forms, darker",
+                    })
+                    .clicked()
+                {
                     show = Some(Show::Map(*m));
                 }
             });
@@ -427,6 +759,11 @@ impl Editor {
             ui.separator();
             self.layer_maps(ui, &layer)?;
         }
+        ui.horizontal_wrapped(|ui| {
+            self.command_check(ui, crate::commands::Cmd::CheckMaps, "check the maps");
+            self.command_check(ui, crate::commands::Cmd::ShowOccluders, "occluders");
+        });
+        self.findings_list(ui)?;
         ui.separator();
         ui.label(egui::RichText::new("Preview lights").strong());
         let mut next = current.clone();

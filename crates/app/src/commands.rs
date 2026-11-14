@@ -16,6 +16,8 @@ pub enum Cmd {
     LightPreview,
     MapView,
     LitView,
+    ShowOccluders,
+    CheckMaps,
     MakeRepeat,
     MakeScatter,
     MakeMirror,
@@ -528,7 +530,7 @@ use Repeat as R;
 use Trigger as T;
 
 impl Cmd {
-    pub const ALL: [Cmd; 201] = [
+    pub const ALL: [Cmd; 203] = [
         Cmd::Brush,
         Cmd::Eraser,
         Cmd::Fill,
@@ -541,6 +543,8 @@ impl Cmd {
         Cmd::LightPreview,
         Cmd::MapView,
         Cmd::LitView,
+        Cmd::ShowOccluders,
+        Cmd::CheckMaps,
         Cmd::MakeRepeat,
         Cmd::MakeScatter,
         Cmd::MakeMirror,
@@ -849,7 +853,25 @@ impl Cmd {
                 G::View,
                 T::Press(const { &[plain(Key::M)] }),
                 R::No,
-                "show the normal, height, specular and emission maps in turn instead of the picture, then the picture again",
+                "show the normal, height, specular, emission, depth and occlusion maps in turn instead of the picture, then the picture again",
+            ),
+            Cmd::ShowOccluders => spec(
+                "view.occluders",
+                "show the occluders",
+                icon::SHAPES,
+                G::View,
+                T::None,
+                R::No,
+                "outline the shadow shapes a Godot export with shadows traces from the silhouette of this frame",
+            ),
+            Cmd::CheckMaps => spec(
+                "view.check-maps",
+                "check the light maps",
+                icon::SPARKLE,
+                G::View,
+                T::None,
+                R::No,
+                "look over the light maps of every frame: normals into the surface, layers that read flat, map paint where nothing is drawn, glow past the drawing, maps that jump while the picture holds",
             ),
             Cmd::LitView => spec(
                 "view.lit",
@@ -2681,6 +2703,8 @@ impl Cmd {
             Cmd::MapsPane => "Light maps",
             Cmd::MapView => "Next light map",
             Cmd::LitView => "Lit",
+            Cmd::ShowOccluders => "Occluders",
+            Cmd::CheckMaps => "Check the light maps",
             Cmd::PixelGrid => "Pixel grid",
             Cmd::WrapCanvas => "Tile: wrap at the edges",
             Cmd::TileSize => "Tileset: cut into tiles…",
@@ -3050,6 +3074,8 @@ pub const MENUS: [Menu; 9] = [
             Line,
             Run(Cmd::MapView),
             Run(Cmd::LitView),
+            Run(Cmd::CheckMaps),
+            Sub("Overlays", &[Run(Cmd::ShowOccluders)]),
             Line,
             Run(Cmd::CompareReference),
         ],

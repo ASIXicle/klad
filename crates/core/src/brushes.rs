@@ -148,11 +148,24 @@ pub struct ColorDef {
     pub pressure: Option<Curve>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub along: f32,
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub facing: bool,
+}
+
+fn is_off(v: &bool) -> bool {
+    !*v
 }
 
 impl ColorDef {
     pub fn uses_second(&self) -> bool {
         self.pressure.is_some() || self.along > 0.0
+    }
+
+    pub fn tilted() -> Self {
+        Self {
+            facing: true,
+            ..Self::default()
+        }
     }
 }
 

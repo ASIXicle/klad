@@ -6248,3 +6248,184 @@ fn the_light_maps_panel_turns_maps_on_gives_layers_a_role_and_shows_the_maps() {
     assert_eq!(h.state().is_on(Cmd::LitView), Some(false));
     let _ = std::fs::remove_dir_all(&path);
 }
+
+fn tilted_line(h: &mut Harness<'static, Editor>, from: egui::Pos2, to: egui::Pos2, tilt: (f32, f32)) {
+    let rect = h.state().canvas_rect;
+    let ctx = h.ctx.clone();
+    let start = std::time::Instant::now();
+    (0..=12).for_each(|i| {
+        let phase = match i {
+            0 => crate::pen::Phase::Down,
+            12 => crate::pen::Phase::Up,
+            _ => crate::pen::Phase::Move,
+        };
+        let event = crate::pen::PenEvent {
+            phase,
+            pos: from + (to - from) * (i as f32 / 12.0),
+            pressure: 0.8,
+            tilt,
+            eraser: false,
+            tablet: true,
+            device: 3,
+            at: start + std::time::Duration::from_millis(i * 12),
+        };
+        h.state_mut().on_pen(&ctx, event, rect, true).unwrap();
+    });
+    h.run_steps(3);
+}
+
+fn painted_normal(h: &Harness<'static, Editor>, cel: &str, x: usize, y: usize) -> [f32; 3] {
+    let rasters = h.state().scene.rasters_now();
+    let raster = rasters.get(cel).unwrap();
+    let tile = raster.get(x / klad_brush::TILE, y / klad_brush::TILE).unwrap();
+    let at = ((y % klad_brush::TILE) * klad_brush::TILE + x % klad_brush::TILE) * 4;
+    let a = tile[at + 3].to_f32();
+    assert!(a > 0.5, "painted at {x},{y}");
+    klad_core::maps::decoded([0, 1, 2].map(|c| tile[at + c].to_f32() / a))
+}
+
+#[test]
+fn a_normal_layer_paints_the_direction_picked_on_the_sphere_and_the_way_the_pen_leans() {
+    let path = sample("normals");
+    let mut h = harness(editor(&path), vec2(1440.0, 1200.0));
+    h.state_mut()
+        .apply(
+            parse_lines(
+                r#"{"op":"maps","surface":{"bevel":8}}
+{"op":"set","id":"l4","map":"normal"}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    activate(&mut h, "shade");
+    h.state_mut().tool = Tool::Brush;
+    h.run_steps(3);
+    assert!(h.state().on_normal_layer());
+    let sphere = h.get_by_label("the direction").rect();
+    click(&mut h, sphere.center() + vec2(sphere.width() * 0.35, 0.0));
+    h.run_steps(2);
+    let picked = klad_core::maps::decoded([0, 1, 2].map(|c| h.state().color[c]));
+    assert!(
+        picked[0] > 0.5 && picked[1].abs() < 0.1,
+        "a click right of the middle faces right: {picked:?}"
+    );
+    let (a, b) = (canvas_at(&h, 120.0, 150.0), canvas_at(&h, 260.0, 150.0));
+    tilted_line(&mut h, a, b, (0.0, 0.0));
+    let n = painted_normal(&h, "c4", 190, 150);
+    assert!(n[0] > 0.5, "the stroke paints the picked direction: {n:?}");
+    h.get_by_label("flatten").click();
+    h.run_steps(2);
+    let out = klad_core::maps::decoded([0, 1, 2].map(|c| h.state().color[c]));
+    assert!(out[2] > 0.999, "flatten picks facing out");
+    h.get_by_label("ne").click();
+    h.run_steps(2);
+    let ne = klad_core::maps::decoded([0, 1, 2].map(|c| h.state().color[c]));
+    assert!(
+        ne[0] > 0.4 && ne[1] > 0.4,
+        "the north-east lean from the directions row: {ne:?}"
+    );
+    h.get_by_label("direction from pen tilt").click();
+    h.run_steps(2);
+    let (a, b) = (canvas_at(&h, 120.0, 260.0), canvas_at(&h, 260.0, 260.0));
+    tilted_line(&mut h, a, b, (0.0, -0.6));
+    let n = painted_normal(&h, "c4", 190, 260);
+    assert!(
+        n[1] > 0.4 && n[0].abs() < 0.1,
+        "a pen leaning up paints a surface facing up: {n:?}"
+    );
+    let brush = h
+        .state()
+        .scene
+        .bundle
+        .read_strokes("l4", "c4")
+        .unwrap()
+        .last()
+        .unwrap()
+        .brush
+        .clone();
+    assert!(
+        h.state()
+            .scene
+            .bundle
+            .brushes()
+            .unwrap()
+            .get(&brush)
+            .is_some_and(|d| d.color.is_some_and(|c| c.facing)),
+        "the stroke's brush takes its colour from the tilt, kept in the bundle as {brush}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_exported() {
+    let path = sample("shine");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
+        p.collapsed = false;
+    }
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
+        .unwrap();
+    activate(&mut h, "lines");
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::CheckBox, "emissive").click();
+    h.run_steps(3);
+    assert!(
+        h.state().scene.bundle.doc.find_layer("lines").unwrap().emissive,
+        "the box makes it glow"
+    );
+    let id = h.state().scene.bundle.doc.find_layer("lines").unwrap().id.clone();
+    h.state_mut().edits.insert(format!("{id}.shine"), 0.6);
+    h.state_mut().edits.insert(format!("{id}.z"), 12.0);
+    h.run_steps(4);
+    let lines = h.state().scene.bundle.doc.find_layer("lines").unwrap().clone();
+    assert_eq!(
+        (lines.shine, lines.z),
+        (Some(0.6), Some(12.0)),
+        "shine and z from the fields"
+    );
+    [
+        Pane::Tool,
+        Pane::Brush,
+        Pane::Layers,
+        Pane::Inspector,
+        Pane::Preview,
+        Pane::Notes,
+        Pane::History,
+    ]
+    .into_iter()
+    .filter(|pane| h.state().settings.layout.is_open(*pane))
+    .collect::<Vec<_>>()
+    .into_iter()
+    .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    h.run_steps(3);
+    h.state_mut().invoke(Cmd::ShowOccluders).unwrap();
+    settle(&mut h, |ed| ed.occluders_traced().is_some_and(|n| n > 0));
+    assert_eq!(h.state().is_on(Cmd::ShowOccluders), Some(true));
+    let found = super::checks::map_findings(
+        r#"{"frames":24,"findings":[{"kind":"flat","frame":3,"area":[10,20,30,40],"pixels":900,"note":"sky reads flat under light"}]}"#,
+    )
+    .unwrap();
+    h.state_mut().checks.maps = Some(found);
+    h.run_steps(3);
+    assert_eq!(h.state().is_on(Cmd::CheckMaps), Some(true));
+    h.get_by_label_contains("frame 3  flat").click();
+    h.run_steps(3);
+    assert_eq!(h.state().scene.frame, 3, "a click on a finding goes to its frame");
+    let centre = h.state().view.unwrap().center;
+    assert_eq!((centre.x, centre.y), (25.0, 40.0), "and to its place");
+    h.state_mut().export.what = super::export::What::Sheet;
+    h.state_mut().windows.export = true;
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::CheckBox, "normal").click();
+    h.get_by_role_and_label(Role::CheckBox, "shadows").click();
+    h.run_steps(2);
+    let form = h.state().export.clone();
+    assert_eq!(form.maps, vec![klad_render::maps::Map::Normal]);
+    assert!(form.occluders);
+    let args = super::export::args(Path::new("/w/a.klad"), Path::new("/w"), 0, &form).join(" ");
+    assert!(args.ends_with("--maps normal"), "{args}");
+    let _ = std::fs::remove_dir_all(&path);
+}

@@ -43,6 +43,8 @@ pub struct Surface {
     pub strength: f32,
     pub body: f32,
     pub range: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directions: Option<u32>,
 }
 
 impl Default for Surface {
@@ -53,12 +55,24 @@ impl Default for Surface {
             strength: 1.0,
             body: 1.0,
             range: 12.0,
+            directions: None,
         }
     }
 }
 
+pub const DIRECTIONS: [u32; 3] = [0, 9, 17];
+
 impl Surface {
+    pub fn directions_for(&self, pixel: bool) -> u32 {
+        self.directions.unwrap_or(if pixel { 9 } else { 0 })
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(d) = self.directions
+            && !DIRECTIONS.contains(&d)
+        {
+            bail!("surface: directions {d} is not 0 (smooth), 9 or 17");
+        }
         [
             ("bevel", self.bevel, 512.0),
             ("strength", self.strength, 10.0),
@@ -94,6 +108,124 @@ impl Role {
             Role::Specular => "specular",
             Role::Emission => "emission",
         }
+    }
+}
+
+const COMPASS: [(&str, [f32; 2]); 8] = [
+    ("n", [0.0, -1.0]),
+    ("ne", [1.0, -1.0]),
+    ("e", [1.0, 0.0]),
+    ("se", [1.0, 1.0]),
+    ("s", [0.0, 1.0]),
+    ("sw", [-1.0, 1.0]),
+    ("w", [-1.0, 0.0]),
+    ("nw", [-1.0, -1.0]),
+];
+pub const LEAN_DEGREES: f32 = 45.0;
+pub const STEEP_DEGREES: f32 = 70.0;
+
+pub fn unit(v: [f32; 3]) -> [f32; 3] {
+    let n = libm::sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    match n > 1e-9 {
+        true => v.map(|c| c / n),
+        false => [0.0, 0.0, 1.0],
+    }
+}
+
+pub fn leaning(x: f32, y: f32) -> [f32; 3] {
+    let along = libm::hypotf(x, y);
+    let (x, y, along) = match along > 1.0 {
+        true => (x / along, y / along, 1.0),
+        false => (x, y, along),
+    };
+    unit([x, -y, libm::sqrtf((1.0 - along * along).max(0.0))])
+}
+
+fn tipped(toward: [f32; 2], degrees: f32) -> [f32; 3] {
+    let len = libm::hypotf(toward[0], toward[1]).max(1e-6);
+    let s = libm::sinf(degrees.to_radians());
+    unit([
+        toward[0] / len * s,
+        -toward[1] / len * s,
+        libm::cosf(degrees.to_radians()),
+    ])
+}
+
+pub fn named(name: &str) -> Option<[f32; 3]> {
+    let name = name.trim().to_ascii_lowercase();
+    if name == "out" {
+        return Some([0.0, 0.0, 1.0]);
+    }
+    let (compass, degrees) = match name.strip_suffix("-steep") {
+        Some(c) => (c.to_string(), STEEP_DEGREES),
+        None => (name.clone(), LEAN_DEGREES),
+    };
+    COMPASS
+        .iter()
+        .find(|(n, _)| *n == compass)
+        .map(|(_, toward)| tipped(*toward, degrees))
+}
+
+pub fn palette(directions: u32) -> Vec<(String, [f32; 3])> {
+    let ring = |suffix: &str| -> Vec<(String, [f32; 3])> {
+        COMPASS
+            .iter()
+            .map(|(n, _)| {
+                let name = format!("{n}{suffix}");
+                let normal = named(&name).unwrap_or([0.0, 0.0, 1.0]);
+                (name, normal)
+            })
+            .collect()
+    };
+    let mut out = vec![("out".to_string(), [0.0, 0.0, 1.0])];
+    match directions {
+        9 => out.extend(ring("")),
+        17 => {
+            out.extend(ring(""));
+            out.extend(ring("-steep"));
+        }
+        _ => {}
+    }
+    out
+}
+
+pub fn nearest(normal: [f32; 3], choices: &[(String, [f32; 3])]) -> [f32; 3] {
+    choices
+        .iter()
+        .map(|(_, n)| *n)
+        .max_by(|a, b| {
+            let da = a[0] * normal[0] + a[1] * normal[1] + a[2] * normal[2];
+            let db = b[0] * normal[0] + b[1] * normal[1] + b[2] * normal[2];
+            da.total_cmp(&db)
+        })
+        .unwrap_or(normal)
+}
+
+pub fn encoded(normal: [f32; 3]) -> [f32; 3] {
+    normal.map(|c| (c * 0.5 + 0.5).clamp(0.0, 1.0))
+}
+
+pub fn decoded(rgb: [f32; 3]) -> [f32; 3] {
+    unit(rgb.map(|c| c * 2.0 - 1.0))
+}
+
+pub fn hex_of(normal: [f32; 3]) -> String {
+    let [r, g, b] = encoded(normal).map(|c| (c * 255.0).round() as u8);
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+pub fn direction(text: &str) -> Result<[f32; 3]> {
+    if let Some(n) = named(text) {
+        return Ok(n);
+    }
+    let parts: Vec<f32> = text
+        .split(',')
+        .map(|p| p.trim().parse::<f32>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| anyhow::anyhow!("{text:?} is not a direction: give x,y (how far it leans right and down, -1 to 1) or a name: out, n, ne, e, se, s, sw, w, nw, or n-steep and the like"))?;
+    match parts[..] {
+        [x, y] if x.is_finite() && y.is_finite() => Ok(leaning(x, y)),
+        _ => bail!("{text:?} is not a direction: give x,y, for example 0.5,-0.5 leans right and up"),
     }
 }
 
@@ -191,6 +323,10 @@ impl Default for Maps {
             lights: Vec::new(),
         }
     }
+}
+
+pub fn godot_shininess(shininess: f32) -> f32 {
+    ((libm::log2f((shininess * 4.0).max(2.0)) - 1.0) / 15.0).clamp(0.0, 1.0)
 }
 
 impl Maps {

@@ -3,6 +3,8 @@ use anyhow::{Result, bail};
 use klad_brush::BrushSet;
 use klad_core::bundle::{Bundle, write_atomic};
 use klad_render::export::{Options, Target, png8, png16, render};
+use klad_render::maps::Map;
+use klad_render::sprites::Pixels;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -15,6 +17,8 @@ pub struct Export {
     pub references: bool,
     pub variant: Option<String>,
     pub out: Option<PathBuf>,
+    pub maps: Vec<Map>,
+    pub invert: bool,
 }
 
 pub(crate) fn scale_tag(scale: f32) -> String {
@@ -55,6 +59,9 @@ pub fn run(path: &Path, opts: Export) -> Result<()> {
         );
     }
     let layer = opts.layer.as_deref().map(|key| doc.find_layer(key)).transpose()?;
+    if layer.is_some() && !opts.maps.is_empty() {
+        bail!("light maps are made for the whole picture: leave out --layer, or export the layer without --maps");
+    }
     klad_render::export::check_scale(doc, opts.scale)?;
     let detail = klad_render::export::detail_of(doc, opts.scale);
     let brushes = BrushSet::for_bundle(&bundle)?;
@@ -97,6 +104,18 @@ pub fn run(path: &Path, opts: Export) -> Result<()> {
     };
     write_atomic(&out, &bytes)?;
     println!("{}", out.display());
+    if !opts.maps.is_empty() {
+        let mut set = klad_render::maps::render(doc, opts.frame, &rasters, opts.scale)?;
+        if opts.invert {
+            set.invert_depth();
+        }
+        opts.maps.iter().try_for_each(|map| {
+            let file = crate::sprites::tagged(&out, map.suffix());
+            write_atomic(&file, &Pixels::of_map(&set, *map).png()?)?;
+            println!("{}", file.display());
+            Ok::<_, anyhow::Error>(())
+        })?;
+    }
     eprintln!(
         "{}x{}  {}-bit{}  {} KB  rendered {rendered:.0} ms, {:.0} ms in all",
         image.width(),
@@ -142,6 +161,8 @@ mod tests {
                 references: false,
                 variant: None,
                 out: Some(out.clone()),
+                maps: Vec::new(),
+                invert: false,
             },
         )
         .unwrap();

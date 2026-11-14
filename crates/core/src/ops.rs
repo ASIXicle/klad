@@ -33,6 +33,10 @@ const LAYER_KEYS: &[&str] = &[
     "depth",
     "surface",
     "map",
+    "shine",
+    "specular",
+    "emissive",
+    "z",
     "reference",
     "bones",
     "ik",
@@ -633,6 +637,8 @@ pub struct StrokeSpec {
     pub part: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<String>,
 }
 
 fn default_brush() -> String {
@@ -1606,7 +1612,13 @@ impl StrokeSpec {
         if taper.iter().any(|t| !(0.0..=10_000.0).contains(t)) {
             bail!("taper lengths must be within 0..10000 px");
         }
-        let color = parse_hex(&self.color)?;
+        let color = match &self.normal {
+            Some(text) => {
+                let [r, g, b] = crate::maps::encoded(crate::maps::direction(text)?);
+                [r, g, b, 1.0]
+            }
+            None => parse_hex(&self.color)?,
+        };
         let second = self.second.as_deref().map(parse_hex).transpose()?;
         let step = (self.speed / 200.0).clamp(1.0, 4.0);
         let dt = step / self.speed * 1000.0;

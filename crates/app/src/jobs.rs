@@ -19,6 +19,7 @@ pub enum Tag {
     Fonts,
     Install,
     Compare,
+    Maps,
 }
 
 #[derive(Clone)]

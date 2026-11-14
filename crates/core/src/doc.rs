@@ -253,6 +253,14 @@ pub struct Layer {
     pub surface: Option<crate::maps::Surface>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub map: Option<crate::maps::Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shine: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specular: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub emissive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<f32>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reference: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -640,6 +648,10 @@ impl Layer {
             depth: None,
             surface: None,
             map: None,
+            shine: None,
+            specular: None,
+            emissive: false,
+            z: None,
             reference: false,
             bones: Vec::new(),
             ik: Vec::new(),
@@ -1676,6 +1688,37 @@ impl Document {
                         role.name()
                     );
                 }
+                if layer.shine.is_some() || layer.specular.is_some() || layer.emissive || layer.z.is_some() {
+                    bail!(
+                        "layer {}: a map layer draws into the {} map, so it has no shine, glow or z of its own: set those on the layers it lies over",
+                        layer.id,
+                        role.name()
+                    );
+                }
+            }
+            if let Some(shine) = layer.shine
+                && (!shine.is_finite() || !(0.0..=1.0).contains(&shine))
+            {
+                bail!(
+                    "layer {}: shine {shine} is from 0 (matte) to 1 (as shiny as it gets)",
+                    layer.id
+                );
+            }
+            if let Some(colour) = &layer.specular {
+                parse_hex(colour).with_context(|| format!("layer {}: specular", layer.id))?;
+            }
+            if let Some(z) = layer.z
+                && (!z.is_finite() || z.abs() > 100_000.0)
+            {
+                bail!("layer {}: z {z} must be a number of px, nearer above 0", layer.id);
+            }
+            if matches!(layer.kind(), Kind::Adjust | Kind::Bones)
+                && (layer.shine.is_some() || layer.specular.is_some() || layer.emissive || layer.z.is_some())
+            {
+                bail!(
+                    "layer {}: shine, specular, emissive and z are for layers that draw: paint, vector and groups",
+                    layer.id
+                );
             }
             layer
                 .cels()

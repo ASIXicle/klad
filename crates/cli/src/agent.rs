@@ -219,6 +219,7 @@ pub struct Kinds {
     pub arcs: bool,
     pub bones: bool,
     pub weights: Option<String>,
+    pub occluders: bool,
 }
 
 pub fn overlay_flags(kinds: &str) -> Result<Kinds> {
@@ -235,6 +236,7 @@ pub fn overlay_flags(kinds: &str) -> Result<Kinds> {
                 "parts" => Kinds { parts: true, ..acc },
                 "arcs" => Kinds { arcs: true, ..acc },
                 "bones" => Kinds { bones: true, ..acc },
+                "occluders" => Kinds { occluders: true, ..acc },
                 w if w.starts_with("weights:") => Kinds {
                     weights: Some(w.trim_start_matches("weights:").to_string()),
                     bones: true,
@@ -247,7 +249,7 @@ pub fn overlay_flags(kinds: &str) -> Result<Kinds> {
                     ..acc
                 },
                 other => bail!(
-                    "unknown overlay {other:?}: use ids, bbox, grid, onion, parts, arcs, bones, weights:<bone> or all"
+                    "unknown overlay {other:?}: use ids, bbox, grid, onion, parts, arcs, bones, weights:<bone>, occluders or all"
                 ),
             })
         })
@@ -381,6 +383,26 @@ pub fn focus_view(bundle: &Bundle, id: &str, frame: u32, scale: Option<f32>) -> 
     })
 }
 
+pub fn outlines(bundle: &Bundle, frame: u32, rasters: &Rasters) -> Result<Vec<klad_render::occluders::Polygon>> {
+    let doc = &bundle.doc;
+    let options = klad_render::export::Options {
+        scale: 1.0,
+        background: false,
+        references: false,
+        detail: 1.0,
+    };
+    let image = klad_render::export::render(doc, frame, rasters, &klad_render::export::Target::Frame, options)?;
+    let picture = klad_render::read_rgba8(&image)?;
+    let (w, h) = (picture.width as usize, picture.height as usize);
+    let alpha: Vec<f32> = picture.rgba.chunks(4).map(|p| p[3] as f32 / 255.0).collect();
+    Ok(klad_render::occluders::polygons(
+        &alpha,
+        w,
+        h,
+        klad_render::occluders::TOLERANCE,
+    ))
+}
+
 pub struct Rendered {
     pub path: PathBuf,
     pub frame: Frame,
@@ -402,41 +424,46 @@ pub fn render_look(
     let brushes = BrushSet::for_bundle(bundle)?;
     let loaded = layers::load(bundle, frame, &brushes, use_cache)?;
     let kinds = look.kinds()?;
-    let overlay = (kinds.ids || kinds.bbox || kinds.grid || kinds.parts || kinds.arcs || kinds.bones)
-        .then(|| {
-            let mut found = if kinds.ids || kinds.bbox {
-                marks(bundle, frame, look.focus.as_deref(), look.depth)?
-            } else {
-                Vec::new()
-            };
-            if kinds.parts {
-                found.extend(crate::arcs::part_marks(bundle, frame)?);
-            }
-            Ok::<_, anyhow::Error>(Overlay {
-                marks: found,
-                boxes: kinds.bbox || kinds.parts,
-                ids: kinds.ids || kinds.parts,
-                grid: kinds.grid,
-                cells: bundle.doc.pixel_art(),
-                arcs: arcs_of(bundle, look, frame, kinds.arcs)?,
-                frame: Some(frame),
-                numbers: true,
-                bones: match kinds.bones {
-                    true => crate::rig::bones_at(bundle, frame)?,
-                    false => Vec::new(),
-                },
-                targets: match kinds.bones {
-                    true => crate::rig::targets_at(bundle, frame),
-                    false => Vec::new(),
-                },
-                heat: kinds
-                    .weights
-                    .as_deref()
-                    .map(|b| crate::rig::heat(bundle, b))
-                    .transpose()?,
+    let overlay =
+        (kinds.ids || kinds.bbox || kinds.grid || kinds.parts || kinds.arcs || kinds.bones || kinds.occluders)
+            .then(|| {
+                let mut found = if kinds.ids || kinds.bbox {
+                    marks(bundle, frame, look.focus.as_deref(), look.depth)?
+                } else {
+                    Vec::new()
+                };
+                if kinds.parts {
+                    found.extend(crate::arcs::part_marks(bundle, frame)?);
+                }
+                Ok::<_, anyhow::Error>(Overlay {
+                    marks: found,
+                    boxes: kinds.bbox || kinds.parts,
+                    ids: kinds.ids || kinds.parts,
+                    grid: kinds.grid,
+                    cells: bundle.doc.pixel_art(),
+                    arcs: arcs_of(bundle, look, frame, kinds.arcs)?,
+                    frame: Some(frame),
+                    numbers: true,
+                    bones: match kinds.bones {
+                        true => crate::rig::bones_at(bundle, frame)?,
+                        false => Vec::new(),
+                    },
+                    targets: match kinds.bones {
+                        true => crate::rig::targets_at(bundle, frame),
+                        false => Vec::new(),
+                    },
+                    heat: kinds
+                        .weights
+                        .as_deref()
+                        .map(|b| crate::rig::heat(bundle, b))
+                        .transpose()?,
+                    outlines: match kinds.occluders {
+                        true => outlines(bundle, frame, &loaded.rasters)?,
+                        false => Vec::new(),
+                    },
+                })
             })
-        })
-        .transpose()?;
+            .transpose()?;
     let onions = kinds
         .onion
         .then(|| onions(bundle, frame, &onion_layers(bundle, look)?, look, &brushes))

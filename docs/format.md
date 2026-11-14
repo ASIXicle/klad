@@ -119,6 +119,10 @@ A clip is `name` (unique), `from` and `to` (both included), `loop` (false) and `
 | `depth` | number | none | on a top-level layer or group: how far the plane is (0 near); drives the atmosphere and parallax |
 | `surface` | object | none | on a top-level layer or group: a surface of its own for the light maps (below), the same keys as `maps.surface` |
 | `map` | string | none | paint and vector layers: `height`, `normal`, `specular` or `emission`; the layer draws into that light map and never into the picture (below) |
+| `shine` | number | none (0) | paint, vector and group layers: how shiny under light, 0 (matte) to 1, the specular map (below); a group's goes to the layers in it that have none |
+| `specular` | colour | none (white) | the colour of the layer's shine |
+| `emissive` | bool | false | the layer glows: the emission map takes its colours where it shows (below) |
+| `z` | number | none (0) | px nearer than the rest of its plane, for the depth map; a group's adds to its layers' |
 | `reference` | bool | false | shown in the editor, left out of renders and exports (pictures to trace) |
 | `bones` | array | `[]` | bones layers: the skeleton (below) |
 | `ik` | array | `[]` | bones layers: the skeleton's IK constraints (below) |
@@ -364,7 +368,7 @@ Drawing a stroke: walk the samples, interpolate between them, stamp the tip ever
 
 ### Light maps
 
-Light maps are made from what is drawn, for a game's 2D lights: a **normal** map, a **height** map, a **specular** map and an **emission** map, each the size of the picture. klad makes them at render time; nothing about them is stored but the settings below and the map layers.
+Light maps are made from what is drawn, for a game's 2D lights: a **normal** map, a **height** map, a **specular** map, an **emission** map, a **depth** map and an **occlusion** map, each the size of the picture. klad makes them at render time; nothing about them is stored but the settings below and the map layers.
 
 `maps` holds the settings:
 
@@ -375,7 +379,7 @@ Light maps are made from what is drawn, for a game's 2D lights: a **normal** map
 | `shininess` | number | 24 | the light preview: the exponent of the highlights on the specular map, 1 to 512 |
 | `lights` | array | `[]` | preview lights (below) |
 
-A `surface` (in `maps` or on a top-level layer) has `bevel` (8: px the rim rounds over, in from the outline), `profile` (`round`, `chamfer`, `pillow` or `flat`), `strength` (1: how steep the slopes read), `body` (1: how much paint with body raises it, 0 for none) and `range` (12: px a white height layer raises it).
+A `surface` (in `maps` or on a top-level layer) has `bevel` (8: px the rim rounds over, in from the outline), `profile` (`round`, `chamfer`, `pillow` or `flat`), `strength` (1: how steep the slopes read), `body` (1: how much paint with body raises it, 0 for none), `range` (12: px a white height layer raises it) and `directions` (left out: 9 on a pixel drawing, smooth otherwise; 0 for smooth normals, 9 or 17 for a normal palette).
 
 A light has `kind` (`point` or `directional`), `at` (a point light's place on the canvas, or the direction x, y a directional light comes from, y down), `height` (a point light's px in front of the canvas, or a directional light's 0, along the picture, to 1, straight from the front), `color`, `energy` (1) and `range` (600: px where a point light has faded out).
 
@@ -384,8 +388,12 @@ How the maps come out, for a reader that wants to make its own:
 - **Surfaces.** Each visible top-level layer with blend `normal`, not a reference, not clipped and not a map layer, is part of a surface: its own when it has `surface`, the drawing's otherwise. Clipped layers belong to their base. Layers with another blend (shading) and adjustment layers are not part of any surface.
 - **Height.** A surface's height at a pixel adds three things. The **bevel**: the distance d from the pixel to the outline of the surface's layers (their alpha at 0.5), softened over about a twelfth of the bevel, gives `rise(d / bevel) x bevel`, where `rise(t)` is `sqrt(1 - (1 - t)^2)` for `round`, `t` for `chamfer`, `t^2 (3 - 2t)` for `pillow` and 0 for `flat`, and 1 past the bevel. The **paint body**: the height paint with body lays (stroke records with body, in the paint layers of the surface), eased as `1.6 tanh(h / 1.6)`, times `body` x 3 px. The **height layers** of the surface (map layers with `map: height`, clipped to one of its layers or inside it, or at the top for the drawing's surface): their alpha times `(2 L - 1) x range`, with L their luminance, so white raises, mid grey changes nothing and black lowers. The sum, times the square root of the surface's alpha, is lightly blurred.
 - **Normals.** A surface's normal is `normalize(-strength dh/dx, strength dh/dy, 1)` from the height's slope, with x right and y down on the canvas, so the map is OpenGL style: red is right, green is up, blue is out of the picture, stored as `(n + 1) / 2`.
-- **Composing.** Each pixel's normal and height mix the surfaces seen there, top layer first: a layer with alpha a takes a of what is still uncovered. Where nothing is drawn the normal faces out (`#8080ff`). Then the **normal layers** go over in stack order, their colour read as a normal the same way and mixed by their alpha; the **specular layers** go over a specular of 0 by their alpha with their luminance; the **emission layers** go over nothing like layers in the picture.
-- **The files.** A normal map is RGBA with the alpha of what is drawn; a height map is grey, its brightest pixel the highest point; a specular map is grey; an emission map is the colour of the emission layers with their alpha.
+- **Composing.** Each pixel's normal and height mix the surfaces seen there, top layer first: a layer with alpha a takes a of what is still uncovered. Where nothing is drawn the normal faces out (`#8080ff`). Then the **normal layers** go over in stack order, their colour read as a normal the same way and mixed by their alpha.
+- **Normal palettes.** With `directions` 9 a surface's normals are each taken to the nearest of: facing out, and the eight leans (n, ne, e, se, s, sw, w, nw) at 45 degrees; 17 adds the eight steep leans at 70 degrees. On a pixel drawing the maps are made at its real size, without the softening, and enlarged pixel for pixel, so the bevel steps by whole pixels and stays sharp.
+- **Shine and glow.** The picture is drawn once more with every layer's pixels in one colour (blend modes, effects and adjustment layers left out; masks, clipping and opacity kept), so what covers a layer covers its maps. The **specular** map is drawn with each layer in `shine` x `specular`, then the **specular layers** go over by their alpha with their colour. The **emission** map is drawn with the `emissive` layers in their own colours and the others black, its alpha the share of the emissive layers that shows; the **emission layers** go over it.
+- **Depth.** Each pixel's plane depth d is the `depth` of the top-level layers seen there, mixed like the normals; its elevation e is the height plus the `z` of the layers seen there (in px). With C the canvas's longest side, the depth map is `0.75 / (1 + max(d - e / C, -0.25))`: the front plane is 75% grey, depth 1 half of that, raised paint and `z` lighter; where nothing is drawn it is 0. `--invert` writes `1 - v`, far white.
+- **Occlusion.** From the elevation: at radii r of a quarter, a half, one and two bevels (1, 2, 4 and 8 px on a pixel drawing), how far the box-blurred elevation around a pixel stands above it, over r and clamped to 0 to 1; the map is `1 - 1.5 x` their mean, so creases and the foot of raised forms come out darker and the tops of forms white.
+- **The files.** A normal map is RGBA with the alpha of what is drawn, written as data (no colour profile); a height map is grey, its brightest pixel the highest point; a specular map is colour; an emission map is the colour of what glows with its alpha; a depth map is 16-bit grey with alpha; an occlusion map is grey.
 - **Lit.** The light preview colours a pixel `albedo x (ambient + sum of light colour x energy x fade x max(0, n . l)) + specular highlights`, with the emission over it; `l` points from the pixel to a point light (its px in front as z) or along a directional light, `fade` is `(1 - distance / range)^2` for a point light and 1 for a directional one, and highlights are `specular x (n . h)^shininess` with `h` halfway between `l` and the view.
 
 ## Format history
@@ -399,4 +407,4 @@ How the maps come out, for a reader that wants to make its own:
 | `klad/5` | `rev` and `nextId` leave `doc.json`, and new ids carry the tag of the copy that made them, so drawings diff and merge in git (2026-11-09). Older drawings open with their ids unchanged; their counters move to `.cache/copy.json`. |
 | `klad/6` | stroke files version 2: eraser, smudge and blender strokes record the marks they are attached to, and attached erasers erase only those (2026-11-09). Older drawings open unchanged, with nothing attached. |
 | `klad/7` | pixel layers: paint layers with `pixel`, pixel marks in stroke files (version 3), palette swatches with an `id` (2026-11-11), palette `variants` and `canvas.tile` (2026-11-12). Older drawings open unchanged. |
-| `klad/8` | light maps: the document's `maps`, a layer's `surface` and `map` (2026-11-14). Older drawings open unchanged, with the maps off. |
+| `klad/8` | light maps: the document's `maps`, a layer's `surface`, `map`, `shine`, `specular`, `emissive` and `z`, a surface's `directions` (2026-11-14). Older drawings open unchanged, with the maps off. |

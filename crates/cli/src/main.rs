@@ -47,6 +47,7 @@ use klad_core::retime::{Retime, RetimeSpec};
 use klad_core::stroke::{fills_of, strokes_of};
 use klad_core::timing::{CelAction, CelSpec, FrameSpec};
 use klad_core::tween::{Match, Spacing, Unpaired};
+use klad_render::maps::Map;
 use klad_render::{View, compose};
 use marks::{fill_json, hex8, stroke_json};
 use std::collections::BTreeMap;
@@ -543,8 +544,8 @@ enum Command {
         flags: EditFlags,
     },
     #[command(
-        about = "Light maps: show, set or turn off the drawing's normal, height, specular and emission maps",
-        long_about = "Light maps for 2D lighting in a game: a normal map (OpenGL style, green up, as Godot expects), a height map, a specular map and an emission map, made from what is drawn. Each layer at the top of the stack is part of the drawing's surface, or a surface of its own (klad set art.klad g2 surface.bevel=6); the surface rounds in from its outline by the bevel, rises where paint with body is thick, and follows the height layers painted on it (klad set art.klad l7 map=height: white raises, black lowers, by the range). Layers with map=normal, map=specular or map=emission paint those maps directly. Map layers are never drawn in the picture. See them with klad render --map normal, and lit with klad lights and klad render --lit.\n\n  klad maps art.klad\n  klad maps art.klad --on\n  klad maps art.klad bevel=12 profile=round strength=1.5 body=1 range=12\n  klad maps art.klad ambient=#30303c shininess=24\n  klad maps art.klad --off\n\nThe surface: bevel (px the rim rounds over), profile (round, chamfer, pillow or flat), strength (how steep the slopes read), body (how much paint with body raises it, 0 for none), range (px a white height layer raises). The light preview: ambient (the colour where no light reaches, like Godot's CanvasModulate) and shininess (how tight the highlights on the specular map are)."
+        about = "Light maps: show, set or turn off the drawing's normal, height, specular, emission, depth and occlusion maps",
+        long_about = "Light maps for 2D lighting in a game: a normal map (OpenGL style, green up, as Godot expects), a height map, a specular map, an emission map, a depth map and an occlusion map, made from what is drawn. Each layer at the top of the stack is part of the drawing's surface, or a surface of its own (klad surface art.klad g2 bevel=6); the surface rounds in from its outline by the bevel, rises where paint with body is thick, and follows the height layers painted on it (klad set art.klad l7 map=height: white raises, black lowers, by the range). Layers with map=normal, map=specular or map=emission paint those maps directly; strokes on a normal layer take a direction (klad stroke --normal nw). Map layers are never drawn in the picture. See them with klad render --map normal, and lit with klad lights and klad render --lit.\n\n  klad maps art.klad\n  klad maps art.klad --on\n  klad maps art.klad bevel=12 profile=round strength=1.5 body=1 range=12\n  klad maps art.klad ambient=#30303c shininess=24\n  klad maps art.klad --off\n\nThe surface: bevel (px the rim rounds over), profile (round, chamfer, pillow or flat), strength (how steep the slopes read), body (how much paint with body raises it, 0 for none), range (px a white height layer raises), directions (0 for smooth normals, 9 or 17 for a normal palette of whole directions, the default on pixel art). The light preview: ambient (the colour where no light reaches, like Godot's CanvasModulate) and shininess (how tight the highlights on the specular map are).\n\nLayers add to the maps with klad set: shine=0.6 (0 matte to 1) and specular=#ffd0a0 (the shine's colour) make the specular map; emissive=true makes a layer glow whatever the light (the emission map); z=12 brings a layer that many px nearer within its plane (the depth map). A plane's depth (klad set art.klad l1 depth=2) and the height set the rest of the depth map: near is white, the front plane 75% grey, depth 1 half of that. The occlusion map darkens creases and the foot of raised forms."
     )]
     Maps {
         bundle: PathBuf,
@@ -555,6 +556,25 @@ enum Command {
             long,
             help = "Turn the maps off: the surface and the lights are forgotten, map layers stay"
         )]
+        off: bool,
+        #[command(flatten)]
+        flags: EditFlags,
+    },
+    #[command(
+        about = "A layer's own surface for the light maps, or the drawing's: bevel, profile, strength, body, range and directions",
+        long_about = "Set the surface a layer at the top of the stack rounds in from its own outline, instead of being part of the drawing's surface; with no layer, the drawing's surface (which turns the maps on). With no settings it shows the surface.\n\n  klad surface art.klad l2 bevel=6 profile=pillow\n  klad surface sprite.klad l1 --directions 9\n  klad surface art.klad bevel=12\n  klad surface art.klad l2 --off\n\nbevel (px the rim rounds over), profile (round, chamfer, pillow or flat), strength, body, range and directions: 0 for smooth normals, 9 for facing out and the eight leans, 17 for those and the eight steep leans. A pixel drawing uses 9 unless told otherwise, so its normal map is painted in whole pixels from a normal palette, as pixel artists paint them by hand."
+    )]
+    Surface {
+        bundle: PathBuf,
+        #[arg(help = "A layer at the top of the stack (leave out for the drawing's surface), then key=value settings")]
+        args: Vec<String>,
+        #[arg(
+            long,
+            value_name = "0|9|17",
+            help = "Normals in a palette of 9 or 17 directions, or 0 for smooth"
+        )]
+        directions: Option<u32>,
+        #[arg(long, help = "The layer is part of the drawing's surface again")]
         off: bool,
         #[command(flatten)]
         flags: EditFlags,
@@ -965,10 +985,12 @@ enum Command {
         columns: Option<usize>,
         #[arg(
             long,
-            value_name = "normal|height|specular|emission",
+            value_name = "normal|height|specular|emission|depth|occlusion",
             help = "Render one of the light maps instead of the picture (see klad maps)"
         )]
         map: Option<String>,
+        #[arg(long, requires = "map", help = "With --map depth: far is white instead of near")]
+        invert: bool,
         #[arg(
             long,
             help = "Render the picture lit by the drawing's lights through its maps (see klad lights)"
@@ -1020,6 +1042,14 @@ enum Command {
             help = "The second colour, for brushes that mix towards it with pressure or along the stroke"
         )]
         second: Option<String>,
+        #[arg(
+            long,
+            visible_alias = "facing",
+            allow_hyphen_values = true,
+            conflicts_with = "color",
+            help = "On a normal layer: the direction the stroke paints instead of a colour, x,y (how far the surface leans right and down, -1 to 1) or a name: out (facing out, which flattens), n, ne, e, se, s, sw, w, nw, n-steep and the like"
+        )]
+        normal: Option<String>,
         #[command(flatten)]
         flags: EditFlags,
     },
@@ -1215,6 +1245,13 @@ enum Command {
         size: u32,
         #[arg(long, conflicts_with = "erase", help = "A palette name, a palette index or #rrggbb")]
         color: Option<String>,
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            conflicts_with_all = ["erase", "color"],
+            help = "On a normal layer: a direction from the drawing's normal palette instead of a colour: out (facing out), n, ne, e, se, s, sw, w, nw, n-steep and the like, or x,y taken to the nearest direction in the palette"
+        )]
+        normal: Option<String>,
         #[arg(long, help = "Clear these pixels instead of colouring them")]
         erase: bool,
         #[arg(long, default_value_t = 0)]
@@ -2069,6 +2106,12 @@ enum Command {
         frame: u32,
         #[arg(long, conflicts_with = "frame", help = "Every drawing on every frame, each once")]
         all: bool,
+        #[arg(
+            long,
+            conflicts_with = "layer",
+            help = "Look over the light maps instead: normals pointing into the surface, layers that read flat under light, map layers painted where nothing is drawn, glow bigger than what is drawn, and (with --all) seams where a map jumps between frames while the picture does not"
+        )]
+        maps: bool,
         #[arg(long)]
         json: bool,
     },
@@ -2174,6 +2217,32 @@ enum Command {
             help = "Export once for every palette variant: the base under the usual name, each variant with its name added (art-blue.png)"
         )]
         variants: bool,
+        #[arg(
+            long,
+            value_name = "MAPS",
+            help = "Light maps beside the picture, the same size, trim and layout: normal, height, specular, emission, depth, occlusion (comma separated) or all; each map is the picture's file name with _n, _h, _s, _e, _d or _o added (art_n.png). Normal maps are written as plain data with no colour profile, depth as 16-bit grey"
+        )]
+        maps: Option<String>,
+        #[arg(long, help = "With --maps depth: far is white instead of near")]
+        invert: bool,
+        #[arg(
+            long,
+            help = "Godot exports: shadows from the silhouette, an OccluderPolygon2D for every distinct picture (holes kept) on a LightOccluder2D that switches with the frame; a rig gets one per part, a parallax scene one per plane"
+        )]
+        occluders: bool,
+        #[arg(
+            long,
+            default_value_t = klad_render::occluders::TOLERANCE,
+            requires = "occluders",
+            help = "With --occluders: how far in px the polygon may stray from the edge"
+        )]
+        tolerance: f32,
+        #[arg(
+            long,
+            value_name = "fog,rim,occlusion",
+            help = "Godot exports: a sample shader that reads the maps, set on the sprite with the maps as its parameters: fog (towards a colour by depth), rim (a rim light from the height), occlusion (darker creases), or all"
+        )]
+        shaders: Option<String>,
         #[arg(long, default_value_t = 2, help = "Sheets: transparent pixels around each picture")]
         padding: u32,
         #[arg(long, default_value_t = 4096, help = "Sheets: largest page side in px")]
@@ -2316,7 +2385,7 @@ enum Command {
         no_cache: bool,
         #[arg(
             long,
-            value_name = "normal|height|specular|emission",
+            value_name = "normal|height|specular|emission|depth|occlusion",
             help = "Hash a light map instead of the picture"
         )]
         map: Option<String>,
@@ -3347,6 +3416,7 @@ fn run() -> Result<()> {
             track,
             map,
             lit,
+            invert,
             ..
         } if map.is_some() || lit => {
             if sheet.is_some()
@@ -3360,7 +3430,7 @@ fn run() -> Result<()> {
                     "--map and --lit render the whole frame (with --scale, --region and --frame): not with --sheet, --overlay, --focus, --onion, --track or --repeat"
                 ));
             }
-            maps::render(&bundle, out, frame, (scale, region), map.as_deref(), lit)?
+            maps::render(&bundle, out, frame, (scale, region), (map.as_deref(), invert), lit)?
         }
         Command::Render {
             bundle,
@@ -3458,6 +3528,7 @@ fn run() -> Result<()> {
             frame,
             part,
             second,
+            normal,
             flags,
         } => {
             let taper = taper
@@ -3485,6 +3556,7 @@ fn run() -> Result<()> {
                 taper,
                 part,
                 second,
+                normal,
             };
             agent::edit(&bundle, &[Op::Stroke(spec)], &output(&flags, frame))?;
         }
@@ -3512,12 +3584,17 @@ fn run() -> Result<()> {
             mirror_y,
             size,
             color,
+            normal,
             erase,
             frame,
             part,
             flags,
         } => {
             let layer = Bundle::open(&bundle)?.doc.find_layer(&layer)?.id.clone();
+            let color = match normal {
+                Some(text) => Some(maps::palette_colour(&Bundle::open(&bundle)?.doc, &text)?),
+                None => color,
+            };
             if let Some(source) = grid {
                 let text = match source.as_str() {
                     "-" => std::io::read_to_string(std::io::stdin()).context("reading the grid from stdin")?,
@@ -4403,9 +4480,18 @@ fn run() -> Result<()> {
         Command::Palettes { json } => palettes(json),
         Command::Check {
             bundle,
+            layer: _,
+            frame,
+            all,
+            maps: true,
+            json,
+        } => check::maps(&bundle, frame, all, json)?,
+        Command::Check {
+            bundle,
             layer,
             frame,
             all,
+            maps: false,
             json,
         } => check::run(&bundle, layer.as_deref(), frame, all, json)?,
         Command::Pixels {
@@ -4440,15 +4526,38 @@ fn run() -> Result<()> {
             variant,
             variants,
             out,
+            maps,
+            invert,
+            occluders,
+            tolerance,
+            shaders,
         } => {
+            let maps = maps.as_deref().map(Map::list).transpose()?.unwrap_or_default();
+            let extras = sprites::Extras {
+                occluders: occluders.then_some(tolerance),
+                shaders: shaders
+                    .as_deref()
+                    .map(klad_render::shaders::Effect::list)
+                    .transpose()?
+                    .unwrap_or_default(),
+            };
+            if (occluders || !extras.shaders.is_empty())
+                && godot.is_none()
+                && godot_scene.is_none()
+                && godot_rig.is_none()
+            {
+                return Err(anyhow!(
+                    "--occluders and --shaders go with a Godot export: --godot, --godot-scene or --godot-rig"
+                ));
+            }
             let scenes = godot_scene.is_some() || godot_rig.is_some();
             if let Some(dir) = godot_scene {
-                scene::parallax(&bundle, dir.or(out.clone()), frame)?
+                scene::parallax(&bundle, dir.or(out.clone()), frame, &extras)?
                     .iter()
                     .for_each(|f| println!("{}", f.display()));
             }
             if let Some(dir) = godot_rig {
-                scene::rig(&bundle, dir.or(out.clone()))?
+                scene::rig(&bundle, dir.or(out.clone()), &extras)?
                     .iter()
                     .for_each(|f| println!("{}", f.display()));
             }
@@ -4475,6 +4584,8 @@ fn run() -> Result<()> {
                     depth,
                     background,
                     variant: variant.clone(),
+                    maps: maps.clone(),
+                    invert,
                 };
                 match (&sheet, &frames, &godot) {
                     _ if aseprite => aseprite::export(&bundle, out, variant.as_deref()),
@@ -4484,7 +4595,7 @@ fn run() -> Result<()> {
                     _ if gif.is_some() => sprites::gif(&bundle, gif.as_deref().unwrap_or("all"), &look, dither, out),
                     (Some(spec), _, _) => sprites::sheet(&bundle, spec, &look, &packing, out),
                     (_, Some(spec), _) => sprites::frames(&bundle, spec, &look, out),
-                    (_, _, Some(dir)) => sprites::godot(&bundle, dir.clone().or(out), store, &look, &packing),
+                    (_, _, Some(dir)) => sprites::godot(&bundle, dir.clone().or(out), store, &look, &packing, &extras),
                     _ if scenes => Ok(()),
                     _ => export::run(
                         &bundle,
@@ -4497,6 +4608,8 @@ fn run() -> Result<()> {
                             references,
                             variant,
                             out,
+                            maps: maps.clone(),
+                            invert,
                         },
                     ),
                 }
@@ -4541,6 +4654,13 @@ fn run() -> Result<()> {
             off,
             flags,
         } => maps::maps(&bundle, &props, on, off, &output(&flags, 0))?,
+        Command::Surface {
+            bundle,
+            args,
+            directions,
+            off,
+            flags,
+        } => maps::surface(&bundle, &args, directions, off, &output(&flags, 0))?,
         Command::Lights {
             bundle,
             add,

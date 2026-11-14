@@ -398,6 +398,14 @@ impl Editor {
                 .jobs
                 .busy(crate::jobs::Tag::Gaps)
                 .then(|| "the gaps are being looked for: wait a moment".to_string()),
+            Cmd::CheckMaps if self.checks.maps.is_some() => None,
+            Cmd::CheckMaps if self.scene.bundle.doc.maps.is_none() => {
+                Some("the light maps are off: turn them on in Window > Light maps first".to_string())
+            }
+            Cmd::CheckMaps => self
+                .jobs
+                .busy(crate::jobs::Tag::Maps)
+                .then(|| "the light maps are being checked: wait a moment".to_string()),
             Cmd::ShowArcs if self.checks.arcs.is_some() => None,
             Cmd::ShowArcs => self.track().err().map(|e| e.to_string()),
             Cmd::CompareReference => super::compare::reference_image(&self.scene.bundle.root, &self.scene.bundle.doc)
@@ -450,6 +458,8 @@ impl Editor {
             Cmd::MapsPane => layout.dock && layout.is_open(Pane::Maps),
             Cmd::LitView => self.maps.show == Some(super::maps::Show::Lit),
             Cmd::MapView => matches!(self.maps.show, Some(super::maps::Show::Map(_))),
+            Cmd::ShowOccluders => self.maps.outlines,
+            Cmd::CheckMaps => self.checks.maps.is_some(),
             Cmd::Fill => self.tool == Tool::Fill,
             Cmd::Shapes => self.tool == Tool::Select,
             Cmd::Strokes => self.tool == Tool::Strokes,
@@ -693,6 +703,8 @@ impl Editor {
             Cmd::Parallax | Cmd::LightPreview => {}
             Cmd::MapView => self.next_map(),
             Cmd::LitView => self.toggle_lit(),
+            Cmd::ShowOccluders => self.maps.outlines = !self.maps.outlines,
+            Cmd::CheckMaps => self.check_maps(),
             Cmd::Note => self.tool = Tool::Note,
             Cmd::Smaller if self.scene.on_grid() => self.pixel_size = self.pixel_size.saturating_sub(1).max(1),
             Cmd::Bigger if self.scene.on_grid() => {

@@ -10,7 +10,7 @@ use klad_render::{Frame, View};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const SURFACE_KEYS: &[&str] = &["bevel", "profile", "strength", "body", "range"];
+const SURFACE_KEYS: &[&str] = &["bevel", "profile", "strength", "body", "range", "directions"];
 const TOP_KEYS: &[&str] = &["ambient", "shininess"];
 
 pub fn maps(path: &Path, props: &[String], on: bool, off: bool, out: &Output) -> Result<()> {
@@ -52,6 +52,85 @@ fn changed(maps: Maps, props: &[String]) -> Result<Maps> {
     let maps: Maps = serde_json::from_value(value)?;
     maps.validate()?;
     Ok(maps)
+}
+
+pub fn palette_colour(doc: &klad_core::doc::Document, text: &str) -> Result<String> {
+    let wanted = klad_core::maps::direction(text)?;
+    let directions = klad_render::maps::settings(doc).surface.directions_for(true);
+    Ok(klad_core::maps::hex_of(match directions {
+        0 => wanted,
+        d => klad_core::maps::nearest(wanted, &klad_core::maps::palette(d)),
+    }))
+}
+
+pub fn surface(path: &Path, args: &[String], directions: Option<u32>, off: bool, out: &Output) -> Result<()> {
+    let bundle = Bundle::open(path)?;
+    let doc = &bundle.doc;
+    let (layer, props) = match args.first() {
+        Some(first) if !first.contains('=') => (Some(doc.find_layer(first)?), &args[1..]),
+        _ => (None, args),
+    };
+    if let Some(l) = layer
+        && !doc.layers.iter().any(|t| t.id == l.id)
+    {
+        bail!(
+            "{} is inside a group: a surface of its own is for layers at the top of the stack; give it to the group it is in",
+            l.id
+        );
+    }
+    let current = match layer {
+        Some(l) => l.surface.clone(),
+        None => doc.maps.as_ref().map(|m| m.surface.clone()),
+    };
+    if props.is_empty() && directions.is_none() && !off {
+        match (&current, layer) {
+            (Some(s), _) => println!("{}", serde_json::to_string(s)?),
+            (None, Some(l)) => println!(
+                "{} is part of the drawing's surface: klad surface <bundle> {} bevel=6 gives it its own",
+                l.id, l.id
+            ),
+            (None, None) => println!("maps are off: klad surface <bundle> bevel=8 turns them on"),
+        }
+        return Ok(());
+    }
+    let ops = match (layer, off) {
+        (Some(l), true) => vec![Op::Set {
+            id: l.id.clone(),
+            props: [("surface".to_string(), serde_json::Value::Null)].into_iter().collect(),
+        }],
+        (None, true) => {
+            bail!("klad maps <bundle> --off turns the drawing's maps off; --off here is for a layer's own surface")
+        }
+        (layer, false) => {
+            let base = current.unwrap_or_else(|| klad_render::maps::settings(doc).surface);
+            let mut value = serde_json::to_value(base)?;
+            parse_props(props)?.into_iter().try_for_each(|(key, v)| {
+                if !SURFACE_KEYS.contains(&key.as_str()) {
+                    bail!("a surface has no {key:?}: it takes {}", SURFACE_KEYS.join(", "));
+                }
+                value[key.as_str()] = v;
+                Ok(())
+            })?;
+            if let Some(d) = directions {
+                value["directions"] = serde_json::json!(d);
+            }
+            let surface: klad_core::maps::Surface = serde_json::from_value(value)?;
+            surface.validate()?;
+            match layer {
+                Some(l) => vec![Op::Set {
+                    id: l.id.clone(),
+                    props: [("surface".to_string(), serde_json::to_value(&surface)?)]
+                        .into_iter()
+                        .collect(),
+                }],
+                None => vec![Op::Maps(Some(Maps {
+                    surface,
+                    ..doc.maps.clone().unwrap_or_default()
+                }))],
+            }
+        }
+    };
+    agent::edit(path, &ops, out)
 }
 
 pub struct LightArgs {
@@ -191,7 +270,7 @@ pub fn render(
     out: Option<PathBuf>,
     frame: u32,
     (scale, region): (Option<f32>, Option<[i32; 4]>),
-    map: Option<&str>,
+    (map, invert): (Option<&str>, bool),
     lit: bool,
 ) -> Result<()> {
     let start = Instant::now();
@@ -211,10 +290,11 @@ pub fn render(
         (Some(_), true) => bail!("--map shows one map, --lit the picture lit by the drawing's lights: one at a time"),
         (Some(name), false) => {
             let map = Map::parse(name)?;
-            (
-                klad_render::maps::render(doc, frame, &rasters, scale)?.frame(map),
-                format!("-{}", map.name()),
-            )
+            let mut set = klad_render::maps::render(doc, frame, &rasters, scale)?;
+            if invert {
+                set.invert_depth();
+            }
+            (set.frame(map), format!("-{}", map.name()))
         }
         (None, true) => {
             let lights = klad_render::maps::settings(doc).lights;
@@ -227,7 +307,9 @@ pub fn render(
             )
         }
         (None, false) => {
-            bail!("render a map with --map normal|height|specular|emission, or the lit picture with --lit")
+            bail!(
+                "render a map with --map normal|height|specular|emission|depth|occlusion, or the lit picture with --lit"
+            )
         }
     };
     let mut picture = match region {

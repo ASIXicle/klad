@@ -73,6 +73,93 @@ fn within<'a>(layer: &'a Layer, out: &mut Vec<&'a Layer>) {
     layer.children().iter().for_each(|child| within(child, out));
 }
 
+fn finding_json(f: &klad_render::maps::Finding) -> serde_json::Value {
+    json!({
+        "kind": f.problem.name(),
+        "frame": f.frame,
+        "area": f.area.map(|v| v.round()),
+        "pixels": f.pixels,
+        "note": f.note,
+    })
+}
+
+pub fn maps(path: &Path, frame: u32, all: bool, as_json: bool) -> Result<()> {
+    let bundle = Bundle::open(path)?;
+    let doc = &bundle.doc;
+    if doc.maps.is_none() {
+        bail!("this drawing's light maps are off: klad maps <bundle> --on turns them on, then check them");
+    }
+    let last = doc.timeline.frames - 1;
+    if frame > last {
+        bail!("frame {frame} is past the last frame {last}");
+    }
+    let frames: Vec<u32> = match all {
+        true => (0..=last).collect(),
+        false => vec![frame],
+    };
+    let longest = doc.canvas.width.max(doc.canvas.height) as f32;
+    let scale = match doc.pixel_art() {
+        true => 1.0,
+        false => (768.0 / longest).min(1.0),
+    };
+    let brushes = klad_brush::BrushSet::for_bundle(&bundle)?;
+    let detail = klad_render::export::detail_of(doc, scale);
+    let options = klad_render::export::Options {
+        scale,
+        background: false,
+        references: false,
+        detail,
+    };
+    let mut findings: Vec<klad_render::maps::Finding> = Vec::new();
+    let mut before: Option<(Vec<String>, klad_render::maps::MapSet, u64)> = None;
+    frames.iter().try_for_each(|f| {
+        let key = crate::sheet::shown(doc, *f);
+        if before.as_ref().is_some_and(|(k, _, _)| *k == key) {
+            return Ok(());
+        }
+        let rasters = crate::layers::load_at(&bundle, *f, &brushes, detail)?;
+        let (found, set) = klad_render::maps::check(doc, *f, &rasters, scale)?;
+        let picture = klad_render::export::render(doc, *f, &rasters, &klad_render::export::Target::Frame, options)?;
+        let hash = klad_render::read_rgba8(&picture)?.hash();
+        if let Some((_, old, old_hash)) = &before
+            && let Some(seam) = klad_render::maps::seam((old, *old_hash), (&set, hash), *f, scale)
+        {
+            findings.push(seam);
+        }
+        findings.extend(found);
+        before = Some((key, set, hash));
+        Ok::<_, anyhow::Error>(())
+    })?;
+    if as_json {
+        let out = json!({
+            "frames": frames.len(),
+            "findings": findings.iter().map(finding_json).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    match findings.is_empty() {
+        true => println!(
+            "the light maps look right on {}",
+            match all {
+                true => format!("all {} frames", frames.len()),
+                false => format!("frame {frame}"),
+            }
+        ),
+        false => findings.iter().for_each(|f| {
+            let [x, y, w, h] = f.area.map(|v| v.round());
+            println!(
+                "frame {:<3} {:<8} at {x},{y} {w}x{h} ({} px): {}",
+                f.frame,
+                f.problem.name(),
+                f.pixels,
+                f.note
+            )
+        }),
+    }
+    Ok(())
+}
+
 pub fn run(path: &Path, layer: Option<&str>, frame: u32, all: bool, as_json: bool) -> Result<()> {
     let bundle = Bundle::open(path)?;
     let doc = &bundle.doc;
