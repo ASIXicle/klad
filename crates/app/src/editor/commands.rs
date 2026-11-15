@@ -317,7 +317,25 @@ impl Editor {
             | Cmd::NewVectorLayer
             | Cmd::NewGroupLayer
             | Cmd::NewBonesLayer
-            | Cmd::NewAdjustLayer => self.timeline_edit(),
+            | Cmd::NewAdjustLayer
+            | Cmd::NewMapLayer => self.timeline_edit(),
+            Cmd::MakeMapLayer => match layer {
+                None => pick_layer(),
+                Some(_) if self.scene.active_is_mask() => Some("a mask stays a mask: pick the layer itself".into()),
+                Some(l) if l.map.is_some() => Some(format!(
+                    "{} is a map layer already: its layer settings switch what it draws",
+                    l.name
+                )),
+                Some(l) if !matches!(l.kind(), LayerKind::Paint | LayerKind::Vector) => {
+                    Some("only paint and vector layers can draw a map".into())
+                }
+                _ => self.timeline_edit(),
+            },
+            Cmd::MakeColourLayer => match layer {
+                None => pick_layer(),
+                Some(l) if l.map.is_none() => Some(format!("{} draws colour already", l.name)),
+                _ => self.timeline_edit(),
+            },
             Cmd::Unwrap => match self.selection.as_deref().map(|id| self.scene.bundle.doc.item(id)) {
                 Some(Some(klad_core::doc::Item::Node(_, _, n))) if n.shape.generates() => None,
                 _ => Some("select a repeat, scatter or mirror with V first".to_string()),
@@ -880,6 +898,9 @@ impl Editor {
             Cmd::NewAdjustLayer => {
                 self.add_layer_value(json!({"kind": "adjust", "name": "curves", "adjust": {"curves": {}}}))?
             }
+            Cmd::NewMapLayer => self.new_map_layer()?,
+            Cmd::MakeMapLayer => self.make_map_layer()?,
+            Cmd::MakeColourLayer => self.make_colour_layer()?,
             Cmd::GroupLayer => self.new_group(true)?,
             Cmd::DuplicateLayer => self.duplicate_layer()?,
             Cmd::DeleteLayer => self.delete_layer()?,

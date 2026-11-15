@@ -1,4 +1,4 @@
-_Last updated: 2026-11-15 23:30_
+_Last updated: 2026-11-16 00:30_
 
 # Lighting in a game
 
@@ -16,12 +16,12 @@ Let a game's 2D lights light your drawing. klad makes light maps from what you d
 
 - **bevel** sets how far in from the outline the edges round over.
 - **bevel** alone can make a whole form: click **fit** beside it and the bevel gets as deep as the shape, so a flat disc with the profile **round** lights like a ball.
-- Give a layer the role **height** and paint it: white raises, black lowers, mid grey changes nothing. Only lightness counts, so the Colour panel shows greys on a height layer, and the canvas shows the height map while it is selected. **white raises** sets how high pure white goes.
-- Give a layer the role **normal** and paint directions. Pick one on the sphere in the Colour panel, or tick **direction from pen tilt** and lean the pen the way the surface faces. The canvas shows the normal map while the layer is selected.
+- Add a **map** layer in Layers (or turn a layer into one with **Layer > Make it a map layer**); in its Layer settings choose what it draws. Paint a **height** map layer white to raise, black to lower; mid grey changes nothing. Only lightness counts, so the Colour panel shows greys on a height layer, and the canvas shows the height map while it is selected. **white raises** sets how high pure white goes.
+- A **normal** map layer paints directions. Pick one on the sphere in the Colour panel, or tick **direction from pen tilt** and lean the pen the way the surface faces. The canvas shows the normal map while the layer is selected.
 
 ## Shine and glow
 
-Select a layer and, in the **Light maps** panel under its name, set **shine** for metal and wet things, and tick **emissive** for windows, eyes and fire. They glow whatever the light. To light up only part of a layer, like the eyes on a face, pick their colour and click **+ the current colour** beside **emissive**: the parts in that colour glow, on every frame.
+In a colour layer's **Layer settings**, under **Light**, set **shine** for metal and wet things, and tick **emissive** for windows, eyes and fire. They glow whatever the light. To light up only part of a layer, like the eyes on a face, pick their colour and click **+ the current colour** beside **emissive**: the parts in that colour glow, on every frame.
 
 ## Check the maps
 

@@ -663,7 +663,7 @@ enum Command {
     Show { bundle: PathBuf, id: String },
     #[command(
         about = "Add a layer, cel or shape",
-        long_about = "Add a layer, cel or shape.\n\n  klad add art.klad layer vector name=sky\n  klad add art.klad rect --in l2 x=0 y=0 w=2048 h=900 fill=#1b2a41\n  klad add art.klad ellipse --in l2 cx=500 cy=300 rx=80 ry=80 'fill={\"radial\":{\"center\":[500,300],\"radius\":80,\"stops\":[[0,\"#fff6d5\"],[1,\"#f3c76a\"]]}}'\n  klad add art.klad cel --in l3 frame=4 hold=2\n\nValues are JSON when they parse as JSON, otherwise strings. Dotted keys nest: transform.rotate=15, stroke.width=3."
+        long_about = "Add a layer, cel or shape.\n\n  klad add art.klad layer vector name=sky\n  klad add art.klad layer map height --above l2 clip=true      a map layer for the light maps: height, normal, specular or emission\n  klad add art.klad rect --in l2 x=0 y=0 w=2048 h=900 fill=#1b2a41\n  klad add art.klad ellipse --in l2 cx=500 cy=300 rx=80 ry=80 'fill={\"radial\":{\"center\":[500,300],\"radius\":80,\"stops\":[[0,\"#fff6d5\"],[1,\"#f3c76a\"]]}}'\n  klad add art.klad cel --in l3 frame=4 hold=2\n\nValues are JSON when they parse as JSON, otherwise strings. Dotted keys nest: transform.rotate=15, stroke.width=3."
     )]
     Add {
         bundle: PathBuf,

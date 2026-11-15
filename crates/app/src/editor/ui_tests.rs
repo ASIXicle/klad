@@ -6203,10 +6203,10 @@ fn the_numbers_need_developer_tools_and_notes_start_folded() {
 }
 
 #[test]
-fn the_light_maps_panel_turns_maps_on_gives_layers_a_role_and_shows_the_maps() {
+fn the_light_maps_panel_turns_maps_on_and_layers_become_map_layers_by_command() {
     let path = sample("maps");
     let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
-    [Pane::Brush, Pane::Inspector, Pane::Preview, Pane::Notes, Pane::History]
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
         .into_iter()
         .filter(|pane| h.state().settings.layout.is_open(*pane))
         .collect::<Vec<_>>()
@@ -6220,15 +6220,20 @@ fn the_light_maps_panel_turns_maps_on_gives_layers_a_role_and_shows_the_maps() {
     h.run_steps(3);
     assert!(h.state().scene.bundle.doc.maps.is_some(), "the box turns the maps on");
     activate(&mut h, "shade");
-    let lowest = |h: &Harness<'static, Editor>, label: &str| {
-        h.query_all_by_label(label)
-            .map(|n| n.rect())
-            .max_by(|a, b| a.top().total_cmp(&b.top()))
-            .unwrap()
-            .center()
-    };
-    let at = lowest(&h, "height");
-    click(&mut h, at);
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("height map layer").is_some(),
+        "its settings say what it is"
+    );
+    h.state_mut().invoke(Cmd::MakeColourLayer).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer("shade").unwrap().map,
+        None,
+        "and back"
+    );
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
     h.run_steps(3);
     let shade = h.state().scene.bundle.doc.find_layer("shade").unwrap().clone();
     assert_eq!(shade.map, Some(klad_core::maps::Role::Height), "shade now draws height");
@@ -6370,10 +6375,12 @@ fn a_normal_layer_paints_the_direction_picked_on_the_sphere_and_the_way_the_pen_
 }
 
 #[test]
-fn shine_glow_and_z_are_set_in_the_light_maps_panel_and_the_maps_are_checked_and_exported() {
+fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_exported() {
     let path = sample("shine");
     let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
-    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
+        p.collapsed = false;
+    }
     h.state_mut()
         .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
         .unwrap();
@@ -6410,6 +6417,7 @@ fn shine_glow_and_z_are_set_in_the_light_maps_panel_and_the_maps_are_checked_and
     .into_iter()
     .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
     h.state_mut().settings.layout.timeline = false;
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
     h.run_steps(3);
     h.state_mut().invoke(Cmd::ShowOccluders).unwrap();
     settle(&mut h, |ed| ed.occluders_traced().is_some_and(|n| n > 0));
@@ -6446,7 +6454,7 @@ fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
     use klad_render::maps::Map;
     let path = sample("heights");
     let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
-    [Pane::Brush, Pane::Inspector, Pane::Preview, Pane::Notes, Pane::History]
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
         .into_iter()
         .filter(|pane| h.state().settings.layout.is_open(*pane))
         .collect::<Vec<_>>()
@@ -6460,13 +6468,7 @@ fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
     activate(&mut h, "shade");
     h.state_mut().pick_new_colour([0.8, 0.2, 0.2, 1.0]);
     h.run_steps(3);
-    let at = h
-        .query_all_by_label("height")
-        .map(|n| n.rect())
-        .max_by(|a, b| a.top().total_cmp(&b.top()))
-        .unwrap()
-        .center();
-    click(&mut h, at);
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
     h.run_steps(3);
     assert_eq!(
         h.state().scene.bundle.doc.find_layer("shade").unwrap().map,
@@ -6594,7 +6596,7 @@ fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
 fn a_bevel_fits_the_shape_and_a_layer_glows_in_the_colours_picked() {
     let path = sample("fitglow");
     let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
-    [Pane::Brush, Pane::Inspector, Pane::Preview, Pane::Notes, Pane::History]
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
         .into_iter()
         .filter(|pane| h.state().settings.layout.is_open(*pane))
         .collect::<Vec<_>>()
@@ -6616,7 +6618,7 @@ fn a_bevel_fits_the_shape_and_a_layer_glows_in_the_colours_picked() {
     );
     assert!(
         h.query_by_label("emissive").is_some(),
-        "the light of the selected layer is in the light maps panel"
+        "the light of the selected layer is in its layer settings"
     );
     h.state_mut()
         .pick_new_colour([160.0 / 255.0, 64.0 / 255.0, 48.0 / 255.0, 1.0]);
@@ -6628,5 +6630,46 @@ fn a_bevel_fits_the_shape_and_a_layer_glows_in_the_colours_picked() {
     h.get_by_label("glow #a04030").click();
     h.run_steps(3);
     assert!(glows(&h).is_empty(), "a click on its swatch stops the glow");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_map_layer_is_added_from_the_layers_panel_and_its_settings_switch_what_it_draws() {
+    let path = sample("maplayer");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    activate(&mut h, "colour");
+    h.state_mut().pick_new_colour([0.8, 0.2, 0.2, 1.0]);
+    h.run_steps(2);
+    assert!(h.state().scene.bundle.doc.maps.is_none());
+    h.get_by_label(&format!("{} map", theme::icon::MOUNTAINS)).click();
+    h.run_steps(3);
+    let added = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(added.map, Some(klad_core::maps::Role::Height));
+    assert!(
+        h.state().scene.bundle.doc.maps.is_some(),
+        "a map layer turns the maps on"
+    );
+    assert_eq!(h.state().color, [1.0; 4], "and paints in white");
+    assert!(h.query_by_label("height map layer").is_some());
+    h.get_by_label("normal").click();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer(&added.id).unwrap().map,
+        Some(klad_core::maps::Role::Normal)
+    );
+    assert!(h.query_by_label("shine ").is_none(), "no shine or glow on a map layer");
+    activate(&mut h, "colour");
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("emissive").is_some(),
+        "a colour layer has its light in its settings"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }

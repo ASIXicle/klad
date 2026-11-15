@@ -589,7 +589,7 @@ impl Editor {
         Ok(())
     }
 
-    fn light_section(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
+    pub(super) fn light_section(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
         if self.scene.bundle.doc.maps.is_none()
             || layer.map.is_some()
             || matches!(layer.kind(), Kind::Adjust | Kind::Bones)
@@ -597,6 +597,9 @@ impl Editor {
             return Ok(());
         }
         let id = layer.id.clone();
+        ui.separator();
+        ui.label(egui::RichText::new("Light").strong())
+            .hint("how this layer takes the light maps' light: shine, glow and how near it is");
         let mut props: Vec<(String, Value)> = Vec::new();
         let paint = self.color;
         ui.horizontal_wrapped(|ui| {
@@ -684,7 +687,29 @@ impl Editor {
                 props.push(("z".into(), if v == 0.0 { Value::Null } else { json!(v) }));
             }
         });
-        self.set(&id, props)
+        self.set(&id, props)?;
+        if !self.scene.bundle.doc.layers.iter().any(|l| l.id == id) {
+            return Ok(());
+        }
+        let mut own = layer.surface.is_some();
+        if ui
+            .checkbox(&mut own, "a surface of its own")
+            .hint("this layer rounds in from its own outline instead of being part of the drawing's surface")
+            .changed()
+        {
+            let value = match own {
+                true => serde_json::to_value(klad_render::maps::settings(&self.scene.bundle.doc).surface)?,
+                false => Value::Null,
+            };
+            return self.set(&id, vec![("surface".into(), value)]);
+        }
+        match &layer.surface {
+            Some(surface) => match self.surface_fields(ui, &format!("{id}.surface"), Some(&id), surface) {
+                Some(next) => self.set(&id, vec![("surface".into(), serde_json::to_value(next)?)]),
+                None => Ok(()),
+            },
+            None => Ok(()),
+        }
     }
 
     pub(super) fn occluder_overlay(&mut self, ui: &egui::Ui, view: crate::view::View, rect: Rect) {
@@ -947,71 +972,94 @@ impl Editor {
         }
     }
 
-    fn layer_maps(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
+    fn maps_on(&mut self) -> Result<()> {
+        if self.scene.bundle.doc.maps.is_some() {
+            return Ok(());
+        }
+        let back = self.maps.parked.take().unwrap_or_default();
+        self.set_maps(Some(back))?;
+        self.say(Tone::Info, "turned the light maps on: a map layer shapes them");
+        Ok(())
+    }
+
+    pub(super) fn new_map_layer(&mut self) -> Result<()> {
+        self.maps_on()?;
+        let frame = self.scene.frame;
+        self.add_layer_value(json!({"kind": "paint", "name": "height", "map": "height", "cels": [{"frame": frame}]}))?;
+        self.pick_new_colour([1.0; 4]);
+        Ok(())
+    }
+
+    pub(super) fn make_map_layer(&mut self) -> Result<()> {
+        let Some(id) = self.scene.active_id() else {
+            return Ok(());
+        };
+        self.maps_on()?;
+        let props = ["surface", "depth", "shine", "specular", "emissive", "glows", "z"]
+            .into_iter()
+            .map(|key| (key.to_string(), Value::Null))
+            .chain(std::iter::once(("map".to_string(), json!("height"))))
+            .collect();
+        self.set(&id, props)?;
+        self.pick_new_colour([1.0; 4]);
+        Ok(())
+    }
+
+    pub(super) fn make_colour_layer(&mut self) -> Result<()> {
+        let Some(id) = self.scene.active_id() else {
+            return Ok(());
+        };
+        self.set(&id, vec![("map".into(), Value::Null)])
+    }
+
+    pub(super) fn map_section(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
+        let Some(role) = layer.map else {
+            return Ok(());
+        };
         let id = layer.id.clone();
-        let top = self.scene.bundle.doc.layers.iter().any(|l| l.id == id);
-        ui.label(egui::RichText::new(format!("Layer {}", layer.name)).strong());
-        if matches!(layer.kind(), Kind::Paint | Kind::Vector) {
-            let mut role = layer.map;
-            ui.horizontal_wrapped(|ui| {
-                ui.label("draws");
+        let mut chosen = role;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("draws");
+            Role::ALL.iter().for_each(|r| {
                 if ui
-                    .selectable_label(role.is_none(), "colour")
-                    .hint("an ordinary layer: drawn in the picture, part of the surface")
+                    .selectable_label(chosen == *r, r.name())
+                    .hint(match r {
+                        Role::Height => "height: white raises the surface, black lowers it",
+                        Role::Normal => "directions: its colours are the way the surface faces (#8080ff faces out)",
+                        Role::Specular => "shine: brighter is shinier under the preview lights",
+                        Role::Emission => "glow: what it paints glows whatever the light",
+                    })
                     .clicked()
                 {
-                    role = None;
+                    chosen = *r;
                 }
-                Role::ALL.iter().for_each(|r| {
-                    if ui
-                        .selectable_label(role == Some(*r), r.name())
-                        .hint(match r {
-                            Role::Height => {
-                                "a height layer: white raises the surface, black lowers it; never drawn in the picture"
-                            }
-                            Role::Normal => {
-                                "a normal layer: its colours are directions (#8080ff faces out), over the surface's own"
-                            }
-                            Role::Specular => "a specular layer: brighter is shinier under the preview lights",
-                            Role::Emission => "an emission layer: what glows whatever the light",
-                        })
-                        .clicked()
-                    {
-                        role = Some(*r);
-                    }
-                });
             });
-            if role != layer.map {
-                if role == Some(Role::Height) {
-                    self.pick_new_colour([1.0; 4]);
+        });
+        if chosen != role {
+            if chosen == Role::Height {
+                self.pick_new_colour([1.0; 4]);
+            }
+            return self.set(&id, vec![("map".into(), json!(chosen.name()))]);
+        }
+        if role == Role::Height {
+            self.height_range_field(ui, layer)?;
+        }
+        ui.label(
+            egui::RichText::new(match role {
+                Role::Height => "a map layer: it shapes the light maps and never shows in the picture",
+                Role::Normal => {
+                    "a map layer: it paints the normal map over the drawing's own and never shows in the picture"
                 }
-                let value = role.map_or(Value::Null, |r| json!(r.name()));
-                return self.set(&id, vec![("map".into(), value)]);
-            }
-            if layer.map == Some(Role::Height) {
-                return self.height_range_field(ui, layer);
-            }
-        }
-        self.light_section(ui, layer)?;
-        if top && layer.map.is_none() {
-            let mut own = layer.surface.is_some();
-            if ui
-                .checkbox(&mut own, "a surface of its own")
-                .hint("this layer rounds in from its own outline instead of being part of the drawing's surface")
-                .changed()
-            {
-                let value = match own {
-                    true => serde_json::to_value(klad_render::maps::settings(&self.scene.bundle.doc).surface)?,
-                    false => Value::Null,
-                };
-                return self.set(&id, vec![("surface".into(), value)]);
-            }
-            if let Some(surface) = &layer.surface
-                && let Some(next) = self.surface_fields(ui, &format!("{id}.surface"), Some(&id), surface)
-            {
-                return self.set(&id, vec![("surface".into(), serde_json::to_value(next)?)]);
-            }
-        }
+                Role::Specular => "a map layer: it paints the specular map and never shows in the picture",
+                Role::Emission => "a map layer: it paints the emission map and never shows in the picture",
+            })
+            .color(crate::theme::WEAK),
+        );
+        self.command_button(
+            ui,
+            crate::commands::Cmd::MakeColourLayer,
+            Some("make it a colour layer"),
+        );
         Ok(())
     }
 
@@ -1064,10 +1112,6 @@ impl Editor {
             return self.set_maps(next);
         }
         let current = maps.clone().unwrap_or_default();
-        if let Some(layer) = self.scene.active_layer().cloned() {
-            self.layer_maps(ui, &layer)?;
-            ui.separator();
-        }
         ui.label(egui::RichText::new("The drawing's surface").strong());
         if let Some(next) = self.surface_fields(ui, "maps.surface", None, &current.surface) {
             return self.set_maps(Some(Maps {

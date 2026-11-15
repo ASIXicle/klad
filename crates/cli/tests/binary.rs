@@ -2469,6 +2469,17 @@ fn light_maps_are_set_up_painted_lit_and_hashed_from_the_command_line() {
     assert!(draw(&["show", path, &body]).contains("\"surface\""));
     assert!(refused(&["set", path, &body, "map=height", "surface.bevel=3"]).contains("no surface or depth"));
     draw(&["set", path, &body, "surface=null"]);
+    draw(&["add", path, "layer", "map", "specular", "name=gloss"]);
+    let gloss = id_of("gloss");
+    let line = draw(&["ls", path])
+        .lines()
+        .find(|l| l.contains("gloss"))
+        .unwrap()
+        .to_string();
+    assert!(line.contains(" map ") && line.contains("draws specular"), "{line}");
+    assert!(refused(&["add", path, "layer", "map", "shiny"]).contains("height, normal, specular or emission"));
+    draw(&["set", path, &gloss, "map=null"]);
+    assert!(!draw(&["ls", path]).contains("draws specular"));
     draw(&["maps", path, "--off"]);
     assert!(draw(&["maps", path]).contains("maps are off"));
     let _ = std::fs::remove_dir_all(&dir);

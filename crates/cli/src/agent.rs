@@ -130,11 +130,29 @@ pub fn add_op(what: &str, rest: &[String], place: Place) -> Result<Op> {
             let (kind, props) = match rest.split_first() {
                 Some((kind, props)) if !kind.contains('=') => (kind.clone(), props),
                 _ => bail!(
-                    "say which kind: klad add <bundle> layer paint|pixel|vector|group|adjust|image [key=value ...]"
+                    "say which kind: klad add <bundle> layer paint|pixel|vector|group|adjust|map|image [key=value ...]"
                 ),
             };
             let layer = match kind.as_str() {
                 "adjust" => crate::looks::adjust_layer(props)?,
+                "map" => {
+                    let (role, props) = match props.split_first() {
+                        Some((role, props)) if !role.contains('=') => (role.clone(), props),
+                        _ => bail!(
+                            "say which map: klad add <bundle> layer map height|normal|specular|emission [key=value ...]"
+                        ),
+                    };
+                    if !klad_core::maps::Role::ALL.iter().any(|r| r.name() == role) {
+                        bail!("a map layer draws height, normal, specular or emission, not {role:?}");
+                    }
+                    let mut layer = nest(parse_props(props)?);
+                    layer["kind"] = Value::String("paint".into());
+                    layer["map"] = Value::String(role.clone());
+                    if layer.get("name").is_none() {
+                        layer["name"] = Value::String(role);
+                    }
+                    layer
+                }
                 _ => {
                     let mut layer = nest(parse_props(props)?);
                     layer["kind"] = Value::String(kind);
@@ -778,6 +796,9 @@ fn layer_summary(bundle: &Bundle, layer: &Layer, frame: u32) -> Result<Value> {
     if let Some(cel) = cel {
         value["cel"] = json!({ "id": cel.id, "frame": cel.frame, "hold": cel.hold, "link": cel.link });
     }
+    if let Some(role) = layer.map {
+        value["map"] = json!(role.name());
+    }
     if layer.clip {
         value["clip"] = json!(true);
     }
@@ -943,9 +964,13 @@ fn print_layer(v: &Value, depth: usize, frames: u32) {
     let bounds = serde_json::from_value::<Option<[f32; 4]>>(v["bounds"].clone())
         .ok()
         .flatten();
-    let kind = match v["kind"].as_str() {
-        Some("paint") if depth > 0 && v["role"] == json!("mask") => "mask",
-        other => other.unwrap_or(""),
+    let kind = match (v["kind"].as_str(), v["map"].as_str()) {
+        (Some("paint"), _) if depth > 0 && v["role"] == json!("mask") => "mask",
+        (_, Some(role)) => {
+            flags.insert(0, format!("draws {role}"));
+            "map"
+        }
+        (other, _) => other.unwrap_or(""),
     };
     println!(
         "{:indent$}{:<6} {:<6} {:<16} {:<12} {}{}{}",
@@ -1079,6 +1104,19 @@ mod tests {
         let node = add_op("rect", &["w=5".into()], Place::default()).unwrap();
         assert!(matches!(node, Op::AddNode { ref node, .. } if node["type"] == "rect"));
         assert!(add_op("layer", &["name=x".into()], Place::default()).is_err());
+        let map = add_op(
+            "layer",
+            &["map".into(), "normal".into(), "name=bumps".into()],
+            Place::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(map, Op::AddLayer { ref layer, .. } if layer["kind"] == "paint" && layer["map"] == "normal" && layer["name"] == "bumps")
+        );
+        let named = add_op("layer", &["map".into(), "height".into()], Place::default()).unwrap();
+        assert!(matches!(named, Op::AddLayer { ref layer, .. } if layer["name"] == "height"));
+        assert!(add_op("layer", &["map".into(), "glow".into()], Place::default()).is_err());
+        assert!(add_op("layer", &["map".into()], Place::default()).is_err());
         assert!(add_op("cel", &[], Place::default()).is_err());
     }
 

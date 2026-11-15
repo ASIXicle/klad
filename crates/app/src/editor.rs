@@ -5164,7 +5164,10 @@ impl Editor {
             return Ok(());
         };
         let id = layer.id.clone();
-        ui.label(format!("{} layer", layer.kind_name()));
+        ui.label(match layer.map {
+            Some(role) => format!("{} map layer", role.name()),
+            None => format!("{} layer", layer.kind_name()),
+        });
         let mut props: Vec<(String, Value)> = Vec::new();
         ui.horizontal(|ui| {
             if let Some(name) = self.text(
@@ -5189,6 +5192,8 @@ impl Editor {
             );
             return self.set(&id, props);
         }
+        self.set(&id, std::mem::take(&mut props))?;
+        self.map_section(ui, &layer)?;
         ui.horizontal_wrapped(|ui| {
             self.command_check(ui, Cmd::ToggleLocked, "locked");
             self.command_check(ui, Cmd::ToggleClip, "clip to layer below");
@@ -5196,6 +5201,7 @@ impl Editor {
                 self.command_check(ui, Cmd::ToggleLockAlpha, "lock alpha");
             }
         });
+        self.light_section(ui, &layer)?;
         ui.horizontal_wrapped(|ui| match &layer.mask {
             Some(_) => {
                 self.command_check(ui, Cmd::ToggleMask, "mask on");
@@ -5218,7 +5224,9 @@ impl Editor {
             }
         });
         self.set(&id, props)?;
-        self.depth_section(ui, &layer)?;
+        if layer.map.is_none() {
+            self.depth_section(ui, &layer)?;
+        }
         self.adjust_section(ui, &layer)?;
         self.effects_section(ui, &layer)?;
         self.animation_section(ui, &id)
