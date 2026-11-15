@@ -55,6 +55,63 @@ pub(super) struct MapsView {
     texture: Option<(Want, Option<[f32; 2]>, usize, TextureHandle)>,
     traced: Option<Traced>,
     tracing: Option<Tracing>,
+    auto_for: Option<String>,
+}
+
+const HEIGHTS: [(&str, f32); 5] = [
+    ("lower", 0.0),
+    ("lower a little", 0.25),
+    ("flat", 0.5),
+    ("raise a little", 0.75),
+    ("raise", 1.0),
+];
+
+fn height_words(lift: f32, range: f32) -> String {
+    let px = lift * range;
+    match px {
+        p if p.abs() < 0.05 => "flat: leaves the surface as it is".into(),
+        p if p > 0.0 => format!("raises it {p:.1} px"),
+        p => format!("lowers it {:.1} px", -p),
+    }
+}
+
+fn ramp(ui: &mut egui::Ui, current: f32, size: egui::Vec2) -> (egui::Response, Option<f32>) {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "the height"));
+    let painter = ui.painter_at(rect);
+    let mut mesh = Mesh::default();
+    [
+        (rect.left_top(), Color32::BLACK),
+        (rect.right_top(), Color32::WHITE),
+        (rect.right_bottom(), Color32::WHITE),
+        (rect.left_bottom(), Color32::BLACK),
+    ]
+    .into_iter()
+    .for_each(|(pos, color)| {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv: egui::epaint::WHITE_UV,
+            color,
+        })
+    });
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    painter.add(mesh);
+    painter.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, Color32::from_gray(30)),
+        egui::StrokeKind::Inside,
+    );
+    let x = rect.left() + current.clamp(0.0, 1.0) * rect.width();
+    painter.line_segment(
+        [pos2(x, rect.top()), pos2(x, rect.bottom())],
+        Stroke::new(3.0, Color32::from_rgb(230, 80, 60)),
+    );
+    let picked = (response.clicked() || response.dragged())
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+        .map(|p| ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0));
+    (response, picked)
 }
 
 fn sphere(ui: &mut egui::Ui, current: [f32; 3], size: f32) -> (egui::Response, Option<[f32; 3]>) {
@@ -219,7 +276,61 @@ impl Editor {
         self.maps.job = Some((want, rx));
     }
 
+    fn follow_height_layer(&mut self) {
+        let on = self.scene.bundle.doc.maps.is_some();
+        let active = self
+            .scene
+            .active_layer()
+            .filter(|l| on && l.map == Some(Role::Height))
+            .map(|l| l.id.clone());
+        match (&self.maps.auto_for, active) {
+            (None, Some(id)) if self.maps.show.is_none() => {
+                self.maps.show = Some(Show::Map(Map::Height));
+                self.maps.auto_for = Some(id);
+                self.say(
+                    Tone::Info,
+                    "showing the height map while a height layer is selected: white raises, black lowers (M for the next map)",
+                );
+            }
+            (Some(was), now) if now.as_ref() != Some(was) => {
+                if self.maps.show == Some(Show::Map(Map::Height)) {
+                    self.maps.show = None;
+                }
+                self.maps.auto_for = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn sketch_live(&self, painter: &egui::Painter, view: crate::view::View, rect: Rect) {
+        let Some(live) = &self.live else {
+            return;
+        };
+        let points: Vec<egui::Pos2> = live
+            .stroke
+            .samples
+            .iter()
+            .map(|s| {
+                let (x, y) = s.pos();
+                self.screen(view, rect, vec2(x, y))
+            })
+            .collect();
+        let (Some(first), Some(last)) = (points.first().copied(), points.last().copied()) else {
+            return;
+        };
+        let zoom = (self.screen(view, rect, vec2(1.0, 0.0)) - self.screen(view, rect, vec2(0.0, 0.0))).length();
+        let width = (live.stroke.size * zoom).max(1.0);
+        let [r, g, b, _] = self.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let ink = Color32::from_rgba_unmultiplied(r, g, b, 150);
+        painter.circle_filled(first, width * 0.5, ink);
+        if points.len() > 1 {
+            painter.add(egui::Shape::line(points, Stroke::new(width, ink)));
+            painter.circle_filled(last, width * 0.5, ink);
+        }
+    }
+
     pub(super) fn map_overlay(&mut self, ui: &egui::Ui, view: crate::view::View, rect: Rect) {
+        self.follow_height_layer();
         let typing = ui.ctx().egui_wants_keyboard_input();
         let held = !typing && ui.input(|i| i.key_down(Key::L) && !i.modifiers.any());
         let show = match held {
@@ -334,6 +445,7 @@ impl Editor {
             });
         mesh.indices.extend([0, 1, 2, 0, 2, 3]);
         painter.add(mesh);
+        self.sketch_live(&painter, view, rect);
         if self.maps.job.is_some() || held {
             ui.ctx().request_repaint();
         }
@@ -341,6 +453,61 @@ impl Editor {
 
     pub(super) fn on_normal_layer(&self) -> bool {
         self.scene.active_layer().is_some_and(|l| l.map == Some(Role::Normal))
+    }
+
+    pub(super) fn on_height_layer(&self) -> bool {
+        self.scene.active_layer().is_some_and(|l| l.map == Some(Role::Height))
+    }
+
+    pub(super) fn height_panel(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        let range = self
+            .scene
+            .active_layer()
+            .map_or(12.0, |l| klad_render::maps::height_range(&self.scene.bundle.doc, l));
+        let lift = klad_render::maps::lift(self.color);
+        let grey = (self.color[0] - self.color[1])
+            .abs()
+            .max((self.color[1] - self.color[2]).abs())
+            < 0.02;
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            let (response, picked) = ramp(ui, (lift + 1.0) * 0.5, vec2(150.0, 36.0));
+            response.hint("how high: click or drag; black lowers the surface, mid grey leaves it, white raises it");
+            chosen = picked;
+            ui.vertical(|ui| {
+                color::swatch(ui, self.color, false, 44.0).hint("the current colour: only its lightness counts");
+                ui.label(height_words(lift, range));
+            });
+        });
+        ui.horizontal_wrapped(|ui| {
+            HEIGHTS.iter().for_each(|(name, v)| {
+                let close = grey && ((lift + 1.0) * 0.5 - v).abs() < 0.01;
+                let swatch = color::swatch(ui, [*v, *v, *v, 1.0], close, 24.0);
+                swatch.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, *name));
+                if swatch
+                    .hint(format!("{name}: {}", height_words(2.0 * v - 1.0, range)))
+                    .clicked()
+                {
+                    chosen = Some(*v);
+                }
+            });
+        });
+        if !grey {
+            ui.label(
+                egui::RichText::new("only the lightness of this colour counts: pick a grey to see what it does")
+                    .color(crate::theme::REFUSED),
+            );
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "a height layer raises the surface where it is white and lowers it where it is black, by how much it covers, up to {range:.0} px; it never shows in the picture, so the canvas shows the height map while it is selected"
+            ))
+            .color(crate::theme::WEAK),
+        );
+        if let Some(v) = chosen {
+            self.pick_new_colour([v, v, v, 1.0]);
+        }
+        Ok(())
     }
 
     pub(super) fn tilted_brush(&self) -> bool {
@@ -645,6 +812,50 @@ impl Editor {
         (next != *surface).then_some(next)
     }
 
+    fn height_range_field(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
+        let doc = &self.scene.bundle.doc;
+        let owner = klad_render::maps::surface_owner(doc, layer);
+        let range = klad_render::maps::height_range(doc, layer);
+        let whose = owner
+            .as_deref()
+            .and_then(|id| doc.layer(id))
+            .map_or("the drawing's surface".to_string(), |l| format!("{}'s surface", l.name));
+        let mut next = None;
+        ui.horizontal_wrapped(|ui| {
+            next = self.number(
+                ui,
+                &format!("{}.range", layer.id),
+                "white raises ",
+                range,
+                0.0..=512.0,
+                0.5,
+                &format!("px pure white raises it, and black lowers it as much: the range of {whose}"),
+            );
+            ui.label("px");
+        });
+        let Some(v) = next else {
+            return Ok(());
+        };
+        match owner {
+            Some(id) => {
+                let mut surface = self
+                    .scene
+                    .bundle
+                    .doc
+                    .layer(&id)
+                    .and_then(|l| l.surface.clone())
+                    .unwrap_or_default();
+                surface.range = v;
+                self.set(&id, vec![("surface".into(), serde_json::to_value(surface)?)])
+            }
+            None => {
+                let mut maps = klad_render::maps::settings(&self.scene.bundle.doc);
+                maps.surface.range = v;
+                self.set_maps(Some(maps))
+            }
+        }
+    }
+
     fn layer_maps(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
         let id = layer.id.clone();
         let top = self.scene.bundle.doc.layers.iter().any(|l| l.id == id);
@@ -680,8 +891,14 @@ impl Editor {
                 });
             });
             if role != layer.map {
+                if role == Some(Role::Height) {
+                    self.pick_new_colour([1.0; 4]);
+                }
                 let value = role.map_or(Value::Null, |r| json!(r.name()));
                 return self.set(&id, vec![("map".into(), value)]);
+            }
+            if layer.map == Some(Role::Height) {
+                return self.height_range_field(ui, layer);
             }
         }
         if top && layer.map.is_none() {

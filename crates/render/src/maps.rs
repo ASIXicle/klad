@@ -374,6 +374,21 @@ fn luminance(p: [f32; 4]) -> f32 {
     }
 }
 
+pub fn lift(rgba: [f32; 4]) -> f32 {
+    2.0 * luminance([rgba[0], rgba[1], rgba[2], 1.0]) - 1.0
+}
+
+pub fn surface_owner(doc: &Document, layer: &Layer) -> Option<String> {
+    owner_of(doc, layer)
+}
+
+pub fn height_range(doc: &Document, layer: &Layer) -> f32 {
+    owner_of(doc, layer)
+        .and_then(|id| doc.layer(&id).and_then(|l| l.surface.clone()))
+        .unwrap_or_else(|| settings(doc).surface)
+        .range
+}
+
 fn top_of<'a>(doc: &'a Document, id: &str) -> Option<&'a Layer> {
     doc.layers.iter().find(|top| {
         let mut all = vec![*top];
@@ -1700,5 +1715,39 @@ mod tests {
             "the picture changed too: no seam"
         );
         assert!(seam((&still, 7), (&still, 7), 5, 1.0).is_none());
+    }
+
+    #[test]
+    fn a_height_layer_reads_lightness_and_takes_the_range_of_its_surface() {
+        assert_eq!(lift([1.0, 1.0, 1.0, 1.0]), 1.0);
+        assert_eq!(lift([0.0, 0.0, 0.0, 1.0]), -1.0);
+        assert!(lift([0.5, 0.5, 0.5, 1.0]).abs() < 1e-5, "mid grey leaves it");
+        assert!(lift([0.75, 0.22, 0.17, 1.0]) < -0.3, "a red lowers it");
+        let mut doc = Document::new(64, 64);
+        doc.maps = Some(Maps {
+            surface: klad_core::maps::Surface {
+                range: 20.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mut own = Layer::paint("own", "own", "c1");
+        own.surface = Some(klad_core::maps::Surface {
+            range: 6.0,
+            ..Default::default()
+        });
+        let mut bump = Layer::paint("bump", "bump", "c2");
+        bump.map = Some(Role::Height);
+        bump.clip = true;
+        let mut loose = Layer::paint("loose", "loose", "c3");
+        loose.map = Some(Role::Height);
+        doc.layers = vec![own, bump.clone(), loose.clone()];
+        assert_eq!(surface_owner(&doc, &bump).as_deref(), Some("own"));
+        assert_eq!(
+            height_range(&doc, &bump),
+            6.0,
+            "clipped to a layer with its own surface"
+        );
+        assert_eq!(height_range(&doc, &loose), 20.0, "the drawing's surface");
     }
 }

@@ -629,11 +629,48 @@ pub fn preview(bundle: &Bundle, out: &Output) -> Result<Option<PathBuf>> {
     Ok(Some(render_look(bundle, out.frame, view, &look, None, true)?.path))
 }
 
+pub fn height_notes(doc: &klad_core::doc::Document, ops: &[Op]) -> Vec<String> {
+    let mut notes: Vec<String> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Stroke(s) => Some((&s.layer, &s.color)),
+            Op::Fill(f) => Some((&f.layer, &f.color)),
+            _ => None,
+        })
+        .filter_map(|(layer, colour)| {
+            let layer = doc.find_layer(layer).ok()?;
+            if layer.map != Some(klad_core::maps::Role::Height) {
+                return None;
+            }
+            let hex = doc.resolve_color(colour).ok()?;
+            let rgba = klad_core::color::parse_hex(&hex).ok()?;
+            let spread = rgba[..3].iter().fold(f32::MIN, |a, v| a.max(*v)) - rgba[..3].iter().fold(f32::MAX, |a, v| a.min(*v));
+            if spread < 0.02 {
+                return None;
+            }
+            let range = klad_render::maps::height_range(doc, layer);
+            let px = klad_render::maps::lift(rgba) * range;
+            let does = match px {
+                p if p.abs() < 0.05 => "leaves it flat".to_string(),
+                p if p > 0.0 => format!("raises it {p:.1} px"),
+                p => format!("lowers it {:.1} px", -p),
+            };
+            Some(format!(
+                "note: {} is a height layer, which reads only lightness: {colour} {does} (white raises {range:.0} px, black lowers as much, #808080 leaves it)",
+                layer.name
+            ))
+        })
+        .collect();
+    notes.dedup();
+    notes
+}
+
 pub fn edit(path: &Path, ops: &[Op], out: &Output) -> Result<()> {
     let mut bundle = Bundle::open(path)?;
     let mut ops = ops.to_vec();
     ops.iter()
         .try_for_each(|op| klad_core::ops::grid_refusal(&bundle.doc, op))?;
+    height_notes(&bundle.doc, &ops).iter().for_each(|n| eprintln!("{n}"));
     crate::paintover::resolve(&bundle, &mut ops)?
         .iter()
         .for_each(|n| eprintln!("{n}"));
@@ -1043,5 +1080,26 @@ mod tests {
         assert!(matches!(node, Op::AddNode { ref node, .. } if node["type"] == "rect"));
         assert!(add_op("layer", &["name=x".into()], Place::default()).is_err());
         assert!(add_op("cel", &[], Place::default()).is_err());
+    }
+
+    #[test]
+    fn painting_a_height_layer_in_a_colour_says_what_its_lightness_does() {
+        let mut doc = klad_core::doc::Document::new(64, 64);
+        let mut bump = Layer::paint("l1", "bumps", "c1");
+        bump.map = Some(klad_core::maps::Role::Height);
+        doc.layers = vec![Layer::paint("l0", "paint", "c0"), bump];
+        let ops = parse_lines(
+            r##"{"op":"stroke","layer":"l1","color":"#c0392b","path":"M0 0 L10 10"}
+{"op":"stroke","layer":"l1","color":"#ffffff","path":"M0 0 L10 10"}
+{"op":"fill","layer":"l1","polygon":[[0,0],[9,0],[9,9]],"color":"#808080"}
+{"op":"stroke","layer":"l0","color":"#c0392b","path":"M0 0 L10 10"}"##,
+        )
+        .unwrap();
+        let notes = height_notes(&doc, &ops);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("bumps") && notes[0].contains("lowers it"),
+            "{notes:?}"
+        );
     }
 }

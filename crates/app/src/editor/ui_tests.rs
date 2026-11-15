@@ -6429,3 +6429,126 @@ fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_expor
     assert!(args.ends_with("--maps normal"), "{args}");
     let _ = std::fs::remove_dir_all(&path);
 }
+
+#[test]
+fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
+    use super::maps::Show;
+    use klad_render::maps::Map;
+    let path = sample("heights");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Inspector, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8,"range":10}}"#).unwrap())
+        .unwrap();
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    activate(&mut h, "shade");
+    h.state_mut().pick_new_colour([0.8, 0.2, 0.2, 1.0]);
+    h.run_steps(3);
+    let at = h
+        .query_all_by_label("height")
+        .map(|n| n.rect())
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+        .unwrap()
+        .center();
+    click(&mut h, at);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer("shade").unwrap().map,
+        Some(klad_core::maps::Role::Height)
+    );
+    assert_eq!(h.state().color, [1.0; 4], "choosing height picks white");
+    assert_eq!(
+        h.state().maps.show,
+        Some(Show::Map(Map::Height)),
+        "the canvas shows the height map"
+    );
+    let start = std::time::Instant::now();
+    while h.state().map_shown() != Some("height") && start.elapsed() < std::time::Duration::from_secs(20) {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(h.state().map_shown(), Some("height"));
+    assert!(
+        h.query_by_label("raises it 10.0 px").is_some(),
+        "white raises by the range"
+    );
+    assert!(
+        h.query_all_by_label_contains("white raises").next().is_some(),
+        "the range beside the role"
+    );
+    h.get_by_label("lower").click();
+    h.run_steps(2);
+    assert_eq!(h.state().color, [0.0, 0.0, 0.0, 1.0]);
+    assert!(h.query_by_label("lowers it 10.0 px").is_some());
+    let ramp = h.get_by_label("the height").rect();
+    click(&mut h, pos2(ramp.left() + ramp.width() * 0.75, ramp.center().y));
+    h.run_steps(2);
+    let c = h.state().color;
+    assert!(
+        (c[0] - 0.75).abs() < 0.03 && c[0] == c[1] && c[1] == c[2],
+        "the ramp picks a grey: {c:?}"
+    );
+    h.state_mut().tool = Tool::Brush;
+    let (a, b) = (canvas_at(&h, 120.0, 150.0), canvas_at(&h, 260.0, 150.0));
+    tilted_line(&mut h, a, b, (0.0, 0.0));
+    let rasters = h.state().scene.rasters_now();
+    let tile = rasters
+        .get("c4")
+        .unwrap()
+        .get(190 / klad_brush::TILE, 150 / klad_brush::TILE)
+        .unwrap();
+    let at = ((150 % klad_brush::TILE) * klad_brush::TILE + 190 % klad_brush::TILE) * 4;
+    assert!(tile[at + 3].to_f32() > 0.5, "the stroke lands on the height layer");
+    let rect = h.state().canvas_rect;
+    let ctx = h.ctx.clone();
+    let start = std::time::Instant::now();
+    [
+        (crate::pen::Phase::Down, 120.0),
+        (crate::pen::Phase::Move, 200.0),
+        (crate::pen::Phase::Up, 260.0),
+    ]
+    .into_iter()
+    .enumerate()
+    .for_each(|(i, (phase, x))| {
+        let event = crate::pen::PenEvent {
+            phase,
+            pos: canvas_at(&h, x, 220.0),
+            pressure: 0.8,
+            tilt: (0.0, 0.0),
+            eraser: false,
+            tablet: true,
+            device: 3,
+            at: start + std::time::Duration::from_millis(i as u64 * 20),
+        };
+        h.state_mut().on_pen(&ctx, event, rect, true).unwrap();
+        if phase == crate::pen::Phase::Move {
+            assert!(h.state().live.is_some(), "a stroke under way");
+            h.run_steps(2);
+        }
+    });
+    h.run_steps(2);
+    activate(&mut h, "colour");
+    h.run_steps(3);
+    assert_eq!(h.state().maps.show, None, "another layer goes back to the picture");
+    activate(&mut h, "shade");
+    h.run_steps(3);
+    assert_eq!(h.state().maps.show, Some(Show::Map(Map::Height)));
+    (0..5).for_each(|_| {
+        h.state_mut().invoke(Cmd::MapView).unwrap();
+        h.run_steps(1);
+    });
+    assert_eq!(h.state().maps.show, None, "M steps on to the picture");
+    h.run_steps(3);
+    assert_eq!(
+        h.state().maps.show,
+        None,
+        "and the picture stays while the height layer is selected"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}

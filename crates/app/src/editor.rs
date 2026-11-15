@@ -5227,6 +5227,9 @@ impl Editor {
         if self.on_normal_layer() {
             return self.normal_panel(ui);
         }
+        if self.on_height_layer() {
+            return self.height_panel(ui);
+        }
         let mut picked: Option<[f32; 4]> = None;
         let mut hsva = self.hsva;
         ui.horizontal(|ui| {

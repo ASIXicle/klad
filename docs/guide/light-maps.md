@@ -1,4 +1,4 @@
-_Last updated: 2026-11-15 14:00_
+_Last updated: 2026-11-15 16:30_
 
 # Lighting in a game
 
@@ -15,7 +15,8 @@ Let a game's 2D lights light your drawing. klad makes light maps from what you d
 ## Shape the surface
 
 - **bevel** sets how far in from the outline the edges round over.
-- Give a layer the role **height** and paint it: white raises, black lowers.
+- **bevel** alone can make a whole form: a flat disc with the bevel as wide as its radius and the profile **round** lights like a ball.
+- Give a layer the role **height** and paint it: white raises, black lowers, mid grey changes nothing. Only lightness counts, so the Colour panel shows greys on a height layer, and the canvas shows the height map while it is selected. **white raises** sets how high pure white goes.
 - Give a layer the role **normal** and paint directions. Pick one on the sphere in the Colour panel, or tick **direction from pen tilt** and lean the pen the way the surface faces.
 
 ## Shine and glow
