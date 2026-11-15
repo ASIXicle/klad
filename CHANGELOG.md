@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fixed opening a drawing on the Mac: **Choose a .klad file...** in the start window (it said folder) and **File > Open…** could not pick a `.klad` drawing, which Finder shows as one file. The open panel now takes a `.klad` drawing; other files are greyed out.
+- Fixed shade and rim on posed layers. The shade and rim fills that `klad light` makes keep the part of the shape outside a cut, and a pose turned the fill with its bone but left that cut where it was in the rest drawing, so in posed frames and their in-betweens the rim grew into a wide crescent and the shade slid away. Posing now moves the cut with the fill, in `klad apply` poses, in-betweens and the editor alike; a frame posed before this comes right when you pose it again.
 
 ## 0.2.0 (2026-11-12)
 

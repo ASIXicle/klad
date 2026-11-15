@@ -940,6 +940,7 @@ impl<'a> Rig<'a> {
                         f.coverage = self.coverage(&f.coverage, canvas);
                     }
                 }
+                out.cuts_mut().iter_mut().for_each(|c| c.map(|p| self.moved(p)));
                 out
             })
             .collect()
@@ -1645,5 +1646,52 @@ mod tests {
             ((b.0 - a.0).hypot(b.1 - a.1) - 200.0).abs() < 1.0,
             "a mark held by one bone moves rigidly"
         );
+    }
+
+    #[test]
+    fn a_posed_mark_takes_its_lasso_cuts_along() {
+        use crate::cut::{Cut, Keep, keeps};
+        use crate::fill::Fill;
+        let bones = leg();
+        let square = |x: f32, y: f32, side: f32| vec![[x, y], [x + side, y], [x + side, y + side], [x, y + side]];
+        let mut shade = Fill::new(
+            1,
+            [0.0, 0.0, 0.0, 1.0],
+            FillSource::Polygon(square(60.0, 120.0, 80.0)),
+            Coverage::default(),
+        );
+        shade.cuts = vec![Cut {
+            keep: Keep::Outside,
+            polygon: square(70.0, 110.0, 80.0),
+        }];
+        let points: Vec<(f32, f32, f32)> = (0..=16).map(|i| (60.0 + i as f32 * 5.0, 160.0, 1.0)).collect();
+        let mut line = Stroke::new(2, "ink", [0.0, 0.0, 0.0, 1.0], 4.0, 1).with_points(&points, 8.0);
+        line.cuts = vec![Cut {
+            keep: Keep::Inside,
+            polygon: square(80.0, 150.0, 20.0),
+        }];
+        let marks = vec![Mark::from(shade), Mark::from(line)];
+        let weights = Weights::auto(&bones, (200, 400));
+        let mut turned = Pose::default();
+        turned.angles.insert("thigh".into(), 90.0);
+        let rig = Rig::new(&bones, &[], &weights, &turned).following(Some("thigh"));
+        let posed = rig.pose(&marks, (200, 400));
+        let grid: Vec<[f32; 2]> = (0..60)
+            .flat_map(|j| (0..60).map(move |i| [40.5 + i as f32 * 2.0, 100.5 + j as f32 * 2.0]))
+            .collect();
+        marks.iter().zip(&posed).for_each(|(rest, moved)| {
+            let wrong: Vec<&[f32; 2]> = grid
+                .iter()
+                .filter(|p| {
+                    let q = rig.moved(**p);
+                    keeps(rest.cuts(), (p[0], p[1])) != keeps(moved.cuts(), (q[0], q[1]))
+                })
+                .collect();
+            assert!(
+                wrong.is_empty(),
+                "the cut stayed behind at {:?}",
+                &wrong[..wrong.len().min(4)]
+            );
+        });
     }
 }
