@@ -6035,6 +6035,19 @@ fn a_picture_of_the_editor() {
         if let Ok(brush) = std::env::var("KLAD_PICTURE_BRUSH") {
             ed.pick(&brush);
         }
+        if let Ok(list) = std::env::var("KLAD_PICTURE_INVOKE") {
+            list.split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .try_for_each(|id| {
+                    let cmd = Cmd::ALL
+                        .iter()
+                        .copied()
+                        .find(|c| c.spec().id == id)
+                        .ok_or_else(|| anyhow::anyhow!("no command {id}"))?;
+                    ed.invoke(cmd)
+                })?;
+        }
         let numbers = |name: &str| -> Option<Vec<f32>> {
             let text = std::env::var(name).ok()?;
             text.split(',').map(|n| n.trim().parse().ok()).collect()
@@ -6357,12 +6370,10 @@ fn a_normal_layer_paints_the_direction_picked_on_the_sphere_and_the_way_the_pen_
 }
 
 #[test]
-fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_exported() {
+fn shine_glow_and_z_are_set_in_the_light_maps_panel_and_the_maps_are_checked_and_exported() {
     let path = sample("shine");
     let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
-        p.collapsed = false;
-    }
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
     h.state_mut()
         .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
         .unwrap();
@@ -6399,7 +6410,6 @@ fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_expor
     .into_iter()
     .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
     h.state_mut().settings.layout.timeline = false;
-    h.state_mut().invoke(Cmd::MapsPane).unwrap();
     h.run_steps(3);
     h.state_mut().invoke(Cmd::ShowOccluders).unwrap();
     settle(&mut h, |ed| ed.occluders_traced().is_some_and(|n| n > 0));
@@ -6584,7 +6594,7 @@ fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
 fn a_bevel_fits_the_shape_and_a_layer_glows_in_the_colours_picked() {
     let path = sample("fitglow");
     let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
-    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
+    [Pane::Brush, Pane::Inspector, Pane::Preview, Pane::Notes, Pane::History]
         .into_iter()
         .filter(|pane| h.state().settings.layout.is_open(*pane))
         .collect::<Vec<_>>()
@@ -6604,7 +6614,10 @@ fn a_bevel_fits_the_shape_and_a_layer_glows_in_the_colours_picked() {
         (bevel - 40.0).abs() <= 2.0,
         "the 80 px tall rectangle is the deepest shape: {bevel}"
     );
-    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    assert!(
+        h.query_by_label("emissive").is_some(),
+        "the light of the selected layer is in the light maps panel"
+    );
     h.state_mut()
         .pick_new_colour([160.0 / 255.0, 64.0 / 255.0, 48.0 / 255.0, 1.0]);
     h.run_steps(3);

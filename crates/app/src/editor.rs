@@ -638,6 +638,7 @@ pub(crate) struct Editor {
     embedded: BTreeMap<String, BrushDef>,
     buffer: StrokeBuffer,
     live: Option<Live>,
+    dock_room: f32,
     tool: Tool,
     brush: String,
     previous_brush: String,
@@ -843,6 +844,7 @@ impl Editor {
             brushes,
             embedded,
             live: None,
+            dock_room: 0.0,
             tool: Tool::Brush,
             brush: "ink".into(),
             previous_brush: "ink".into(),
@@ -5217,7 +5219,6 @@ impl Editor {
         });
         self.set(&id, props)?;
         self.depth_section(ui, &layer)?;
-        self.light_section(ui, &layer)?;
         self.adjust_section(ui, &layer)?;
         self.effects_section(ui, &layer)?;
         self.animation_section(ui, &id)

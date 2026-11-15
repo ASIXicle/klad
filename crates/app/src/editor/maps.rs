@@ -589,19 +589,17 @@ impl Editor {
         Ok(())
     }
 
-    pub(super) fn light_section(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
+    fn light_section(&mut self, ui: &mut egui::Ui, layer: &Layer) -> Result<()> {
         if self.scene.bundle.doc.maps.is_none()
             || layer.map.is_some()
             || matches!(layer.kind(), Kind::Adjust | Kind::Bones)
         {
             return Ok(());
         }
-        ui.separator();
         let id = layer.id.clone();
         let mut props: Vec<(String, Value)> = Vec::new();
         let paint = self.color;
         ui.horizontal_wrapped(|ui| {
-            ui.label("light");
             if let Some(v) = self.number(
                 ui,
                 &format!("{id}.shine"),
@@ -623,11 +621,14 @@ impl Editor {
             {
                 props.push(("specular".into(), json!(color::hex(paint))));
             }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("glow");
             let mut glow = layer.emissive;
             if ui
                 .checkbox(&mut glow, "emissive")
                 .hint(
-                    "it glows: drawn at full brightness whatever the light, in the emission map (windows, eyes, fire)",
+                    "the whole layer glows: drawn at full brightness whatever the light, in the emission map (windows, eyes, fire)",
                 )
                 .changed()
             {
@@ -636,7 +637,7 @@ impl Editor {
             if !layer.emissive {
                 let mut glows = layer.glows.clone();
                 let mut changed = false;
-                ui.label("glows where it is");
+                ui.label("or only where it is");
                 layer.glows.iter().for_each(|hex| {
                     let rgba = color::rgba_of(hex).unwrap_or([1.0; 4]);
                     let swatch = color::swatch(ui, rgba, false, crate::theme::TARGET);
@@ -669,6 +670,8 @@ impl Editor {
                     ));
                 }
             }
+        });
+        ui.horizontal_wrapped(|ui| {
             if let Some(v) = self.number(
                 ui,
                 &format!("{id}.z"),
@@ -989,6 +992,7 @@ impl Editor {
                 return self.height_range_field(ui, layer);
             }
         }
+        self.light_section(ui, layer)?;
         if top && layer.map.is_none() {
             let mut own = layer.surface.is_some();
             if ui
@@ -1060,6 +1064,10 @@ impl Editor {
             return self.set_maps(next);
         }
         let current = maps.clone().unwrap_or_default();
+        if let Some(layer) = self.scene.active_layer().cloned() {
+            self.layer_maps(ui, &layer)?;
+            ui.separator();
+        }
         ui.label(egui::RichText::new("The drawing's surface").strong());
         if let Some(next) = self.surface_fields(ui, "maps.surface", None, &current.surface) {
             return self.set_maps(Some(Maps {
@@ -1067,10 +1075,7 @@ impl Editor {
                 ..current
             }));
         }
-        if let Some(layer) = self.scene.active_layer().cloned() {
-            ui.separator();
-            self.layer_maps(ui, &layer)?;
-        }
+        ui.separator();
         ui.horizontal_wrapped(|ui| {
             self.command_check(ui, crate::commands::Cmd::CheckMaps, "check the maps");
             self.command_check(ui, crate::commands::Cmd::ShowOccluders, "occluders");

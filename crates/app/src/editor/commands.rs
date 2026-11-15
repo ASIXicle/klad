@@ -551,6 +551,17 @@ impl Editor {
     fn pane(&mut self, pane: Pane) {
         self.settings.layout.toggle(pane);
         self.settings_dirty = true;
+        if !self.settings.layout.is_open(pane) {
+            return;
+        }
+        let folded = self.settings.layout.make_room(pane, self.dock_room);
+        if !folded.is_empty() {
+            let names: Vec<&str> = folded.iter().map(|p| p.title()).collect();
+            self.say(
+                Tone::Info,
+                format!("folded {} to make room for {}", names.join(" and "), pane.title()),
+            );
+        }
     }
 
     fn retime(&mut self, how: Retime) -> Result<()> {

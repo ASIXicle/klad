@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 pub const STRIP: f32 = 44.0;
 pub const STATUS: f32 = 28.0;
 pub const TITLE: f32 = 30.0;
+const FOLD_FIRST: [Pane; 6] = [
+    Pane::Brush,
+    Pane::Preview,
+    Pane::History,
+    Pane::Notes,
+    Pane::Tool,
+    Pane::Inspector,
+];
 pub const DOCK_MIN: f32 = 260.0;
 pub const DOCK_DEFAULT: f32 = 330.0;
 pub const TIMELINE_MIN: f32 = 150.0;
@@ -47,7 +55,7 @@ impl Pane {
             Pane::Notes => 60.0,
             Pane::History => 60.0,
             Pane::Preview => 110.0,
-            Pane::Maps => 120.0,
+            Pane::Maps => 280.0,
         }
     }
 
@@ -60,7 +68,7 @@ impl Pane {
             Pane::Notes => 90.0,
             Pane::History => 80.0,
             Pane::Preview => 170.0,
-            Pane::Maps => 260.0,
+            Pane::Maps => 300.0,
         }
     }
 }
@@ -183,6 +191,31 @@ impl Layout {
         }
     }
 
+    fn needed(&self) -> f32 {
+        self.panes
+            .iter()
+            .filter(|p| p.open)
+            .map(|p| TITLE + if p.collapsed { 0.0 } else { p.pane.min_body() })
+            .sum()
+    }
+
+    pub fn make_room(&mut self, keep: Pane, room: f32) -> Vec<Pane> {
+        if room <= 0.0 {
+            return Vec::new();
+        }
+        FOLD_FIRST
+            .iter()
+            .filter(|p| **p != keep)
+            .fold(Vec::new(), |mut folded, pane| {
+                let fits = self.needed() <= room;
+                if let Some(p) = self.pane_mut(*pane).filter(|p| !fits && p.open && !p.collapsed) {
+                    p.collapsed = true;
+                    folded.push(*pane);
+                }
+                folded
+            })
+    }
+
     pub fn dock_range(window: Vec2) -> (f32, f32) {
         (DOCK_MIN, (window.x * 0.45).max(DOCK_MIN))
     }
@@ -300,6 +333,34 @@ mod tests {
         assert!(!layout.shows_dock());
         layout.resize_pane(Pane::Tool, -1000.0);
         assert_eq!(layout.pane(Pane::Tool).unwrap().body, Pane::Tool.min_body());
+    }
+
+    #[test]
+    fn a_pane_opened_in_a_full_dock_folds_others_until_it_fits() {
+        let mut layout = Layout::default();
+        layout.toggle(Pane::Maps);
+        assert_eq!(
+            layout.make_room(Pane::Maps, 720.0),
+            vec![Pane::Brush, Pane::Tool, Pane::Inspector]
+        );
+        let collapsed = |l: &Layout, p: Pane| l.pane(p).unwrap().collapsed;
+        assert!(!collapsed(&layout, Pane::Maps) && !collapsed(&layout, Pane::Layers));
+        assert!(layout.needed() <= 720.0);
+        let mut taller = Layout::default();
+        taller.toggle(Pane::Maps);
+        assert_eq!(
+            taller.make_room(Pane::Maps, 860.0),
+            vec![Pane::Brush, Pane::Tool],
+            "folds only what it must"
+        );
+        assert!(!collapsed(&taller, Pane::Inspector));
+        let mut roomy = Layout::default();
+        roomy.toggle(Pane::Maps);
+        assert!(roomy.make_room(Pane::Maps, 2000.0).is_empty());
+        assert!(
+            roomy.make_room(Pane::Maps, 0.0).is_empty(),
+            "before the dock is measured"
+        );
     }
 
     #[test]
