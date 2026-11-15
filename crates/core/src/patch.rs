@@ -137,6 +137,7 @@ fn layer_shell(layer: &Layer) -> Layer {
         shine: layer.shine,
         specular: layer.specular.clone(),
         emissive: layer.emissive,
+        glows: layer.glows.clone(),
         z: layer.z,
         reference: layer.reference,
         bones: layer.bones.clone(),

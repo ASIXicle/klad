@@ -13,8 +13,24 @@ use std::time::Instant;
 const SURFACE_KEYS: &[&str] = &["bevel", "profile", "strength", "body", "range", "directions"];
 const TOP_KEYS: &[&str] = &["ambient", "shininess"];
 
+fn fitted(bundle: &Bundle, props: &[String], owner: Option<&str>) -> Result<Vec<String>> {
+    props
+        .iter()
+        .map(|p| match p.split_once('=') {
+            Some(("bevel", "fit")) => {
+                let rasters = layers::load_at(bundle, 0, &BrushSet::for_bundle(bundle)?, 1.0)?;
+                let bevel = klad_render::maps::fit_bevel(&bundle.doc, 0, &rasters, owner)?;
+                eprintln!("bevel fitted to {bevel} px: as far as the deepest point of frame 0 lies from its outline");
+                Ok(format!("bevel={bevel}"))
+            }
+            _ => Ok(p.clone()),
+        })
+        .collect()
+}
+
 pub fn maps(path: &Path, props: &[String], on: bool, off: bool, out: &Output) -> Result<()> {
     let bundle = Bundle::open(path)?;
+    let props = &fitted(&bundle, props, None)?;
     if props.is_empty() && !on && !off {
         match &bundle.doc.maps {
             Some(maps) => println!("{}", serde_json::to_string(maps)?),
@@ -78,6 +94,7 @@ pub fn surface(path: &Path, args: &[String], directions: Option<u32>, off: bool,
             l.id
         );
     }
+    let props = &fitted(&bundle, props, layer.map(|l| l.id.as_str()))?;
     let current = match layer {
         Some(l) => l.surface.clone(),
         None => doc.maps.as_ref().map(|m| m.surface.clone()),
@@ -393,5 +410,36 @@ mod tests {
         assert!(crop(&frame, [3, 3, 2, 2], 1.0).is_err());
         assert_eq!(parse_at("3, 4.5").unwrap(), [3.0, 4.5]);
         assert!(parse_at("3").is_err());
+    }
+
+    #[test]
+    fn bevel_fit_becomes_the_depth_of_the_shape() {
+        use klad_core::doc::{Document, Layer, Node, Shape};
+        let dir = std::env::temp_dir().join(format!("draw-fit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut doc = Document::new(128, 128);
+        doc.layers = vec![Layer::vector(
+            "l1",
+            "disc",
+            "c1",
+            vec![
+                Node::new(
+                    "n1",
+                    Shape::Ellipse {
+                        cx: 64.0,
+                        cy: 64.0,
+                        rx: 40.0,
+                        ry: 40.0,
+                    },
+                )
+                .filled("#c0392b"),
+            ],
+        )];
+        let bundle = Bundle::create(&dir, doc).unwrap();
+        let props = fitted(&bundle, &["bevel=fit".into(), "profile=round".into()], None).unwrap();
+        let bevel: f32 = props[0].strip_prefix("bevel=").unwrap().parse().unwrap();
+        assert!((bevel - 40.0).abs() <= 1.0, "{props:?}");
+        assert_eq!(props[1], "profile=round");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

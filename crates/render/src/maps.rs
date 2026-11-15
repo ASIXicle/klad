@@ -382,6 +382,31 @@ pub fn surface_owner(doc: &Document, layer: &Layer) -> Option<String> {
     owner_of(doc, layer)
 }
 
+pub fn fit_bevel(doc: &Document, frame: u32, rasters: &Rasters, owner: Option<&str>) -> Result<f32> {
+    let scale = (512.0 / doc.canvas.width.max(doc.canvas.height) as f32).min(1.0);
+    let (w, h) = size(doc, scale);
+    let mut union = vec![0.0f32; w * h];
+    doc.layers
+        .iter()
+        .filter(|l| is_surface(l))
+        .filter(|l| match owner {
+            Some(id) => l.id == id,
+            None => l.surface.is_none(),
+        })
+        .try_for_each(|layer| {
+            let px = alone(doc, frame, rasters, layer, scale)?;
+            union.par_iter_mut().zip(px.par_iter()).for_each(|(u, p)| {
+                *u = 1.0 - (1.0 - *u) * (1.0 - p[3].clamp(0.0, 1.0));
+            });
+            Ok::<_, anyhow::Error>(())
+        })?;
+    if union.iter().all(|a| *a < 0.5) {
+        bail!("nothing is drawn at frame {frame} to fit the bevel to");
+    }
+    let far = edge_distance(&union, w, h).into_iter().fold(0.0f32, f32::max);
+    Ok((far / scale).round().max(1.0))
+}
+
 pub fn height_range(doc: &Document, layer: &Layer) -> f32 {
     owner_of(doc, layer)
         .and_then(|id| doc.layer(&id).and_then(|l| l.surface.clone()))
@@ -431,11 +456,12 @@ pub fn size(doc: &Document, scale: f32) -> (usize, usize) {
     )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Traits {
     pub shine: f32,
     pub specular: [f32; 3],
     pub emissive: bool,
+    pub glows: Vec<[f32; 3]>,
     pub z: f32,
 }
 
@@ -445,9 +471,28 @@ impl Default for Traits {
             shine: 0.0,
             specular: [1.0; 3],
             emissive: false,
+            glows: Vec::new(),
             z: 0.0,
         }
     }
+}
+
+impl Traits {
+    fn glowing(&self) -> bool {
+        self.emissive || !self.glows.is_empty()
+    }
+}
+
+const GLOW_REACH: f32 = 0.12;
+
+pub fn glow_weight(colour: [f32; 3], glows: &[[f32; 3]]) -> f32 {
+    glows
+        .iter()
+        .map(|g| {
+            let d = (0..3).map(|c| (colour[c] - g[c]).powi(2)).sum::<f32>().sqrt();
+            (1.0 - d / GLOW_REACH).clamp(0.0, 1.0)
+        })
+        .fold(0.0, f32::max)
 }
 
 fn gather(layers: &[Layer], above: Traits, out: &mut BTreeMap<String, Traits>) -> Result<()> {
@@ -459,10 +504,19 @@ fn gather(layers: &[Layer], above: Traits, out: &mut BTreeMap<String, Traits>) -
             }
             None => above.specular,
         };
+        let glows = match layer.glows.is_empty() {
+            true => above.glows.clone(),
+            false => layer
+                .glows
+                .iter()
+                .map(|hex| parse_hex(hex).map(|[r, g, b, _]| [r, g, b]))
+                .collect::<Result<Vec<_>>>()?,
+        };
         let here = Traits {
             shine: layer.shine.unwrap_or(above.shine),
             specular,
             emissive: layer.emissive || above.emissive,
+            glows,
             z: above.z + layer.z.unwrap_or(0.0),
         };
         match &layer.content {
@@ -481,10 +535,15 @@ pub fn traits(doc: &Document) -> Result<BTreeMap<String, Traits>> {
     Ok(out)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Tint {
     Own,
     Flat([f32; 3]),
+    Glow {
+        glows: Vec<[f32; 3]>,
+        lit: Option<[f32; 3]>,
+        unlit: [f32; 3],
+    },
 }
 
 fn plainly(layers: &mut [Layer]) {
@@ -500,14 +559,42 @@ fn plainly(layers: &mut [Layer]) {
     });
 }
 
-fn recolour(raster: &mut Raster, colour: [f32; 3]) {
+fn recolour_with(raster: &mut Raster, colour: impl Fn([f32; 3]) -> [f32; 3] + Sync) {
     let tiles: Vec<usize> = raster.occupied().map(|(i, _)| i).collect();
     tiles.into_iter().for_each(|i| {
         if let Some(tile) = raster.at_mut(i) {
             tile.par_chunks_mut(4).for_each(|px| {
                 let a = px[3].to_f32();
-                (0..3).for_each(|c| px[c] = f16::from_f32(colour[c] * a));
+                let own = match a > 0.0 {
+                    true => [0, 1, 2].map(|c| px[c].to_f32() / a),
+                    false => [0.0; 3],
+                };
+                let next = colour(own);
+                (0..3).for_each(|c| px[c] = f16::from_f32(next[c] * a));
             });
+        }
+    });
+}
+
+fn recolour(raster: &mut Raster, tint: &Tint) {
+    match tint {
+        Tint::Own => {}
+        Tint::Flat(colour) => recolour_with(raster, |_| *colour),
+        Tint::Glow { glows, lit, unlit } => recolour_with(raster, |own| {
+            let w = glow_weight(own, glows);
+            let on = lit.unwrap_or(own);
+            [0, 1, 2].map(|c| unlit[c] + (on[c] - unlit[c]) * w)
+        }),
+    }
+}
+
+fn through(layers: &mut [Layer], traits: &BTreeMap<String, Traits>) {
+    layers.iter_mut().for_each(|l| match &mut l.content {
+        LayerContent::Group { children } => through(children, traits),
+        _ => {
+            if l.blend != Blend::Normal && !traits.get(&l.id).is_some_and(Traits::glowing) {
+                l.visible = false;
+            }
         }
     });
 }
@@ -517,12 +604,15 @@ fn tinted(
     frame: u32,
     rasters: &Rasters,
     scale: f32,
-    traits: &BTreeMap<String, Traits>,
+    (traits, glow): (&BTreeMap<String, Traits>, bool),
     tint: impl Fn(&Traits) -> Tint,
 ) -> Result<Vec<[f32; 4]>> {
     let detail = export::detail_of(doc, scale);
     let mut plain = doc.clone();
     plain.atmosphere = None;
+    if glow {
+        through(&mut plain.layers, traits);
+    }
     plainly(&mut plain.layers);
     let mut out = rasters.clone();
     doc.all_layers()
@@ -532,9 +622,10 @@ fn tinted(
             let (Some(cel), Some(t)) = (layer.content_at(frame), traits.get(&layer.id)) else {
                 return Ok(());
             };
-            let Tint::Flat(colour) = tint(t) else {
+            let tint = tint(t);
+            if matches!(tint, Tint::Own) {
                 return Ok(());
-            };
+            }
             let mut raster = match (rasters.get(&cel.id), layer.kind()) {
                 (Some(r), _) => r.clone(),
                 (None, Kind::Vector) => crate::rasterize_nodes_at(
@@ -545,7 +636,7 @@ fn tinted(
                 )?,
                 _ => return Ok(()),
             };
-            recolour(&mut raster, colour);
+            recolour(&mut raster, &tint);
             out.insert(cel.id.clone(), raster);
             Ok::<_, anyhow::Error>(())
         })?;
@@ -741,13 +832,13 @@ fn render_at(doc: &Document, frame: u32, rasters: &Rasters, scale: f32) -> Resul
     });
     let traits = traits(doc)?;
     let shiny = traits.values().any(|t| t.shine > 0.0);
-    let glowing = traits.values().any(|t| t.emissive);
+    let glowing = traits.values().any(Traits::glowing);
     let (zmin, zmax) = traits
         .values()
         .fold((0.0f32, 0.0f32), |(lo, hi), t| (lo.min(t.z), hi.max(t.z)));
     let span = zmax - zmin;
     let mut specular: Vec<[f32; 3]> = match shiny {
-        true => tinted(doc, frame, rasters, scale, &traits, |t| {
+        true => tinted(doc, frame, rasters, scale, (&traits, false), |t| {
             Tint::Flat(t.specular.map(|c| c * t.shine))
         })?
         .into_par_iter()
@@ -767,22 +858,33 @@ fn render_at(doc: &Document, frame: u32, rasters: &Rasters, scale: f32) -> Resul
         });
     });
     let marks: Option<Vec<[f32; 4]>> = match glowing || span > 0.0 || zmin != 0.0 {
-        true => Some(tinted(doc, frame, rasters, scale, &traits, |t| {
-            Tint::Flat([
-                if t.emissive { 1.0 } else { 0.0 },
-                match span > 0.0 {
-                    true => (t.z - zmin) / span,
-                    false => 0.0,
+        true => Some(tinted(doc, frame, rasters, scale, (&traits, true), |t| {
+            let depth = match span > 0.0 {
+                true => (t.z - zmin) / span,
+                false => 0.0,
+            };
+            match (t.emissive, t.glows.is_empty()) {
+                (false, false) => Tint::Glow {
+                    glows: t.glows.clone(),
+                    lit: Some([1.0, depth, 0.0]),
+                    unlit: [0.0, depth, 0.0],
                 },
-                0.0,
-            ])
+                (emissive, _) => Tint::Flat([if emissive { 1.0 } else { 0.0 }, depth, 0.0]),
+            }
         })?),
         false => None,
     };
     let mut emission: Vec<[f32; 4]> = match (glowing, &marks) {
-        (true, Some(m)) => tinted(doc, frame, rasters, scale, &traits, |t| match t.emissive {
-            true => Tint::Own,
-            false => Tint::Flat([0.0; 3]),
+        (true, Some(m)) => tinted(doc, frame, rasters, scale, (&traits, true), |t| {
+            match (t.emissive, t.glows.is_empty()) {
+                (true, _) => Tint::Own,
+                (false, false) => Tint::Glow {
+                    glows: t.glows.clone(),
+                    lit: None,
+                    unlit: [0.0; 3],
+                },
+                (false, true) => Tint::Flat([0.0; 3]),
+            }
         })?
         .into_par_iter()
         .zip(m.par_iter())
@@ -1715,6 +1817,68 @@ mod tests {
             "the picture changed too: no seam"
         );
         assert!(seam((&still, 7), (&still, 7), 5, 1.0).is_none());
+    }
+
+    #[test]
+    fn a_layer_glows_only_where_it_is_its_glow_colours() {
+        let mut both = Layer::vector(
+            "g",
+            "g",
+            "cg",
+            vec![
+                Node::new(
+                    "n1",
+                    Shape::Ellipse {
+                        cx: 40.0,
+                        cy: 64.0,
+                        rx: 20.0,
+                        ry: 20.0,
+                    },
+                )
+                .filled("#406080"),
+                Node::new(
+                    "n2",
+                    Shape::Ellipse {
+                        cx: 90.0,
+                        cy: 64.0,
+                        rx: 16.0,
+                        ry: 16.0,
+                    },
+                )
+                .filled("#ffd040"),
+            ],
+        );
+        both.glows = vec!["#ffd040".into()];
+        let mut shade = disc("m", 90.0, 70.0, 12.0, "#303050");
+        shade.blend = Blend::Multiply;
+        let doc = doc_of(vec![both, shade]);
+        doc.validate().unwrap();
+        let glow = render(&doc, 0, &rasters(&doc), 1.0).unwrap().frame(Map::Emission);
+        assert_eq!(
+            glow.pixel(90, 64),
+            [255, 208, 64, 255],
+            "the lamp glows in its own colour"
+        );
+        assert_eq!(
+            glow.pixel(90, 72),
+            [255, 208, 64, 255],
+            "shading multiplied over it does not cover the glow"
+        );
+        assert_eq!(glow.pixel(40, 64)[3], 0, "the rest of the layer does not");
+        let lamp = [1.0, 0.816, 0.251];
+        assert!(glow_weight([1.0, 0.82, 0.25], &[lamp]) > 0.95);
+        assert_eq!(glow_weight([0.25, 0.38, 0.5], &[lamp]), 0.0);
+    }
+
+    #[test]
+    fn a_fitted_bevel_is_as_deep_as_the_shape() {
+        let doc = doc_of(vec![disc("d", 64.0, 64.0, 40.0, "#808080")]);
+        let fit = fit_bevel(&doc, 0, &rasters(&doc), None).unwrap();
+        assert!(
+            (fit - 40.0).abs() <= 1.0,
+            "a disc fits a bevel as deep as its radius: {fit}"
+        );
+        assert!(fit_bevel(&doc, 0, &rasters(&doc), Some("nothing")).is_err());
     }
 
     #[test]

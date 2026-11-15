@@ -6579,3 +6579,41 @@ fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
     );
     let _ = std::fs::remove_dir_all(&path);
 }
+
+#[test]
+fn a_bevel_fits_the_shape_and_a_layer_glows_in_the_colours_picked() {
+    let path = sample("fitglow");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
+        .unwrap();
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    activate(&mut h, "shapes");
+    h.run_steps(3);
+    h.get_by_label("fit").click();
+    h.run_steps(3);
+    let bevel = h.state().scene.bundle.doc.maps.as_ref().unwrap().surface.bevel;
+    assert!(
+        (bevel - 40.0).abs() <= 2.0,
+        "the 80 px tall rectangle is the deepest shape: {bevel}"
+    );
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    h.state_mut()
+        .pick_new_colour([160.0 / 255.0, 64.0 / 255.0, 48.0 / 255.0, 1.0]);
+    h.run_steps(3);
+    h.get_by_label("+ the current colour").click();
+    h.run_steps(3);
+    let glows = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.find_layer("shapes").unwrap().glows.clone();
+    assert_eq!(glows(&h), vec!["#a04030".to_string()]);
+    h.get_by_label("glow #a04030").click();
+    h.run_steps(3);
+    assert!(glows(&h).is_empty(), "a click on its swatch stops the glow");
+    let _ = std::fs::remove_dir_all(&path);
+}

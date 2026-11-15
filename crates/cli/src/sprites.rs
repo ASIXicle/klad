@@ -770,7 +770,7 @@ pub struct Extras {
 pub fn glows(doc: &klad_core::doc::Document) -> bool {
     doc.all_layers()
         .iter()
-        .any(|l| l.visible && (l.emissive || l.map == Some(klad_core::maps::Role::Emission)))
+        .any(|l| l.visible && (l.emissive || !l.glows.is_empty() || l.map == Some(klad_core::maps::Role::Emission)))
 }
 
 pub fn lit_maps(doc: &klad_core::doc::Document, shaders: &[Effect]) -> Result<Vec<Map>> {

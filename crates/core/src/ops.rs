@@ -36,6 +36,7 @@ const LAYER_KEYS: &[&str] = &[
     "shine",
     "specular",
     "emissive",
+    "glows",
     "z",
     "reference",
     "bones",

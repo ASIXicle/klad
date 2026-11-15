@@ -214,10 +214,10 @@ klad font art.klad ~/fonts/Signage.ttf               a font file of your own
 ## Light maps
 
 ```
-klad maps art.klad --on bevel=10 profile=round        the drawing's surface; klad surface art.klad g2 bevel=6 gives a top layer its own
+klad maps art.klad --on bevel=10 profile=round        the drawing's surface (bevel=fit: as deep as the shape, rounds it all like a ball); klad surface art.klad g2 bevel=6 gives a top layer its own
 klad set art.klad l7 map=height                       a height layer: paint white to raise, black to lower (by range px)
 klad stroke art.klad l8 --normal nw --brush soft --size 30 --path 'M...'   a normal layer paints directions
-klad set art.klad l3 shine=0.5 specular=#ffe0b0       the specular map; emissive=true makes a layer glow; z=12 brings it nearer
+klad set art.klad l3 shine=0.5 specular=#ffe0b0       the specular map; emissive=true makes a layer glow, glows=#bff2ff only its parts in those colours (multiply shading over them lets the glow through); z=12 brings it nearer
 klad lights art.klad --add point --at 300,120 --height 120
 klad render art.klad --lit --scale 0.5                the picture lit through its maps; --map normal|height|specular|emission|depth|occlusion shows one
 klad check art.klad --maps --all                      what reads wrong under light

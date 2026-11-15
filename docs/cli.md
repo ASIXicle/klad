@@ -869,9 +869,9 @@ Light maps for 2D lighting in a game: a normal map (OpenGL style, green up, as G
   klad maps art.klad ambient=#30303c shininess=24
   klad maps art.klad --off
 
-The surface: bevel (px the rim rounds over), profile (round, chamfer, pillow or flat), strength (how steep the slopes read), body (how much paint with body raises it, 0 for none), range (px a white height layer raises), directions (0 for smooth normals, 9 or 17 for a normal palette of whole directions, the default on pixel art). The light preview: ambient (the colour where no light reaches, like Godot's CanvasModulate) and shininess (how tight the highlights on the specular map are).
+The surface: bevel (px the rim rounds over; bevel=fit makes it as deep as the shape at frame 0, so the whole silhouette rounds like a ball), profile (round, chamfer, pillow or flat), strength (how steep the slopes read), body (how much paint with body raises it, 0 for none), range (px a white height layer raises), directions (0 for smooth normals, 9 or 17 for a normal palette of whole directions, the default on pixel art). The light preview: ambient (the colour where no light reaches, like Godot's CanvasModulate) and shininess (how tight the highlights on the specular map are).
 
-Layers add to the maps with klad set: shine=0.6 (0 matte to 1) and specular=#ffd0a0 (the shine's colour) make the specular map; emissive=true makes a layer glow whatever the light (the emission map); z=12 brings a layer that many px nearer within its plane (the depth map). A plane's depth (klad set art.klad l1 depth=2) and the height set the rest of the depth map: near is white, the front plane 75% grey, depth 1 half of that. The occlusion map darkens creases and the foot of raised forms.
+Layers add to the maps with klad set: shine=0.6 (0 matte to 1) and specular=#ffd0a0 (the shine's colour) make the specular map; emissive=true makes a layer glow whatever the light (the emission map), glows=#bff2ff,#ffd040 only the parts of it in those colours, on every frame; z=12 brings a layer that many px nearer within its plane (the depth map). A plane's depth (klad set art.klad l1 depth=2) and the height set the rest of the depth map: near is white, the front plane 75% grey, depth 1 half of that. The occlusion map darkens creases and the foot of raised forms.
 
 Usage: klad maps [OPTIONS] <BUNDLE> [PROPS]...
 
@@ -915,7 +915,7 @@ Set the surface a layer at the top of the stack rounds in from its own outline, 
   klad surface art.klad bevel=12
   klad surface art.klad l2 --off
 
-bevel (px the rim rounds over), profile (round, chamfer, pillow or flat), strength, body, range and directions: 0 for smooth normals, 9 for facing out and the eight leans, 17 for those and the eight steep leans. A pixel drawing uses 9 unless told otherwise, so its normal map is painted in whole pixels from a normal palette, as pixel artists paint them by hand.
+bevel (px the rim rounds over, or fit: as deep as the layer's shape at frame 0), profile (round, chamfer, pillow or flat), strength, body, range and directions: 0 for smooth normals, 9 for facing out and the eight leans, 17 for those and the eight steep leans. A pixel drawing uses 9 unless told otherwise, so its normal map is painted in whole pixels from a normal palette, as pixel artists paint them by hand.
 
 Usage: klad surface [OPTIONS] <BUNDLE> [ARGS]...
 

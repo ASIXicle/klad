@@ -259,6 +259,8 @@ pub struct Layer {
     pub specular: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub emissive: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "colour_list")]
+    pub glows: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z: Option<f32>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -618,6 +620,23 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+fn colour_list<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Colours {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Colours::deserialize(d)? {
+        Colours::One(text) => text
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect(),
+        Colours::Many(list) => list,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Loc {
     Layer(Vec<usize>),
@@ -651,6 +670,7 @@ impl Layer {
             shine: None,
             specular: None,
             emissive: false,
+            glows: Vec::new(),
             z: None,
             reference: false,
             bones: Vec::new(),
@@ -1688,7 +1708,12 @@ impl Document {
                         role.name()
                     );
                 }
-                if layer.shine.is_some() || layer.specular.is_some() || layer.emissive || layer.z.is_some() {
+                if layer.shine.is_some()
+                    || layer.specular.is_some()
+                    || layer.emissive
+                    || !layer.glows.is_empty()
+                    || layer.z.is_some()
+                {
                     bail!(
                         "layer {}: a map layer draws into the {} map, so it has no shine, glow or z of its own: set those on the layers it lies over",
                         layer.id,
@@ -1707,16 +1732,25 @@ impl Document {
             if let Some(colour) = &layer.specular {
                 parse_hex(colour).with_context(|| format!("layer {}: specular", layer.id))?;
             }
+            layer.glows.iter().try_for_each(|colour| {
+                parse_hex(colour)
+                    .map(|_| ())
+                    .with_context(|| format!("layer {}: glows takes #rrggbb colours", layer.id))
+            })?;
             if let Some(z) = layer.z
                 && (!z.is_finite() || z.abs() > 100_000.0)
             {
                 bail!("layer {}: z {z} must be a number of px, nearer above 0", layer.id);
             }
             if matches!(layer.kind(), Kind::Adjust | Kind::Bones)
-                && (layer.shine.is_some() || layer.specular.is_some() || layer.emissive || layer.z.is_some())
+                && (layer.shine.is_some()
+                    || layer.specular.is_some()
+                    || layer.emissive
+                    || !layer.glows.is_empty()
+                    || layer.z.is_some())
             {
                 bail!(
-                    "layer {}: shine, specular, emissive and z are for layers that draw: paint, vector and groups",
+                    "layer {}: shine, specular, emissive, glows and z are for layers that draw: paint, vector and groups",
                     layer.id
                 );
             }
@@ -2017,5 +2051,22 @@ mod tests {
         let stroke: StrokeStyle = serde_json::from_str(r#"{"width":3}"#).unwrap();
         assert_eq!(stroke.paint, Paint::Solid("#000000".into()));
         assert_eq!(stroke.cap, Cap::Round);
+    }
+
+    #[test]
+    fn glow_colours_come_as_a_list_or_one_string_and_must_be_colours() {
+        let layer = |glows: &str| -> Layer {
+            serde_json::from_str(&format!(
+                r#"{{"id":"l1","name":"a","kind":"paint","cels":[],"glows":{glows}}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(layer(r##""#bff2ff, #ffd040""##).glows, vec!["#bff2ff", "#ffd040"]);
+        assert_eq!(layer(r##"["#bff2ff"]"##).glows, vec!["#bff2ff"]);
+        let mut doc = Document::new(8, 8);
+        doc.layers = vec![layer(r#""eyes""#)];
+        assert!(doc.validate().unwrap_err().to_string().contains("glows"));
+        doc.layers = vec![layer(r##""#bff2ff""##)];
+        doc.validate().unwrap();
     }
 }

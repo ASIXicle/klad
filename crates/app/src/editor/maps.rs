@@ -633,6 +633,42 @@ impl Editor {
             {
                 props.push(("emissive".into(), if glow { json!(true) } else { Value::Null }));
             }
+            if !layer.emissive {
+                let mut glows = layer.glows.clone();
+                let mut changed = false;
+                ui.label("glows where it is");
+                layer.glows.iter().for_each(|hex| {
+                    let rgba = color::rgba_of(hex).unwrap_or([1.0; 4]);
+                    let swatch = color::swatch(ui, rgba, false, crate::theme::TARGET);
+                    swatch.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("glow {hex}")));
+                    if swatch
+                        .hint(format!("the parts of this layer in {hex} glow whatever the light; click to stop"))
+                        .clicked()
+                    {
+                        glows.retain(|g| g != hex);
+                        changed = true;
+                    }
+                });
+                let current = color::hex([paint[0], paint[1], paint[2], 1.0]);
+                if ui
+                    .small_button("+ the current colour")
+                    .hint("the parts of this layer in the current colour glow whatever the light, on every frame: pick the colour of the eyes or the windows from the drawing first")
+                    .clicked()
+                    && !glows.contains(&current)
+                {
+                    glows.push(current);
+                    changed = true;
+                }
+                if changed {
+                    props.push((
+                        "glows".into(),
+                        match glows.is_empty() {
+                            true => Value::Null,
+                            false => json!(glows),
+                        },
+                    ));
+                }
+            }
             if let Some(v) = self.number(
                 ui,
                 &format!("{id}.z"),
@@ -766,7 +802,31 @@ impl Editor {
         self.apply(vec![Op::Maps(maps)])
     }
 
-    fn surface_fields(&mut self, ui: &mut egui::Ui, key: &str, surface: &Surface) -> Option<Surface> {
+    fn fit_bevel(&mut self, owner: Option<&str>) -> Option<f32> {
+        let frame = self.scene.frame;
+        let rasters = self.scene.rasters_now();
+        match klad_render::maps::fit_bevel(&self.scene.bundle.doc, frame, &rasters, owner) {
+            Ok(bevel) => {
+                self.say(
+                    Tone::Info,
+                    format!("bevel fitted to {bevel} px: the whole silhouette rounds over, as deep as the shape"),
+                );
+                Some(bevel)
+            }
+            Err(e) => {
+                self.say(Tone::Error, format!("the bevel could not be fitted: {e:#}"));
+                None
+            }
+        }
+    }
+
+    fn surface_fields(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: &str,
+        owner: Option<&str>,
+        surface: &Surface,
+    ) -> Option<Surface> {
         let mut next = surface.clone();
         ui.horizontal_wrapped(|ui| {
             Profile::ALL.iter().for_each(|p| {
@@ -825,6 +885,15 @@ impl Editor {
                         2 => next.body = v,
                         _ => next.range = v,
                     }
+                }
+                if i == 0
+                    && ui
+                        .small_button("fit")
+                        .hint("the bevel as deep as the shape, so the whole silhouette rounds over like a ball; flat-bottomed things turn into domes")
+                        .clicked()
+                    && let Some(bevel) = self.fit_bevel(owner)
+                {
+                    next.bevel = bevel;
                 }
             });
         });
@@ -934,7 +1003,7 @@ impl Editor {
                 return self.set(&id, vec![("surface".into(), value)]);
             }
             if let Some(surface) = &layer.surface
-                && let Some(next) = self.surface_fields(ui, &format!("{id}.surface"), surface)
+                && let Some(next) = self.surface_fields(ui, &format!("{id}.surface"), Some(&id), surface)
             {
                 return self.set(&id, vec![("surface".into(), serde_json::to_value(next)?)]);
             }
@@ -992,7 +1061,7 @@ impl Editor {
         }
         let current = maps.clone().unwrap_or_default();
         ui.label(egui::RichText::new("The drawing's surface").strong());
-        if let Some(next) = self.surface_fields(ui, "maps.surface", &current.surface) {
+        if let Some(next) = self.surface_fields(ui, "maps.surface", None, &current.surface) {
             return self.set_maps(Some(Maps {
                 surface: next,
                 ..current
