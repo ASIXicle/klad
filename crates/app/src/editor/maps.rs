@@ -615,14 +615,11 @@ impl Editor {
                 props.push(("shine".into(), if v <= 0.0 { Value::Null } else { json!(v) }));
             }
             let tint = layer.specular.as_deref().and_then(color::rgba_of).unwrap_or([1.0; 4]);
-            if color::swatch(ui, tint, false, crate::theme::TARGET)
-                .hint(format!(
-                    "the colour of its shine, {}; click to use the current colour",
-                    layer.specular.as_deref().unwrap_or("#ffffff")
-                ))
-                .clicked()
+            if let Some(rgba) = color::Square::new(ui, format!("{id}.specular"), tint, "the colour of its shine")
+                .current(paint)
+                .pick(ui)
             {
-                props.push(("specular".into(), json!(color::hex(paint))));
+                props.push(("specular".into(), json!(color::hex(rgba))));
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -641,21 +638,32 @@ impl Editor {
                 let mut glows = layer.glows.clone();
                 let mut changed = false;
                 ui.label("or only where it is");
-                layer.glows.iter().for_each(|hex| {
+                layer.glows.iter().enumerate().for_each(|(i, hex)| {
                     let rgba = color::rgba_of(hex).unwrap_or([1.0; 4]);
-                    let swatch = color::swatch(ui, rgba, false, crate::theme::TARGET);
-                    swatch.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("glow {hex}")));
-                    if swatch
-                        .hint(format!("the parts of this layer in {hex} glow whatever the light; click to stop"))
-                        .clicked()
+                    match color::Square::new(ui, format!("{id}.glow{i}"), rgba, format!("glow colour {}", i + 1))
+                        .current(paint)
+                        .removable()
+                        .show(ui)
                     {
-                        glows.retain(|g| g != hex);
-                        changed = true;
+                        Some(color::Pick::Chosen(rgba)) if color::hex([rgba[0], rgba[1], rgba[2], 1.0]) != *hex => {
+                            let picked = color::hex([rgba[0], rgba[1], rgba[2], 1.0]);
+                            glows = glows
+                                .iter()
+                                .filter(|g| **g != picked)
+                                .map(|g| if g == hex { picked.clone() } else { g.clone() })
+                                .collect();
+                            changed = true;
+                        }
+                        Some(color::Pick::Remove) => {
+                            glows.retain(|g| g != hex);
+                            changed = true;
+                        }
+                        _ => {}
                     }
                 });
                 let current = color::hex([paint[0], paint[1], paint[2], 1.0]);
                 if ui
-                    .small_button("+ the current colour")
+                    .button("+ the current colour")
                     .hint("the parts of this layer in the current colour glow whatever the light, on every frame: pick the colour of the eyes or the windows from the drawing first")
                     .clicked()
                     && !glows.contains(&current)
@@ -916,7 +924,7 @@ impl Editor {
                 }
                 if i == 0
                     && ui
-                        .small_button("fit")
+                        .button("fit")
                         .hint("the bevel as deep as the shape, so the whole silhouette rounds over like a ball; flat-bottomed things turn into domes")
                         .clicked()
                     && let Some(bevel) = self.fit_bevel(owner)
@@ -1067,7 +1075,11 @@ impl Editor {
         ui.horizontal_wrapped(|ui| {
             ui.label("show");
             let mut show = self.maps.show;
-            if ui.selectable_label(show.is_none(), "picture").clicked() {
+            if ui
+                .selectable_label(show.is_none(), "picture")
+                .hint("the picture as drawn, with no map over it")
+                .clicked()
+            {
                 show = None;
             }
             Map::ALL.iter().for_each(|m| {
@@ -1131,14 +1143,16 @@ impl Editor {
         let paint = self.color;
         ui.horizontal_wrapped(|ui| {
             let ambient = color::rgba_of(&current.ambient).unwrap_or([0.2, 0.2, 0.25, 1.0]);
-            if color::swatch(ui, ambient, false, crate::theme::TARGET)
-                .hint(format!(
-                    "the ambient colour, {}, where no light reaches (Godot's CanvasModulate); click to use the current colour",
-                    current.ambient
-                ))
-                .clicked()
+            if let Some(rgba) = color::Square::new(
+                ui,
+                "maps.ambient",
+                ambient,
+                "the ambient colour, where no light reaches (Godot's CanvasModulate)",
+            )
+            .current(paint)
+            .pick(ui)
             {
-                next.ambient = color::hex(paint);
+                next.ambient = color::hex(rgba);
             }
             ui.label("ambient");
             if let Some(v) = self.number(
@@ -1158,15 +1172,12 @@ impl Editor {
         current.lights.iter().enumerate().for_each(|(i, light)| {
             ui.horizontal_wrapped(|ui| {
                 let rgba = color::rgba_of(&light.color).unwrap_or([1.0; 4]);
-                if color::swatch(ui, rgba, false, crate::theme::TARGET)
-                    .hint(format!(
-                        "light {}, {}; click to use the current colour",
-                        i + 1,
-                        light.color
-                    ))
-                    .clicked()
+                if let Some(rgba) =
+                    color::Square::new(ui, ("maps.light", i), rgba, format!("the colour of light {}", i + 1))
+                        .current(paint)
+                        .pick(ui)
                 {
-                    next.lights[i].color = color::hex(paint);
+                    next.lights[i].color = color::hex(rgba);
                 }
                 let point = light.kind == LightKind::Point;
                 ui.label(match point {
@@ -1228,7 +1239,7 @@ impl Editor {
                         }
                     });
                 if ui
-                    .small_button(crate::theme::icon::TRASH)
+                    .button(crate::theme::icon::TRASH)
                     .hint(format!("remove light {}", i + 1))
                     .clicked()
                 {

@@ -1,4 +1,4 @@
-_Last updated: 2026-11-16 00:30_
+_Last updated: 2026-11-16 01:30_
 
 # Lighting in a game
 
@@ -21,7 +21,7 @@ Let a game's 2D lights light your drawing. klad makes light maps from what you d
 
 ## Shine and glow
 
-In a colour layer's **Layer settings**, under **Light**, set **shine** for metal and wet things, and tick **emissive** for windows, eyes and fire. They glow whatever the light. To light up only part of a layer, like the eyes on a face, pick their colour and click **+ the current colour** beside **emissive**: the parts in that colour glow, on every frame.
+In a colour layer's **Layer settings**, under **Light**, set **shine** for metal and wet things, and tick **emissive** for windows, eyes and fire. They glow whatever the light. To light up only part of a layer, like the eyes on a face, pick their colour and click **+ the current colour** beside **emissive**: the parts in that colour glow, on every frame. Click one of those colour squares to change it in the colour picker, or to **remove** it.
 
 ## Check the maps
 

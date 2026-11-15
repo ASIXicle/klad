@@ -58,7 +58,6 @@ use klad_brush::{
 };
 use klad_core::brushes::{BrushDef, Curve, TipDef, pick_id};
 use klad_core::bundle::now_ms;
-use klad_core::color::parse_hex;
 use klad_core::doc::{Item, Kind, Linear, Loc, MASK, Node, Paint, Radial, Shape, Stop};
 use klad_core::fill::{self, Fill, FillRef, FillSource, Seed};
 use klad_core::history::Stack;
@@ -787,20 +786,6 @@ pub(crate) struct Editor {
     timeline: timeline::Timeline,
     frames: FrameCache,
     clipboard: Option<copy::Copied>,
-}
-
-fn hex_of(c: Color32) -> String {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
-    if a == 255 {
-        format!("#{r:02x}{g:02x}{b:02x}")
-    } else {
-        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
-    }
-}
-
-fn color_of(hex: &str) -> Option<Color32> {
-    let [r, g, b, a] = parse_hex(hex).ok()?.map(|v| (v * 255.0).round() as u8);
-    Some(Color32::from_rgba_unmultiplied(r, g, b, a))
 }
 
 impl Editor {
@@ -4915,21 +4900,18 @@ impl Editor {
                 })
                 .response
                 .hint("no fill, one colour, or a linear or radial gradient");
-            if kind == "solid" {
-                let mut colour = color_of(&base).unwrap_or(Color32::BLACK);
-                if egui::color_picker::color_edit_button_srgba(ui, &mut colour, egui::color_picker::Alpha::OnlyBlend)
-                    .hint("the fill colour")
-                    .changed()
-                {
-                    out = Some(Paint::Solid(hex_of(colour)));
-                }
-                if ui
-                    .button("use brush colour")
-                    .hint("fill it with the current colour")
-                    .clicked()
-                {
-                    out = Some(Paint::Solid(color::hex(self.color)));
-                }
+            if kind == "solid"
+                && let Some(rgba) = color::Square::new(
+                    ui,
+                    format!("{id}.fill"),
+                    color::rgba_of(&base).unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    "the fill colour",
+                )
+                .current(self.color)
+                .alpha()
+                .pick(ui)
+            {
+                out = Some(Paint::Solid(color::hex(rgba)));
             }
         });
         if chosen != kind {
@@ -5062,20 +5044,17 @@ impl Editor {
                     next[i].0 = v;
                     changed = true;
                 }
-                let mut colour = color_of(hex).unwrap_or(Color32::BLACK);
-                if egui::color_picker::color_edit_button_srgba(ui, &mut colour, egui::color_picker::Alpha::OnlyBlend)
-                    .hint("this stop's colour")
-                    .changed()
+                if let Some(rgba) = color::Square::new(
+                    ui,
+                    format!("{id}.g.c{i}"),
+                    color::rgba_of(hex).unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    "this stop's colour",
+                )
+                .current(self.color)
+                .alpha()
+                .pick(ui)
                 {
-                    next[i].1 = hex_of(colour);
-                    changed = true;
-                }
-                if ui
-                    .button("brush colour")
-                    .hint("give this stop the current colour")
-                    .clicked()
-                {
-                    next[i].1 = color::hex(self.color);
+                    next[i].1 = color::hex(rgba);
                     changed = true;
                 }
                 if stops.len() > 1 && ui.button(crate::theme::icon::CLOSE).hint("remove this stop").clicked() {
@@ -5242,7 +5221,7 @@ impl Editor {
         let mut picked: Option<[f32; 4]> = None;
         let mut hsva = self.hsva;
         ui.horizontal(|ui| {
-            if color::picker(ui, &mut hsva, 150.0) {
+            if color::picker(ui, &mut hsva, 150.0).changed() {
                 self.color = hsva.rgba();
                 self.hsva = hsva;
             }

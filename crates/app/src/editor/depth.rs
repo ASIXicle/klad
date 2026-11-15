@@ -59,14 +59,11 @@ impl Editor {
         let current = self.color;
         ui.horizontal_wrapped(|ui| {
             let fog = color::rgba_of(&air.color).unwrap_or([0.6, 0.65, 0.7, 1.0]);
-            if color::swatch(ui, fog, false, crate::theme::TARGET)
-                .hint(format!(
-                    "the fog colour, {}; click to use the current colour",
-                    air.color
-                ))
-                .clicked()
+            if let Some(rgba) = color::Square::new(ui, "air.color", fog, "the fog colour")
+                .current(current)
+                .pick(ui)
             {
-                next.color = color::hex(current);
+                next.color = color::hex(rgba);
             }
             let mut graded = air.top.is_some();
             if ui
@@ -78,13 +75,11 @@ impl Editor {
             }
             if let Some(top) = &air.top {
                 let rgba = color::rgba_of(top).unwrap_or([0.8, 0.85, 0.9, 1.0]);
-                if color::swatch(ui, rgba, false, crate::theme::TARGET)
-                    .hint(format!(
-                        "the fog colour at the top, {top}; click to use the current colour"
-                    ))
-                    .clicked()
+                if let Some(rgba) = color::Square::new(ui, "air.top", rgba, "the fog colour at the top")
+                    .current(current)
+                    .pick(ui)
                 {
-                    next.top = Some(color::hex(current));
+                    next.top = Some(color::hex(rgba));
                 }
             }
         });

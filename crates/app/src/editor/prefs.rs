@@ -217,10 +217,17 @@ impl Editor {
             ui.end_row();
             row_label(ui, "Around the canvas");
             ui.horizontal(|ui| {
-                changed |= ui
-                    .color_edit_button_srgb(&mut d.surround)
-                    .hint("the grey around the canvas; neutral keeps colours true")
-                    .changed();
+                if let Some(rgba) = crate::color::Square::new(
+                    ui,
+                    "prefs.surround",
+                    crate::color::from_srgb(d.surround),
+                    "the grey around the canvas; neutral keeps colours true",
+                )
+                .pick(ui)
+                {
+                    d.surround = crate::color::to_srgb(rgba);
+                    changed = true;
+                }
                 if ui.button("neutral grey").hint("back to the neutral grey").clicked() {
                     d.surround = theme::SURROUND;
                     changed = true;
