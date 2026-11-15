@@ -443,12 +443,7 @@ fn resampled(c: &Coverage, a: Affine, hard: bool) -> Coverage {
                     false => 0,
                 };
             }
-            let (fx, fy) = (sx - 0.5, sy - 0.5);
-            let (ix, iy) = (fx.floor() as i64, fy.floor() as i64);
-            let (tx, ty) = (fx - ix as f32, fy - iy as f32);
-            let top = at(ix, iy) * (1.0 - tx) + at(ix + 1, iy) * tx;
-            let bottom = at(ix, iy + 1) * (1.0 - tx) + at(ix + 1, iy + 1) * tx;
-            (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8
+            c.between(sx, sy).round().clamp(0.0, 255.0) as u8
         })
         .collect();
     let mut out = Coverage::from_mask(w, h, &mask);

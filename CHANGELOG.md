@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Fixed opening a drawing on the Mac: **Choose a .klad file...** in the start window (it said folder) and **File > Open…** could not pick a `.klad` drawing, which Finder shows as one file. The open panel now takes a `.klad` drawing; other files are greyed out.
+- Fixed shade and rim on posed layers. The shade and rim fills that `klad light` makes keep the part of the shape outside a cut, and a pose turned the fill with its bone but left that cut where it was in the rest drawing, so in posed frames and their in-betweens the rim grew into a wide crescent and the shade slid away. Posing now moves the cut with the fill, in `klad apply` poses, in-betweens and the editor alike; a frame posed before this comes right when you pose it again.
+- Fixed cuts in in-betweens. A fill or stroke cut by a lasso kept its cut where it was in the first key when an in-between moved it: flood fills between keys, and marks that ride a line (marks drawn by hand between keys and marks found in one key only). The cut now moves with the mark.
+- Fixed hard edges on posed fills. A pose sampled each fill at the nearest pixel, so a turned fill got a stepped edge and thin bands along it broke into dots; it now blends between pixels as `klad transform` does, and a pose and a transform of the same turn give the same picture. Frames posed before this keep their old edge until they are posed again.
 
 ## 0.2.0 (2026-11-12)
 
