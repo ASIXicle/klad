@@ -990,6 +990,10 @@ pub fn godot(
             size: [w, h],
             scale: look.scale,
             maps,
+            outline: shapes
+                .as_ref()
+                .and_then(|shapes| shapes.get(pics.animations.first()?.1.first()?.picture))
+                .map_or(&[], |rings| rings.as_slice()),
         })?;
         write_atomic(&file, text.as_bytes())?;
         written.push(file);
@@ -1504,6 +1508,26 @@ func _init():
 	out["soft"] = [light.shadow_enabled, light.shadow_filter, light.shadow_filter_smooth]
 	var backdrop: ColorRect = lit.get_child(1)
 	out["backdrop"] = [backdrop.size.x, backdrop.position.x]
+	root.add_child(lit)
+	var pointer: PointLight2D = lit.get_child(3)
+	var holder: Node2D = lit.get_child(2).get_node("shadows")
+	var occluder: LightOccluder2D = holder.get_child(0)
+	occluder.occluder = holder.shapes[0][0]
+	var poly: PackedVector2Array = occluder.occluder.polygon
+	var mid := Vector2.ZERO
+	for p in poly:
+		mid += p
+	mid /= poly.size()
+	var probe := mid
+	for p in poly:
+		var c := p.lerp(mid, 0.1)
+		if Geometry2D.is_point_in_polygon(c, poly):
+			probe = c
+			break
+	pointer.global_position = occluder.get_global_transform() * probe
+	var hit: bool = pointer._inside()
+	pointer.global_position = Vector2(-100000, -100000)
+	out["inside"] = [pointer.get_node_or_null(pointer.shadows) != null, hit, pointer._inside()]
 	lit.free()
 	print("RESULT ", JSON.stringify(out))
 	quit()
@@ -1626,6 +1650,11 @@ func _init():
             (got["backdrop"][0].as_f64(), got["backdrop"][1].as_f64()),
             (Some(3.0 * canvas_width), Some(-canvas_width)),
             "a backdrop three canvases wide behind the sprite catches the light and the shadows"
+        );
+        assert_eq!(
+            got["inside"],
+            serde_json::json!([true, true, false]),
+            "the mouse light knows when it is inside the sprite, and drops the sprite's shadow there"
         );
         assert_eq!(
             (

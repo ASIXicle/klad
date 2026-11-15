@@ -1,4 +1,4 @@
-_Last updated: 2026-11-15 20:45_
+_Last updated: 2026-11-15 22:00_
 
 # Lighting in a game
 
@@ -29,7 +29,7 @@ Select **View > Check the light maps**. The Light maps panel lists what reads wr
 
 ## Export to Godot
 
-Click **export to Godot**. With the maps on, the sprite is lit by Godot's lights, and `<name>_lit.tscn` shows it with your preview lights, in front of a plain backdrop. A sprite only casts a shadow on something lit behind it, like that backdrop or your game's ground. Tick **shadows** in the export window for shadows from the silhouette. The lights in `<name>_lit.tscn` cast soft shadows; for the same on your own lights, set **Shadow > Filter** to PCF5 and **Filter Smooth** to 1. More smoothing makes the shadow spill past the sprite's edge. Tick a shader for fog, a rim light or darker creases.
+Click **export to Godot**. With the maps on, the sprite is lit by Godot's lights, and `<name>_lit.tscn` shows it with your preview lights, in front of a plain backdrop. A sprite only casts a shadow on something lit behind it, like that backdrop or your game's ground. A light inside its own sprite, like a lantern's flame, is blocked by the sprite's shadow: in your game, give the sprite's **LightOccluder2D** an **Occluder Light Mask** that the light's **Shadow > Item Cull Mask** leaves out. In `<name>_lit.tscn` the lights do this by themselves. Tick **shadows** in the export window for shadows from the silhouette. The lights in `<name>_lit.tscn` cast soft shadows; for the same on your own lights, set **Shadow > Filter** to PCF5 and **Filter Smooth** to 1. More smoothing makes the shadow spill past the sprite's edge. Tick a shader for fog, a rim light or darker creases.
 
 ![The ruin's planes without and with the fog shader: the far planes fade into the fog](../images/guide-fog.png)
 

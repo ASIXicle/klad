@@ -852,6 +852,20 @@ pub struct LitScene<'a> {
     pub size: [f32; 2],
     pub scale: f32,
     pub maps: &'a klad_core::maps::Maps,
+    pub outline: &'a [Vec<[f32; 2]>],
+}
+
+fn inside(rings: &[Vec<[f32; 2]>], [x, y]: [f32; 2]) -> bool {
+    rings
+        .iter()
+        .flat_map(|ring| {
+            let n = ring.len();
+            (0..n).map(move |i| (ring[i], ring[(i + n - 1) % n]))
+        })
+        .filter(|(a, b)| (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0])
+        .count()
+        % 2
+        == 1
 }
 
 fn colour(hex: &str) -> Result<String> {
@@ -867,8 +881,24 @@ fn colour(hex: &str) -> Result<String> {
 
 const POINTER: &str = "extends PointLight2D
 
+@export var shadows: NodePath
+
 func _process(_delta):
 \tglobal_position = get_global_mouse_position()
+\tshadow_enabled = not _inside()
+
+func _inside() -> bool:
+\tvar holder := get_node_or_null(shadows)
+\tif holder == null:
+\t\treturn false
+\tvar hits := 0
+\tfor child in holder.get_children():
+\t\tvar occluder := child as LightOccluder2D
+\t\tif occluder != null and occluder.occluder != null:
+\t\t\tvar local := occluder.get_global_transform().affine_inverse() * global_position
+\t\t\tif Geometry2D.is_point_in_polygon(local, occluder.occluder.polygon):
+\t\t\t\thits += 1
+\treturn hits % 2 == 1
 ";
 
 const SOFT_SHADOWS: &str = "shadow_enabled = true\nshadow_filter = 1\nshadow_filter_smooth = 1.0\n";
@@ -908,17 +938,31 @@ pub fn lit_scene(s: &LitScene) -> Result<String> {
         match l.kind {
             klad_core::maps::LightKind::Point => {
                 let pointer = std::mem::take(&mut follows);
+                let held = !pointer && inside(s.outline, [l.at[0] * k, l.at[1] * k]);
+                let name = match (pointer, held) {
+                    (true, _) => format!("light {} (follows the mouse)", i + 1),
+                    (false, true) => format!("light {} (inside the sprite, so no shadow of it)", i + 1),
+                    (false, false) => format!("light {}", i + 1),
+                };
+                let script = match (pointer, s.outline.is_empty()) {
+                    (false, _) => String::new(),
+                    (true, true) => "script = SubResource(\"GDScript_pointer\")\n".to_string(),
+                    (true, false) => format!(
+                        "script = SubResource(\"GDScript_pointer\")\nshadows = NodePath({})\n",
+                        quoted(&format!("../{}/shadows", s.node))
+                    ),
+                };
                 nodes += &format!(
                     "\n[node name={} type=\"PointLight2D\" parent=\".\"]\nposition = Vector2({}, {})\ncolor = {}\nenergy = {}\n{}texture = SubResource(\"GradientTexture2D_fade\")\ntexture_scale = {}\nheight = {}\n{}",
-                    quoted(&format!("light {}{}", i + 1, if pointer { " (follows the mouse)" } else { "" })),
+                    quoted(&name),
                     number(l.at[0] * k),
                     number(l.at[1] * k),
                     colour(&l.color)?,
                     number(l.energy),
-                    SOFT_SHADOWS,
+                    if held { "shadow_enabled = false\n" } else { SOFT_SHADOWS },
                     number(l.range * k / 128.0),
                     number(l.height * k),
-                    if pointer { "script = SubResource(\"GDScript_pointer\")\n" } else { "" }
+                    script
                 );
             }
             klad_core::maps::LightKind::Directional => {
@@ -1264,5 +1308,62 @@ mod tests {
         assert_eq!(uid_text(0), "uid://a");
         assert_eq!(uid_text(34), "uid://ba");
         assert_eq!(uid_text(33), "uid://8");
+    }
+
+    #[test]
+    fn a_light_inside_the_sprite_casts_no_shadow_of_it() {
+        let maps = klad_core::maps::Maps {
+            lights: vec![
+                klad_core::maps::Light {
+                    at: [300.0, 300.0],
+                    ..Default::default()
+                },
+                klad_core::maps::Light {
+                    at: [20.0, 20.0],
+                    ..Default::default()
+                },
+                klad_core::maps::Light {
+                    at: [250.0, 50.0],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let outline = vec![
+            vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]],
+            vec![[40.0, 40.0], [40.0, 60.0], [60.0, 60.0], [60.0, 40.0]],
+        ];
+        let scene = |outline: &[Vec<[f32; 2]>]| {
+            lit_scene(&LitScene {
+                uid: "uid://a",
+                node: "lamp",
+                sprite: ("lamp.tscn", "uid://b"),
+                origin: [50.0, 100.0],
+                size: [400.0, 400.0],
+                scale: 1.0,
+                maps: &maps,
+                outline,
+            })
+            .unwrap()
+        };
+        let text = scene(&outline);
+        let block = |name: &str| {
+            let at = text.find(&format!("[node name=\"{name}")).unwrap();
+            text[at..].split("\n\n").next().unwrap().to_string()
+        };
+        let pointer = block("light 1 (follows the mouse)");
+        assert!(pointer.contains("shadows = NodePath(\"../lamp/shadows\")"), "{pointer}");
+        assert!(pointer.contains("shadow_enabled = true"));
+        let held = block("light 2 (inside the sprite, so no shadow of it)");
+        assert!(held.contains("shadow_enabled = false"), "{held}");
+        assert!(block("light 3\"").contains("shadow_enabled = true"));
+        assert!(
+            inside(&outline, [20.0, 20.0]) && !inside(&outline, [50.0, 50.0]),
+            "a hole is outside"
+        );
+        assert!(
+            !scene(&[]).contains("shadows = NodePath"),
+            "no occluders, nothing to look for"
+        );
     }
 }
