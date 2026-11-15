@@ -6233,6 +6233,15 @@ fn the_light_maps_panel_turns_maps_on_and_layers_become_map_layers_by_command() 
         None,
         "and back"
     );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer("shade").unwrap().map,
+        Some(klad_core::maps::Role::Height),
+        "one undo step per conversion"
+    );
+    h.state_mut().invoke(Cmd::MakeColourLayer).unwrap();
+    h.run_steps(2);
     h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
     h.run_steps(3);
     let shade = h.state().scene.bundle.doc.find_layer("shade").unwrap().clone();
