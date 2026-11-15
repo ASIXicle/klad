@@ -1500,6 +1500,8 @@ func _init():
 	for c in lit.get_children():
 		kinds.append(c.get_class())
 	out["lit"] = kinds
+	var light: PointLight2D = lit.get_child(2)
+	out["soft"] = [light.shadow_enabled, light.shadow_filter, light.shadow_filter_smooth]
 	lit.free()
 	print("RESULT ", JSON.stringify(out))
 	quit()
@@ -1610,6 +1612,15 @@ func _init():
         assert_eq!(
             got["lit"],
             serde_json::json!(["CanvasModulate", "AnimatedSprite2D", "PointLight2D", "Camera2D"])
+        );
+        assert_eq!(
+            (
+                got["soft"][0].as_bool(),
+                got["soft"][1].as_u64(),
+                got["soft"][2].as_f64()
+            ),
+            (Some(true), Some(2), Some(2.0)),
+            "the preview lights cast soft shadows (PCF13, smoothed)"
         );
         fs::remove_dir_all(&dir).unwrap();
     }

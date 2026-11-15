@@ -871,6 +871,8 @@ func _process(_delta):
 \tglobal_position = get_global_mouse_position()
 ";
 
+const SOFT_SHADOWS: &str = "shadow_enabled = true\nshadow_filter = 2\nshadow_filter_smooth = 2.0\n";
+
 pub fn lit_scene(s: &LitScene) -> Result<String> {
     let k = s.scale;
     let fade = (0..=4).map(|i| 1.0 - i as f32 / 4.0).map(|t| t * t);
@@ -902,12 +904,13 @@ pub fn lit_scene(s: &LitScene) -> Result<String> {
             klad_core::maps::LightKind::Point => {
                 let pointer = std::mem::take(&mut follows);
                 nodes += &format!(
-                    "\n[node name={} type=\"PointLight2D\" parent=\".\"]\nposition = Vector2({}, {})\ncolor = {}\nenergy = {}\nshadow_enabled = true\ntexture = SubResource(\"GradientTexture2D_fade\")\ntexture_scale = {}\nheight = {}\n{}",
+                    "\n[node name={} type=\"PointLight2D\" parent=\".\"]\nposition = Vector2({}, {})\ncolor = {}\nenergy = {}\n{}texture = SubResource(\"GradientTexture2D_fade\")\ntexture_scale = {}\nheight = {}\n{}",
                     quoted(&format!("light {}{}", i + 1, if pointer { " (follows the mouse)" } else { "" })),
                     number(l.at[0] * k),
                     number(l.at[1] * k),
                     colour(&l.color)?,
                     number(l.energy),
+                    SOFT_SHADOWS,
                     number(l.range * k / 128.0),
                     number(l.height * k),
                     if pointer { "script = SubResource(\"GDScript_pointer\")\n" } else { "" }

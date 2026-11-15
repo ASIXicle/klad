@@ -1,4 +1,4 @@
-_Last updated: 2026-11-14 15:45_
+_Last updated: 2026-11-15 14:00_
 
 # Lighting in a game
 
@@ -28,7 +28,7 @@ Select **View > Check the light maps**. The Light maps panel lists what reads wr
 
 ## Export to Godot
 
-Click **export to Godot**. With the maps on, the sprite is lit by Godot's lights, and `<name>_lit.tscn` shows it with your preview lights. Tick **shadows** in the export window for shadows from the silhouette. Tick a shader for fog, a rim light or darker creases.
+Click **export to Godot**. With the maps on, the sprite is lit by Godot's lights, and `<name>_lit.tscn` shows it with your preview lights. Tick **shadows** in the export window for shadows from the silhouette. The lights in `<name>_lit.tscn` cast soft shadows; for the same on your own lights, set **Shadow > Filter** to PCF13 and **Filter Smooth** to 2. Tick a shader for fog, a rim light or darker creases.
 
 ![The ruin's planes without and with the fog shader: the far planes fade into the fog](../images/guide-fog.png)
 
