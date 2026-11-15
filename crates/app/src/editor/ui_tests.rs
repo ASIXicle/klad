@@ -6762,7 +6762,7 @@ fn a_colour_square_opens_the_picker_and_each_pick_is_one_step() {
 }
 
 #[test]
-fn an_effect_colour_is_picked_on_the_wheel_in_one_undo_step() {
+fn an_effect_colour_previews_while_dragging_on_the_wheel_and_commits_once() {
     let path = sample("effectsquare");
     let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
     [Pane::Brush, Pane::Tool, Pane::Preview, Pane::Notes, Pane::History]
@@ -6795,12 +6795,28 @@ fn an_effect_colour_is_picked_on_the_wheel_in_one_undo_step() {
     h.get_by_role_and_label(Role::Button, "the outline's colour").click();
     h.run_steps(3);
     let wheel = h.get_by_label("colour wheel").rect();
-    drag(
-        &mut h,
+    let (from, to) = (
         wheel.center(),
         wheel.center() + vec2(wheel.width() * 0.2, -wheel.height() * 0.2),
     );
+    h.hover_at(from);
+    h.run_steps(1);
+    h.drag_at(from);
+    h.run_steps(1);
+    h.hover_at(to);
+    h.run_steps(2);
+    assert!(
+        h.state().look.draft.is_some(),
+        "the effect previews while the drag is under way"
+    );
+    assert_ne!(
+        outline(&h),
+        serde_json::json!("#000000"),
+        "in the colour under the pointer"
+    );
+    h.drop_at(to);
     h.run_steps(3);
+    assert!(h.state().look.draft.is_none());
     let picked = outline(&h);
     assert_ne!(
         picked,
