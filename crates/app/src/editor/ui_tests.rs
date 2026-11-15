@@ -6550,5 +6550,32 @@ fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
         None,
         "and the picture stays while the height layer is selected"
     );
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"set","id":"l2","map":"normal"}"#).unwrap())
+        .unwrap();
+    activate(&mut h, "rim");
+    h.run_steps(3);
+    assert_eq!(
+        h.state().maps.show,
+        Some(Show::Map(Map::Normal)),
+        "a normal layer shows the normal map"
+    );
+    activate(&mut h, "colour");
+    h.run_steps(3);
+    assert_eq!(h.state().maps.show, None);
+    h.get_by_label("add a point light").click();
+    h.run_steps(3);
+    let before = h.state().scene.bundle.doc.maps.clone().unwrap();
+    assert_eq!(before.lights.len(), 1);
+    h.get_by_label("light maps").click();
+    h.run_steps(3);
+    assert!(h.state().scene.bundle.doc.maps.is_none(), "off");
+    h.get_by_label("light maps").click();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.maps.as_ref(),
+        Some(&before),
+        "on again, with the surface and the light it had"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }

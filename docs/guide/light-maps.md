@@ -1,4 +1,4 @@
-_Last updated: 2026-11-15 16:30_
+_Last updated: 2026-11-15 17:30_
 
 # Lighting in a game
 
@@ -17,7 +17,7 @@ Let a game's 2D lights light your drawing. klad makes light maps from what you d
 - **bevel** sets how far in from the outline the edges round over.
 - **bevel** alone can make a whole form: a flat disc with the bevel as wide as its radius and the profile **round** lights like a ball.
 - Give a layer the role **height** and paint it: white raises, black lowers, mid grey changes nothing. Only lightness counts, so the Colour panel shows greys on a height layer, and the canvas shows the height map while it is selected. **white raises** sets how high pure white goes.
-- Give a layer the role **normal** and paint directions. Pick one on the sphere in the Colour panel, or tick **direction from pen tilt** and lean the pen the way the surface faces.
+- Give a layer the role **normal** and paint directions. Pick one on the sphere in the Colour panel, or tick **direction from pen tilt** and lean the pen the way the surface faces. The canvas shows the normal map while the layer is selected.
 
 ## Shine and glow
 
@@ -29,7 +29,7 @@ Select **View > Check the light maps**. The Light maps panel lists what reads wr
 
 ## Export to Godot
 
-Click **export to Godot**. With the maps on, the sprite is lit by Godot's lights, and `<name>_lit.tscn` shows it with your preview lights. Tick **shadows** in the export window for shadows from the silhouette. The lights in `<name>_lit.tscn` cast soft shadows; for the same on your own lights, set **Shadow > Filter** to PCF13 and **Filter Smooth** to 2. Tick a shader for fog, a rim light or darker creases.
+Click **export to Godot**. With the maps on, the sprite is lit by Godot's lights, and `<name>_lit.tscn` shows it with your preview lights, in front of a plain backdrop. A sprite only casts a shadow on something lit behind it, like that backdrop or your game's ground. Tick **shadows** in the export window for shadows from the silhouette. The lights in `<name>_lit.tscn` cast soft shadows; for the same on your own lights, set **Shadow > Filter** to PCF13 and **Filter Smooth** to 2. Tick a shader for fog, a rim light or darker creases.
 
 ![The ruin's planes without and with the fog shader: the far planes fade into the fog](../images/guide-fog.png)
 

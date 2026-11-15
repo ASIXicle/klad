@@ -55,7 +55,29 @@ pub(super) struct MapsView {
     texture: Option<(Want, Option<[f32; 2]>, usize, TextureHandle)>,
     traced: Option<Traced>,
     tracing: Option<Tracing>,
-    auto_for: Option<String>,
+    auto_for: Option<(String, Map)>,
+    parked: Option<Maps>,
+}
+
+fn own_map(role: Role) -> (Map, &'static str) {
+    match role {
+        Role::Height => (
+            Map::Height,
+            "the height map while a height layer is selected: white raises, black lowers",
+        ),
+        Role::Normal => (
+            Map::Normal,
+            "the normal map while a normal layer is selected: what it paints are directions",
+        ),
+        Role::Specular => (
+            Map::Specular,
+            "the specular map while a specular layer is selected: brighter is shinier",
+        ),
+        Role::Emission => (
+            Map::Emission,
+            "the emission map while an emission layer is selected: what glows whatever the light",
+        ),
+    }
 }
 
 const HEIGHTS: [(&str, f32); 5] = [
@@ -276,24 +298,21 @@ impl Editor {
         self.maps.job = Some((want, rx));
     }
 
-    fn follow_height_layer(&mut self) {
+    fn follow_map_layer(&mut self) {
         let on = self.scene.bundle.doc.maps.is_some();
         let active = self
             .scene
             .active_layer()
-            .filter(|l| on && l.map == Some(Role::Height))
-            .map(|l| l.id.clone());
-        match (&self.maps.auto_for, active) {
-            (None, Some(id)) if self.maps.show.is_none() => {
-                self.maps.show = Some(Show::Map(Map::Height));
-                self.maps.auto_for = Some(id);
-                self.say(
-                    Tone::Info,
-                    "showing the height map while a height layer is selected: white raises, black lowers (M for the next map)",
-                );
+            .filter(|_| on)
+            .and_then(|l| l.map.map(|r| (l.id.clone(), own_map(r))));
+        match (self.maps.auto_for.clone(), active) {
+            (None, Some((id, (map, words)))) if self.maps.show.is_none() => {
+                self.maps.show = Some(Show::Map(map));
+                self.maps.auto_for = Some((id, map));
+                self.say(Tone::Info, format!("showing {words} (M for the next map)"));
             }
-            (Some(was), now) if now.as_ref() != Some(was) => {
-                if self.maps.show == Some(Show::Map(Map::Height)) {
+            (Some((was, map)), now) if now.as_ref().map(|(id, (m, _))| (id, *m)) != Some((&was, map)) => {
+                if self.maps.show == Some(Show::Map(map)) {
                     self.maps.show = None;
                 }
                 self.maps.auto_for = None;
@@ -330,7 +349,7 @@ impl Editor {
     }
 
     pub(super) fn map_overlay(&mut self, ui: &egui::Ui, view: crate::view::View, rect: Rect) {
-        self.follow_height_layer();
+        self.follow_map_layer();
         let typing = ui.ctx().egui_wants_keyboard_input();
         let held = !typing && ui.input(|i| i.key_down(Key::L) && !i.modifiers.any());
         let show = match held {
@@ -959,10 +978,17 @@ impl Editor {
         let mut on = maps.is_some();
         if ui
             .checkbox(&mut on, "light maps")
-            .hint("normal, height, specular and emission maps for a game's 2D lights, made from what is drawn")
+            .hint("normal, height, specular and emission maps for a game's 2D lights, made from what is drawn; turned off and on again, they come back with their surface and lights")
             .changed()
         {
-            return self.set_maps(on.then(Maps::default));
+            let next = match on {
+                true => Some(self.maps.parked.take().unwrap_or_default()),
+                false => {
+                    self.maps.parked = maps;
+                    None
+                }
+            };
+            return self.set_maps(next);
         }
         let current = maps.clone().unwrap_or_default();
         ui.label(egui::RichText::new("The drawing's surface").strong());

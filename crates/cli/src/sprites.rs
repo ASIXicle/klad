@@ -1500,8 +1500,10 @@ func _init():
 	for c in lit.get_children():
 		kinds.append(c.get_class())
 	out["lit"] = kinds
-	var light: PointLight2D = lit.get_child(2)
+	var light: PointLight2D = lit.get_child(3)
 	out["soft"] = [light.shadow_enabled, light.shadow_filter, light.shadow_filter_smooth]
+	var backdrop: ColorRect = lit.get_child(1)
+	out["backdrop"] = [backdrop.size.x, backdrop.position.x]
 	lit.free()
 	print("RESULT ", JSON.stringify(out))
 	quit()
@@ -1611,7 +1613,19 @@ func _init():
         assert_eq!(got["params"], true);
         assert_eq!(
             got["lit"],
-            serde_json::json!(["CanvasModulate", "AnimatedSprite2D", "PointLight2D", "Camera2D"])
+            serde_json::json!([
+                "CanvasModulate",
+                "ColorRect",
+                "AnimatedSprite2D",
+                "PointLight2D",
+                "Camera2D"
+            ])
+        );
+        let canvas_width = Bundle::open(&path).unwrap().doc.canvas.width as f64;
+        assert_eq!(
+            (got["backdrop"][0].as_f64(), got["backdrop"][1].as_f64()),
+            (Some(3.0 * canvas_width), Some(-canvas_width)),
+            "a backdrop three canvases wide behind the sprite catches the light and the shadows"
         );
         assert_eq!(
             (

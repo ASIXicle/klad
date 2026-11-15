@@ -877,10 +877,15 @@ pub fn lit_scene(s: &LitScene) -> Result<String> {
     let k = s.scale;
     let fade = (0..=4).map(|i| 1.0 - i as f32 / 4.0).map(|t| t * t);
     let colours: Vec<String> = fade.map(|v| format!("{0}, {0}, {0}, 1", number(v))).collect();
+    let (w, h) = (s.size[0] * k, s.size[1] * k);
     let mut nodes = format!(
-        "\n[node name={} type=\"Node2D\"]\n\n[node name=\"ambient\" type=\"CanvasModulate\" parent=\".\"]\ncolor = {}\n\n[node name={} parent=\".\" instance=ExtResource(\"1_sprite\")]\nposition = Vector2({}, {})\n",
+        "\n[node name={} type=\"Node2D\"]\n\n[node name=\"ambient\" type=\"CanvasModulate\" parent=\".\"]\ncolor = {}\n\n[node name=\"backdrop (catches the light and the shadows)\" type=\"ColorRect\" parent=\".\"]\noffset_left = {}\noffset_top = {}\noffset_right = {}\noffset_bottom = {}\ncolor = Color(0.72, 0.7, 0.66, 1)\n\n[node name={} parent=\".\" instance=ExtResource(\"1_sprite\")]\nposition = Vector2({}, {})\n",
         quoted(&format!("{}_lit", s.node)),
         colour(&s.maps.ambient)?,
+        number(-w),
+        number(-h),
+        number(2.0 * w),
+        number(2.0 * h),
         quoted(s.node),
         number(s.origin[0] * k),
         number(s.origin[1] * k)
