@@ -871,7 +871,7 @@ func _process(_delta):
 \tglobal_position = get_global_mouse_position()
 ";
 
-const SOFT_SHADOWS: &str = "shadow_enabled = true\nshadow_filter = 2\nshadow_filter_smooth = 2.0\n";
+const SOFT_SHADOWS: &str = "shadow_enabled = true\nshadow_filter = 1\nshadow_filter_smooth = 1.0\n";
 
 pub fn lit_scene(s: &LitScene) -> Result<String> {
     let k = s.scale;

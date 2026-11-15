@@ -1633,8 +1633,8 @@ func _init():
                 got["soft"][1].as_u64(),
                 got["soft"][2].as_f64()
             ),
-            (Some(true), Some(2), Some(2.0)),
-            "the preview lights cast soft shadows (PCF13, smoothed)"
+            (Some(true), Some(1), Some(1.0)),
+            "the preview lights cast soft shadows that still start at the outline (PCF5, smoothed once)"
         );
         fs::remove_dir_all(&dir).unwrap();
     }
