@@ -1,4 +1,5 @@
 use crate::color::{from_oklab, from_u16, to_oklab, to_u16};
+use crate::cut::Cut;
 use crate::fill::{Coverage, Fill, FillSource};
 use crate::markedit::Affine;
 use crate::stroke::{Author, Mark, Sample, Stroke, fingerprint};
@@ -504,9 +505,15 @@ pub fn carry(mark: &Mark, from: &Lines, to: &Lines, within: Option<&[usize]>) ->
             FillSource::Seed { seed, .. } => {
                 (seed.x, seed.y) = mv((seed.x, seed.y));
             }
-            FillSource::Cells { .. } => {}
+            FillSource::Cells { .. } => return mark.clone(),
         },
     }
+    out.cuts_mut().iter_mut().for_each(|c| {
+        c.map(|p| {
+            let (x, y) = mv((p[0], p[1]));
+            [x, y]
+        })
+    });
     out
 }
 
@@ -1722,6 +1729,10 @@ fn flood_at(a: &Fill, b: &Fill, t: f32) -> Fill {
         },
         (source, _) => source.clone(),
     };
+    let shift = match (&a.source, &source) {
+        (FillSource::Seed { seed: from, .. }, FillSource::Seed { seed: to, .. }) => [to.x - from.x, to.y - from.y],
+        _ => [0.0, 0.0],
+    };
     Fill {
         id: a.id,
         color: colour(a.color, b.color, t),
@@ -1730,7 +1741,37 @@ fn flood_at(a: &Fill, b: &Fill, t: f32) -> Fill {
         source,
         coverage: Coverage::default(),
         lock: a.lock,
-        cuts: a.cuts.clone(),
+        cuts: cuts_between(&a.cuts, &b.cuts, t, shift),
+    }
+}
+
+fn cuts_between(a: &[Cut], b: &[Cut], t: f32, shift: [f32; 2]) -> Vec<Cut> {
+    let matched = a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(p, q)| p.keep == q.keep && p.polygon.len() == q.polygon.len());
+    match matched {
+        true => a
+            .iter()
+            .zip(b)
+            .map(|(p, q)| Cut {
+                keep: p.keep,
+                polygon: p
+                    .polygon
+                    .iter()
+                    .zip(&q.polygon)
+                    .map(|(u, v)| [lerp32(u[0], v[0], t), lerp32(u[1], v[1], t)])
+                    .collect(),
+            })
+            .collect(),
+        false => a
+            .iter()
+            .cloned()
+            .map(|mut c| {
+                c.map(|p| [p[0] + shift[0], p[1] + shift[1]]);
+                c
+            })
+            .collect(),
     }
 }
 
@@ -2262,5 +2303,77 @@ mod tests {
         let turned = vec![(0.0, 0.0), (0.0, 100.0)];
         let (x, y) = place(&at, &[turned]).unwrap();
         assert!((x + 10.0).abs() < 1e-3 && (y - 25.0).abs() < 1e-3, "{x},{y}");
+    }
+
+    fn band(x0: f32, y0: f32, keep: crate::cut::Keep) -> Cut {
+        Cut {
+            keep,
+            polygon: vec![[x0, y0], [x0 + 40.0, y0], [x0 + 40.0, y0 + 20.0], [x0, y0 + 20.0]],
+        }
+    }
+
+    #[test]
+    fn in_betweens_of_flood_fills_move_their_cuts_with_them() {
+        let flood = |x: f32, cuts: Vec<Cut>| {
+            let mut f = Fill::new(
+                4,
+                [0.0, 0.0, 1.0, 1.0],
+                FillSource::Seed {
+                    seed: Seed {
+                        x: x + 50.0,
+                        y: 50.0,
+                        tolerance: 0.2,
+                        gap: 3.0,
+                        expand: 2.0,
+                    },
+                    reference: FillRef::Layer("l1".into()),
+                },
+                Coverage::default(),
+            );
+            f.cuts = cuts;
+            Mark::Fill(f)
+        };
+        let outside = |x: f32| vec![band(x, 40.0, crate::cut::Keep::Outside)];
+        let left_x = |m: &Mark| m.cuts()[0].polygon[0][0];
+        let matched = plan(
+            &[flood(0.0, outside(0.0))],
+            &[flood(60.0, outside(60.0))],
+            Match::Id,
+            &[],
+        );
+        assert_eq!(left_x(&matched.at(0.5)[0]), 30.0, "cuts of both keys are blended");
+        let only_a = plan(&[flood(0.0, outside(0.0))], &[flood(60.0, Vec::new())], Match::Id, &[]);
+        assert_eq!(
+            left_x(&only_a.at(0.25)[0]),
+            15.0,
+            "a cut of one key moves with the seed"
+        );
+    }
+
+    #[test]
+    fn a_carried_mark_takes_its_cuts_along_its_line() {
+        use crate::cut::Keep;
+        let mut shape = Fill::new(
+            4,
+            [0.0, 0.0, 1.0, 1.0],
+            FillSource::Polygon(vec![[10.0, 5.0], [30.0, 5.0], [30.0, 15.0], [10.0, 15.0]]),
+            Coverage::default(),
+        );
+        shape.cuts = vec![band(15.0, 0.0, Keep::Outside)];
+        let pts: Vec<(f32, f32, f32)> = (0..=10).map(|i| (10.0 + i as f32 * 2.0, 10.0, 1.0)).collect();
+        let mut line = Stroke::new(5, "ink", [0.0, 0.0, 0.0, 1.0], 4.0, 1).with_points(&pts, 8.0);
+        line.cuts = vec![band(15.0, 0.0, Keep::Inside)];
+        let mut cells = Fill::cells(6, [0.0, 0.0, 0.0, 1.0], "", false, Coverage::from_cells(&[[20, 10]]));
+        cells.cuts = vec![band(15.0, 0.0, Keep::Inside)];
+        let from: Lines = vec![vec![(0.0, 0.0), (100.0, 0.0)]];
+        let to: Lines = vec![vec![(0.0, 50.0), (100.0, 50.0)]];
+        let top = |m: &Mark| m.cuts()[0].polygon[0][1];
+        assert_eq!(top(&carry(&Mark::Fill(shape), &from, &to, None)), 50.0);
+        assert_eq!(top(&carry(&Mark::Stroke(line), &from, &to, None)), 50.0);
+        assert_eq!(
+            top(&carry(&Mark::Fill(cells), &from, &to, None)),
+            0.0,
+            "pixel marks stay, and so do their cuts"
+        );
     }
 }
