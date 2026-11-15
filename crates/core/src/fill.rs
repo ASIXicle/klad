@@ -122,6 +122,19 @@ impl Coverage {
         self.alpha[((y - self.y) * self.width + (x - self.x)) as usize]
     }
 
+    pub fn between(&self, x: f32, y: f32) -> f32 {
+        let at = |x: i64, y: i64| match x >= 0 && y >= 0 {
+            true => self.at(x as u32, y as u32) as f32,
+            false => 0.0,
+        };
+        let (fx, fy) = (x - 0.5, y - 0.5);
+        let (ix, iy) = (fx.floor() as i64, fy.floor() as i64);
+        let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+        let top = at(ix, iy) * (1.0 - tx) + at(ix + 1, iy) * tx;
+        let bottom = at(ix, iy + 1) * (1.0 - tx) + at(ix + 1, iy + 1) * tx;
+        top * (1.0 - ty) + bottom * ty
+    }
+
     pub fn bounds(&self) -> Option<[f32; 4]> {
         (!self.is_empty()).then(|| {
             [

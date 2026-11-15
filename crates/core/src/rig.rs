@@ -843,13 +843,7 @@ impl<'a> Rig<'a> {
             .collect();
         let (w, h) = (canvas.0 as usize, canvas.1 as usize);
         let mut mask = vec![0u8; w * h];
-        let sample = |p: [f32; 2]| -> u8 {
-            let (x, y) = (p[0].floor(), p[1].floor());
-            match x >= 0.0 && y >= 0.0 {
-                true => c.at(x as u32, y as u32),
-                false => 0,
-            }
-        };
+        let sample = |p: [f32; 2]| -> u8 { c.between(p[0], p[1]).round().clamp(0.0, 255.0) as u8 };
         (0..rows - 1).for_each(|j| {
             (0..cols - 1).for_each(|i| {
                 let corner = |di: u32, dj: u32| ((i + di, j + dj), posed[((j + dj) * cols + i + di) as usize]);
@@ -1693,5 +1687,48 @@ mod tests {
                 &wrong[..wrong.len().min(4)]
             );
         });
+    }
+
+    #[test]
+    fn a_posed_fill_keeps_the_soft_edge_of_the_same_turn_by_transform() {
+        use crate::fill::Fill;
+        let bones = leg();
+        let alpha: Vec<u8> = (0..60u32)
+            .flat_map(|y| (0..60u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let d = (x as f32 + 0.5 - 30.0).hypot(y as f32 + 0.5 - 30.0) - 20.0;
+                ((0.5 - d) * 255.0).round().clamp(0.0, 255.0) as u8
+            })
+            .collect();
+        let disc = Fill::new(
+            1,
+            [0.0, 0.0, 0.0, 1.0],
+            FillSource::Polygon(vec![[70.0, 120.0], [130.0, 120.0], [130.0, 180.0]]),
+            Coverage {
+                x: 70,
+                y: 120,
+                width: 60,
+                height: 60,
+                alpha,
+            },
+        );
+        let weights = Weights::auto(&bones, (200, 400));
+        let mut turned = Pose::default();
+        turned.angles.insert("thigh".into(), 10.0);
+        let rig = Rig::new(&bones, &[], &weights, &turned).following(Some("thigh"));
+        let posed = rig.pose(&[Mark::from(disc.clone())], (200, 400));
+        let (o, ex, ey) = (rig.moved([0.0, 0.0]), rig.moved([1.0, 0.0]), rig.moved([0.0, 1.0]));
+        let mut by_hand = disc;
+        crate::markedit::transform_fill(
+            &mut by_hand,
+            [ex[0] - o[0], ey[0] - o[0], ex[1] - o[1], ey[1] - o[1], o[0], o[1]],
+        );
+        let (a, b) = (&posed[0].as_fill().unwrap().coverage, &by_hand.coverage);
+        let worst = (0..400u32)
+            .flat_map(|y| (0..200u32).map(move |x| (x, y)))
+            .map(|(x, y)| a.at(x, y).abs_diff(b.at(x, y)))
+            .max()
+            .unwrap_or(0);
+        assert!(worst <= 2, "the posed edge is {worst} off the turned one");
     }
 }
