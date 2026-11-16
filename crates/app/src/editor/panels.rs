@@ -544,6 +544,7 @@ impl Editor {
 
     fn dock(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
+        self.dock_room = ui.available_height();
         let bodies = self.settings.layout.bodies(ui.available_height());
         let mut previous: Option<(Pane, bool)> = None;
         bodies.into_iter().for_each(|(pane, body)| {
@@ -654,6 +655,7 @@ impl Editor {
             Pane::Notes => self.notes_pane(ui),
             Pane::History => self.history_pane(ui),
             Pane::Preview => self.real_size_pane(ui),
+            Pane::Maps => self.maps_pane(ui),
         }
     }
 

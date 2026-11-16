@@ -595,7 +595,7 @@ mod tests {
                 .unwrap(),
         );
         let out = dir.join("godot");
-        crate::scene::rig(&dir, Some(out.clone())).unwrap();
+        crate::scene::rig(&dir, Some(out.clone()), &crate::sprites::Extras::default()).unwrap();
         let scene = std::fs::read_dir(&out)
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.path()))

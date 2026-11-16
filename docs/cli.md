@@ -24,6 +24,9 @@ This reference is licensed under the MIT License (`LICENSE-MIT`), unlike klad it
 - [`klad font`](#klad-font): Copy a font into the bundle for text nodes, by name or from a file, or list the fonts it has
 - [`klad fonts`](#klad-fonts): List the fonts that come with klad, search the open fonts it can download, or download one
 - [`klad atmosphere`](#klad-atmosphere): Fog and haze by depth: show, set or turn off the document's atmosphere
+- [`klad maps`](#klad-maps): Light maps: show, set or turn off the drawing's normal, height, specular, emission, depth and occlusion maps
+- [`klad surface`](#klad-surface): A layer's own surface for the light maps, or the drawing's: bevel, profile, strength, body, range and directions
+- [`klad lights`](#klad-lights): Preview lights: list, add, change or remove the lights klad render --lit and the editor light the drawing with
 - [`klad timeline`](#klad-timeline): Show the timeline (fps, length, origin, clips) or set fps, length and origin
 - [`klad clip`](#klad-clip): List, add, change, rename and remove clips (named frame ranges)
 - [`klad ls`](#klad-ls): Layer tree with ids, kinds, contents and bounds at a frame, top layer first
@@ -855,6 +858,161 @@ Options:
           Print help (see a summary with '-h')
 ```
 
+## klad maps
+
+```text
+Light maps for 2D lighting in a game: a normal map (OpenGL style, green up, as Godot expects), a height map, a specular map, an emission map, a depth map and an occlusion map, made from what is drawn. Each layer at the top of the stack is part of the drawing's surface, or a surface of its own (klad surface art.klad g2 bevel=6); the surface rounds in from its outline by the bevel, rises where paint with body is thick, and follows the height layers painted on it (klad set art.klad l7 map=height: white raises, black lowers, by the range). Layers with map=normal, map=specular or map=emission paint those maps directly; strokes on a normal layer take a direction (klad stroke --normal nw). Map layers are never drawn in the picture. See them with klad render --map normal, and lit with klad lights and klad render --lit.
+
+  klad maps art.klad
+  klad maps art.klad --on
+  klad maps art.klad bevel=12 profile=round strength=1.5 body=1 range=12
+  klad maps art.klad ambient=#30303c shininess=24
+  klad maps art.klad --off
+
+The surface: bevel (px the rim rounds over; bevel=fit makes it as deep as the shape at frame 0, so the whole silhouette rounds like a ball), profile (round, chamfer, pillow or flat), strength (how steep the slopes read), body (how much paint with body raises it, 0 for none), range (px a white height layer raises), directions (0 for smooth normals, 9 or 17 for a normal palette of whole directions, the default on pixel art). The light preview: ambient (the colour where no light reaches, like Godot's CanvasModulate) and shininess (how tight the highlights on the specular map are).
+
+Layers add to the maps with klad set: shine=0.6 (0 matte to 1) and specular=#ffd0a0 (the shine's colour) make the specular map; emissive=true makes a layer glow whatever the light (the emission map), glows=#bff2ff,#ffd040 only the parts of it in those colours, on every frame; z=12 brings a layer that many px nearer within its plane (the depth map). A plane's depth (klad set art.klad l1 depth=2) and the height set the rest of the depth map: near is white, the front plane 75% grey, depth 1 half of that. The occlusion map darkens creases and the foot of raised forms.
+
+Usage: klad maps [OPTIONS] <BUNDLE> [PROPS]...
+
+Arguments:
+  <BUNDLE>
+
+
+  [PROPS]...
+
+
+Options:
+      --on
+          Turn the maps on with the default surface
+
+      --off
+          Turn the maps off: the surface and the lights are forgotten, map layers stay
+
+      --render
+          Render a preview after the edit and print its path
+
+      --scale <SCALE>
+          Preview scale (default: longest side 1024 px)
+
+      --json
+          Print the result as JSON
+
+      --overlay <OVERLAY>
+          Draw on the preview: ids, bbox, grid or all (comma separated)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+## klad surface
+
+```text
+Set the surface a layer at the top of the stack rounds in from its own outline, instead of being part of the drawing's surface; with no layer, the drawing's surface (which turns the maps on). With no settings it shows the surface.
+
+  klad surface art.klad l2 bevel=6 profile=pillow
+  klad surface sprite.klad l1 --directions 9
+  klad surface art.klad bevel=12
+  klad surface art.klad l2 --off
+
+bevel (px the rim rounds over, or fit: as deep as the layer's shape at frame 0), profile (round, chamfer, pillow or flat), strength, body, range and directions: 0 for smooth normals, 9 for facing out and the eight leans, 17 for those and the eight steep leans. A pixel drawing uses 9 unless told otherwise, so its normal map is painted in whole pixels from a normal palette, as pixel artists paint them by hand.
+
+Usage: klad surface [OPTIONS] <BUNDLE> [ARGS]...
+
+Arguments:
+  <BUNDLE>
+
+
+  [ARGS]...
+          A layer at the top of the stack (leave out for the drawing's surface), then key=value settings
+
+Options:
+      --directions <0|9|17>
+          Normals in a palette of 9 or 17 directions, or 0 for smooth
+
+      --off
+          The layer is part of the drawing's surface again
+
+      --render
+          Render a preview after the edit and print its path
+
+      --scale <SCALE>
+          Preview scale (default: longest side 1024 px)
+
+      --json
+          Print the result as JSON
+
+      --overlay <OVERLAY>
+          Draw on the preview: ids, bbox, grid or all (comma separated)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+## klad lights
+
+```text
+Lights to preview the light maps with, kept in the drawing (never in its picture). A point light sits at x,y on the canvas, height px in front of it, and fades out at range px; a directional light comes from the direction x,y, its height from 0 (along the picture) to 1 (straight from the front), as in Godot's PointLight2D and DirectionalLight2D.
+
+  klad lights art.klad
+  klad lights art.klad --add point --at 120,80 --height 90 --color '#ffd9a0' --energy 1.2 --range 500
+  klad lights art.klad --add directional --at -1,-1 --height 0.4
+  klad lights art.klad --set 1 --at 300,80
+  klad lights art.klad --rm 2
+  klad lights art.klad --clear
+
+klad render art.klad --lit shows the drawing lit by them.
+
+Usage: klad lights [OPTIONS] <BUNDLE>
+
+Arguments:
+  <BUNDLE>
+
+
+Options:
+      --add <point|directional>
+          Add a light
+
+      --set <N>
+          Change light N (from 1, as listed)
+
+      --rm <N>
+          Remove light N
+
+      --clear
+          Remove every light
+
+      --at <AT>
+          A point light's place x,y, or the direction x,y a directional light comes from
+
+      --height <HEIGHT>
+          A point light's px in front of the canvas, or a directional light's 0 to 1
+
+      --color <COLOR>
+
+
+      --energy <ENERGY>
+
+
+      --range <RANGE>
+          A point light's px to where it fades out
+
+      --render
+          Render a preview after the edit and print its path
+
+      --scale <SCALE>
+          Preview scale (default: longest side 1024 px)
+
+      --json
+          Print the result as JSON
+
+      --overlay <OVERLAY>
+          Draw on the preview: ids, bbox, grid or all (comma separated)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
 ## klad timeline
 
 ```text
@@ -1008,6 +1166,7 @@ Options:
 Add a layer, cel or shape.
 
   klad add art.klad layer vector name=sky
+  klad add art.klad layer map height --above l2 clip=true      a map layer for the light maps: height, normal, specular or emission
   klad add art.klad rect --in l2 x=0 y=0 w=2048 h=900 fill=#1b2a41
   klad add art.klad ellipse --in l2 cx=500 cy=300 rx=80 ry=80 'fill={"radial":{"center":[500,300],"radius":80,"stops":[[0,"#fff6d5"],[1,"#f3c76a"]]}}'
   klad add art.klad cel --in l3 frame=4 hold=2
@@ -1668,6 +1827,15 @@ Options:
       --columns <COLUMNS>
           With --sheet: cells per row (default: about square)
 
+      --map <normal|height|specular|emission|depth|occlusion>
+          Render one of the light maps instead of the picture (see klad maps)
+
+      --invert
+          With --map depth: far is white instead of near
+
+      --lit
+          Render the picture lit by the drawing's lights through its maps (see klad lights)
+
   -h, --help
           Print help
 ```
@@ -1736,6 +1904,11 @@ Options:
 
       --second <SECOND>
           The second colour, for brushes that mix towards it with pressure or along the stroke
+
+      --normal <NORMAL>
+          On a normal layer: the direction the stroke paints instead of a colour, x,y (how far the surface leans right and down, -1 to 1) or a name: out (facing out, which flattens), n, ne, e, se, s, sw, w, nw, n-steep and the like
+
+          [alias: --facing]
 
       --render
           Render a preview after the edit and print its path
@@ -1952,6 +2125,9 @@ Options:
 
       --color <COLOR>
           A palette name, a palette index or #rrggbb
+
+      --normal <NORMAL>
+          On a normal layer: a direction from the drawing's normal palette instead of a colour: out (facing out), n, ne, e, se, s, sw, w, nw, n-steep and the like, or x,y taken to the nearest direction in the palette
 
       --erase
           Clear these pixels instead of colouring them
@@ -3510,6 +3686,9 @@ Options:
       --all
           Every drawing on every frame, each once
 
+      --maps
+          Look over the light maps instead: normals pointing into the surface, layers that read flat under light, map layers painted where nothing is drawn, glow bigger than what is drawn, and (with --all) seams where a map jumps between frames while the picture does not
+
       --json
 
 
@@ -3617,6 +3796,23 @@ Options:
 
       --variants
           Export once for every palette variant: the base under the usual name, each variant with its name added (art-blue.png)
+
+      --maps <MAPS>
+          Light maps beside the picture, the same size, trim and layout: normal, height, specular, emission, depth, occlusion (comma separated) or all; each map is the picture's file name with _n, _h, _s, _e, _d or _o added (art_n.png). Normal maps are written as plain data with no colour profile, depth as 16-bit grey
+
+      --invert
+          With --maps depth: far is white instead of near
+
+      --occluders
+          Godot exports: shadows from the silhouette, an OccluderPolygon2D for every distinct picture (holes kept) on a LightOccluder2D that switches with the frame; a rig gets one per part, a parallax scene one per plane
+
+      --tolerance <TOLERANCE>
+          With --occluders: how far in px the polygon may stray from the edge
+
+          [default: 1.5]
+
+      --shaders <fog,rim,occlusion>
+          Godot exports: a sample shader that reads the maps, set on the sprite with the maps as its parameters: fog (towards a colour by depth), rim (a rim light from the height), occlusion (darker creases), or all
 
       --padding <PADDING>
           Sheets: transparent pixels around each picture
@@ -3979,6 +4175,9 @@ Options:
 
       --no-cache
 
+
+      --map <normal|height|specular|emission|depth|occlusion>
+          Hash a light map instead of the picture
 
   -h, --help
           Print help

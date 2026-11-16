@@ -383,6 +383,7 @@ mod tests {
                 taper,
                 part: None,
                 second: None,
+                normal: None,
             })
         };
         let mut ops = vec![spec(None), spec(Some([0.0, 0.0])), spec(Some([12.0, 30.0]))];

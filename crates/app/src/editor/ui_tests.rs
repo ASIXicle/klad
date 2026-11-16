@@ -5991,7 +5991,8 @@ fn editor_pictures(source: &Path, layer: &str, moment: Moment, shots: &[(Option<
         .build_ui_state(|ui, home: &mut crate::home::Home| home.frame(ui), first);
     let settle = |h: &mut Harness<'static, crate::home::Home>| {
         let started = std::time::Instant::now();
-        while !h.state().editor.as_ref().unwrap().canvas_current() && started.elapsed().as_secs() < 180 {
+        let waiting = |ed: &Editor| !ed.canvas_current() || (ed.maps.show.is_some() && ed.map_shown().is_none());
+        while waiting(h.state().editor.as_ref().unwrap()) && started.elapsed().as_secs() < 180 {
             h.step();
             h.render().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -6010,6 +6011,10 @@ fn editor_pictures(source: &Path, layer: &str, moment: Moment, shots: &[(Option<
     }
     moment(ed).unwrap();
     settle(&mut h);
+    if let Ok(label) = std::env::var("KLAD_PICTURE_CLICK") {
+        h.get_by_role_and_label(Role::Button, &label).click();
+        settle(&mut h);
+    }
     shots.iter().for_each(|(frame, out)| {
         if let Some(frame) = frame {
             h.state_mut().editor.as_mut().unwrap().go_to(*frame).unwrap();
@@ -6033,6 +6038,19 @@ fn a_picture_of_the_editor() {
         ed.invoke(Cmd::Brush)?;
         if let Ok(brush) = std::env::var("KLAD_PICTURE_BRUSH") {
             ed.pick(&brush);
+        }
+        if let Ok(list) = std::env::var("KLAD_PICTURE_INVOKE") {
+            list.split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .try_for_each(|id| {
+                    let cmd = Cmd::ALL
+                        .iter()
+                        .copied()
+                        .find(|c| c.spec().id == id)
+                        .ok_or_else(|| anyhow::anyhow!("no command {id}"))?;
+                    ed.invoke(cmd)
+                })?;
         }
         let numbers = |name: &str| -> Option<Vec<f32>> {
             let text = std::env::var(name).ok()?;
@@ -6185,5 +6203,716 @@ fn the_numbers_need_developer_tools_and_notes_start_folded() {
     h.state_mut().invoke(Cmd::Numbers).unwrap();
     h.run_steps(2);
     assert!(h.state().settings.layout.numbers, "with developer tools on they open");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_light_maps_panel_turns_maps_on_and_layers_become_map_layers_by_command() {
+    let path = sample("maps");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().is_on(Cmd::MapsPane), Some(true));
+    h.get_by_label("light maps").click();
+    h.run_steps(3);
+    assert!(h.state().scene.bundle.doc.maps.is_some(), "the box turns the maps on");
+    activate(&mut h, "shade");
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("height map layer").is_some(),
+        "its settings say what it is"
+    );
+    h.state_mut().invoke(Cmd::MakeColourLayer).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer("shade").unwrap().map,
+        None,
+        "and back"
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer("shade").unwrap().map,
+        Some(klad_core::maps::Role::Height),
+        "one undo step per conversion"
+    );
+    h.state_mut().invoke(Cmd::MakeColourLayer).unwrap();
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
+    h.run_steps(3);
+    let shade = h.state().scene.bundle.doc.find_layer("shade").unwrap().clone();
+    assert_eq!(shade.map, Some(klad_core::maps::Role::Height), "shade now draws height");
+    activate(&mut h, "colour");
+    h.get_by_label("a surface of its own").click();
+    h.run_steps(3);
+    let colour = h.state().scene.bundle.doc.find_layer("colour").unwrap().clone();
+    assert!(colour.surface.is_some(), "colour rounds in from its own outline");
+    h.get_by_label("add a point light").click();
+    h.run_steps(3);
+    assert_eq!(h.state().scene.bundle.doc.maps.as_ref().unwrap().lights.len(), 1);
+    let wait = |h: &mut Harness<'static, Editor>, name: &str| {
+        let start = std::time::Instant::now();
+        while h.state().map_shown() != Some(name) && start.elapsed() < std::time::Duration::from_secs(20) {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(h.state().map_shown(), Some(name));
+    };
+    h.state_mut().invoke(Cmd::MapView).unwrap();
+    wait(&mut h, "normal");
+    assert_eq!(h.state().is_on(Cmd::MapView), Some(true));
+    h.state_mut().invoke(Cmd::MapView).unwrap();
+    wait(&mut h, "height");
+    h.state_mut().invoke(Cmd::LitView).unwrap();
+    wait(&mut h, "lit");
+    assert_eq!(h.state().is_on(Cmd::LitView), Some(true));
+    h.state_mut().invoke(Cmd::LitView).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().is_on(Cmd::LitView), Some(false));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+fn tilted_line(h: &mut Harness<'static, Editor>, from: egui::Pos2, to: egui::Pos2, tilt: (f32, f32)) {
+    let rect = h.state().canvas_rect;
+    let ctx = h.ctx.clone();
+    let start = std::time::Instant::now();
+    (0..=12).for_each(|i| {
+        let phase = match i {
+            0 => crate::pen::Phase::Down,
+            12 => crate::pen::Phase::Up,
+            _ => crate::pen::Phase::Move,
+        };
+        let event = crate::pen::PenEvent {
+            phase,
+            pos: from + (to - from) * (i as f32 / 12.0),
+            pressure: 0.8,
+            tilt,
+            eraser: false,
+            tablet: true,
+            device: 3,
+            at: start + std::time::Duration::from_millis(i * 12),
+        };
+        h.state_mut().on_pen(&ctx, event, rect, true).unwrap();
+    });
+    h.run_steps(3);
+}
+
+fn painted_normal(h: &Harness<'static, Editor>, cel: &str, x: usize, y: usize) -> [f32; 3] {
+    let rasters = h.state().scene.rasters_now();
+    let raster = rasters.get(cel).unwrap();
+    let tile = raster.get(x / klad_brush::TILE, y / klad_brush::TILE).unwrap();
+    let at = ((y % klad_brush::TILE) * klad_brush::TILE + x % klad_brush::TILE) * 4;
+    let a = tile[at + 3].to_f32();
+    assert!(a > 0.5, "painted at {x},{y}");
+    klad_core::maps::decoded([0, 1, 2].map(|c| tile[at + c].to_f32() / a))
+}
+
+#[test]
+fn a_normal_layer_paints_the_direction_picked_on_the_sphere_and_the_way_the_pen_leans() {
+    let path = sample("normals");
+    let mut h = harness(editor(&path), vec2(1440.0, 1200.0));
+    h.state_mut()
+        .apply(
+            parse_lines(
+                r#"{"op":"maps","surface":{"bevel":8}}
+{"op":"set","id":"l4","map":"normal"}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    activate(&mut h, "shade");
+    h.state_mut().tool = Tool::Brush;
+    h.run_steps(3);
+    assert!(h.state().on_normal_layer());
+    let sphere = h.get_by_label("the direction").rect();
+    click(&mut h, sphere.center() + vec2(sphere.width() * 0.35, 0.0));
+    h.run_steps(2);
+    let picked = klad_core::maps::decoded([0, 1, 2].map(|c| h.state().color[c]));
+    assert!(
+        picked[0] > 0.5 && picked[1].abs() < 0.1,
+        "a click right of the middle faces right: {picked:?}"
+    );
+    let (a, b) = (canvas_at(&h, 120.0, 150.0), canvas_at(&h, 260.0, 150.0));
+    tilted_line(&mut h, a, b, (0.0, 0.0));
+    let n = painted_normal(&h, "c4", 190, 150);
+    assert!(n[0] > 0.5, "the stroke paints the picked direction: {n:?}");
+    h.get_by_label("flatten").click();
+    h.run_steps(2);
+    let out = klad_core::maps::decoded([0, 1, 2].map(|c| h.state().color[c]));
+    assert!(out[2] > 0.999, "flatten picks facing out");
+    h.get_by_label("ne").click();
+    h.run_steps(2);
+    let ne = klad_core::maps::decoded([0, 1, 2].map(|c| h.state().color[c]));
+    assert!(
+        ne[0] > 0.4 && ne[1] > 0.4,
+        "the north-east lean from the directions row: {ne:?}"
+    );
+    h.get_by_label("direction from pen tilt").click();
+    h.run_steps(2);
+    let (a, b) = (canvas_at(&h, 120.0, 260.0), canvas_at(&h, 260.0, 260.0));
+    tilted_line(&mut h, a, b, (0.0, -0.6));
+    let n = painted_normal(&h, "c4", 190, 260);
+    assert!(
+        n[1] > 0.4 && n[0].abs() < 0.1,
+        "a pen leaning up paints a surface facing up: {n:?}"
+    );
+    let brush = h
+        .state()
+        .scene
+        .bundle
+        .read_strokes("l4", "c4")
+        .unwrap()
+        .last()
+        .unwrap()
+        .brush
+        .clone();
+    assert!(
+        h.state()
+            .scene
+            .bundle
+            .brushes()
+            .unwrap()
+            .get(&brush)
+            .is_some_and(|d| d.color.is_some_and(|c| c.facing)),
+        "the stroke's brush takes its colour from the tilt, kept in the bundle as {brush}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_exported() {
+    let path = sample("shine");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
+        p.collapsed = false;
+    }
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
+        .unwrap();
+    activate(&mut h, "lines");
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::CheckBox, "emissive").click();
+    h.run_steps(3);
+    assert!(
+        h.state().scene.bundle.doc.find_layer("lines").unwrap().emissive,
+        "the box makes it glow"
+    );
+    let id = h.state().scene.bundle.doc.find_layer("lines").unwrap().id.clone();
+    h.state_mut().edits.insert(format!("{id}.shine"), 0.6);
+    h.state_mut().edits.insert(format!("{id}.z"), 12.0);
+    h.run_steps(4);
+    let lines = h.state().scene.bundle.doc.find_layer("lines").unwrap().clone();
+    assert_eq!(
+        (lines.shine, lines.z),
+        (Some(0.6), Some(12.0)),
+        "shine and z from the fields"
+    );
+    [
+        Pane::Tool,
+        Pane::Brush,
+        Pane::Layers,
+        Pane::Inspector,
+        Pane::Preview,
+        Pane::Notes,
+        Pane::History,
+    ]
+    .into_iter()
+    .filter(|pane| h.state().settings.layout.is_open(*pane))
+    .collect::<Vec<_>>()
+    .into_iter()
+    .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    h.run_steps(3);
+    h.state_mut().invoke(Cmd::ShowOccluders).unwrap();
+    settle(&mut h, |ed| ed.occluders_traced().is_some_and(|n| n > 0));
+    assert_eq!(h.state().is_on(Cmd::ShowOccluders), Some(true));
+    let found = super::checks::map_findings(
+        r#"{"frames":24,"findings":[{"kind":"flat","frame":3,"area":[10,20,30,40],"pixels":900,"note":"sky reads flat under light"}]}"#,
+    )
+    .unwrap();
+    h.state_mut().checks.maps = Some(found);
+    h.run_steps(3);
+    assert_eq!(h.state().is_on(Cmd::CheckMaps), Some(true));
+    h.get_by_label_contains("frame 3  flat").click();
+    h.run_steps(3);
+    assert_eq!(h.state().scene.frame, 3, "a click on a finding goes to its frame");
+    let centre = h.state().view.unwrap().center;
+    assert_eq!((centre.x, centre.y), (25.0, 40.0), "and to its place");
+    h.state_mut().export.what = super::export::What::Sheet;
+    h.state_mut().windows.export = true;
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::CheckBox, "normal").click();
+    h.get_by_role_and_label(Role::CheckBox, "shadows").click();
+    h.run_steps(2);
+    let form = h.state().export.clone();
+    assert_eq!(form.maps, vec![klad_render::maps::Map::Normal]);
+    assert!(form.occluders);
+    let args = super::export::args(Path::new("/w/a.klad"), Path::new("/w"), 0, &form).join(" ");
+    assert!(args.ends_with("--maps normal"), "{args}");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_height_layer_shows_the_height_map_and_paints_in_greys() {
+    use super::maps::Show;
+    use klad_render::maps::Map;
+    let path = sample("heights");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8,"range":10}}"#).unwrap())
+        .unwrap();
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    activate(&mut h, "shade");
+    h.state_mut().pick_new_colour([0.8, 0.2, 0.2, 1.0]);
+    h.run_steps(3);
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer("shade").unwrap().map,
+        Some(klad_core::maps::Role::Height)
+    );
+    assert_eq!(h.state().color, [1.0; 4], "choosing height picks white");
+    assert_eq!(
+        h.state().maps.show,
+        Some(Show::Map(Map::Height)),
+        "the canvas shows the height map"
+    );
+    let start = std::time::Instant::now();
+    while h.state().map_shown() != Some("height") && start.elapsed() < std::time::Duration::from_secs(20) {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(h.state().map_shown(), Some("height"));
+    assert!(
+        h.query_by_label("raises it 10.0 px").is_some(),
+        "white raises by the range"
+    );
+    assert!(
+        h.query_all_by_label_contains("white raises").next().is_some(),
+        "the range beside the role"
+    );
+    h.get_by_label("lower").click();
+    h.run_steps(2);
+    assert_eq!(h.state().color, [0.0, 0.0, 0.0, 1.0]);
+    assert!(h.query_by_label("lowers it 10.0 px").is_some());
+    let ramp = h.get_by_label("the height").rect();
+    click(&mut h, pos2(ramp.left() + ramp.width() * 0.75, ramp.center().y));
+    h.run_steps(2);
+    let c = h.state().color;
+    assert!(
+        (c[0] - 0.75).abs() < 0.03 && c[0] == c[1] && c[1] == c[2],
+        "the ramp picks a grey: {c:?}"
+    );
+    h.state_mut().tool = Tool::Brush;
+    let (a, b) = (canvas_at(&h, 120.0, 150.0), canvas_at(&h, 260.0, 150.0));
+    tilted_line(&mut h, a, b, (0.0, 0.0));
+    let rasters = h.state().scene.rasters_now();
+    let tile = rasters
+        .get("c4")
+        .unwrap()
+        .get(190 / klad_brush::TILE, 150 / klad_brush::TILE)
+        .unwrap();
+    let at = ((150 % klad_brush::TILE) * klad_brush::TILE + 190 % klad_brush::TILE) * 4;
+    assert!(tile[at + 3].to_f32() > 0.5, "the stroke lands on the height layer");
+    let rect = h.state().canvas_rect;
+    let ctx = h.ctx.clone();
+    let start = std::time::Instant::now();
+    [
+        (crate::pen::Phase::Down, 120.0),
+        (crate::pen::Phase::Move, 200.0),
+        (crate::pen::Phase::Up, 260.0),
+    ]
+    .into_iter()
+    .enumerate()
+    .for_each(|(i, (phase, x))| {
+        let event = crate::pen::PenEvent {
+            phase,
+            pos: canvas_at(&h, x, 220.0),
+            pressure: 0.8,
+            tilt: (0.0, 0.0),
+            eraser: false,
+            tablet: true,
+            device: 3,
+            at: start + std::time::Duration::from_millis(i as u64 * 20),
+        };
+        h.state_mut().on_pen(&ctx, event, rect, true).unwrap();
+        if phase == crate::pen::Phase::Move {
+            assert!(h.state().live.is_some(), "a stroke under way");
+            h.run_steps(2);
+        }
+    });
+    h.run_steps(2);
+    activate(&mut h, "colour");
+    h.run_steps(3);
+    assert_eq!(h.state().maps.show, None, "another layer goes back to the picture");
+    activate(&mut h, "shade");
+    h.run_steps(3);
+    assert_eq!(h.state().maps.show, Some(Show::Map(Map::Height)));
+    (0..5).for_each(|_| {
+        h.state_mut().invoke(Cmd::MapView).unwrap();
+        h.run_steps(1);
+    });
+    assert_eq!(h.state().maps.show, None, "M steps on to the picture");
+    h.run_steps(3);
+    assert_eq!(
+        h.state().maps.show,
+        None,
+        "and the picture stays while the height layer is selected"
+    );
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"set","id":"l2","map":"normal"}"#).unwrap())
+        .unwrap();
+    activate(&mut h, "rim");
+    h.run_steps(3);
+    assert_eq!(
+        h.state().maps.show,
+        Some(Show::Map(Map::Normal)),
+        "a normal layer shows the normal map"
+    );
+    activate(&mut h, "colour");
+    h.run_steps(3);
+    assert_eq!(h.state().maps.show, None);
+    h.get_by_label("add a point light").click();
+    h.run_steps(3);
+    let before = h.state().scene.bundle.doc.maps.clone().unwrap();
+    assert_eq!(before.lights.len(), 1);
+    h.get_by_label("light maps").click();
+    h.run_steps(3);
+    assert!(h.state().scene.bundle.doc.maps.is_none(), "off");
+    h.get_by_label("light maps").click();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.maps.as_ref(),
+        Some(&before),
+        "on again, with the surface and the light it had"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_bevel_fits_the_shape_and_a_layer_glows_in_the_colours_picked() {
+    let path = sample("fitglow");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Tool, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
+        .unwrap();
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    activate(&mut h, "shapes");
+    h.run_steps(3);
+    h.get_by_label("fit").click();
+    h.run_steps(3);
+    let bevel = h.state().scene.bundle.doc.maps.as_ref().unwrap().surface.bevel;
+    assert!(
+        (bevel - 40.0).abs() <= 2.0,
+        "the 80 px tall rectangle is the deepest shape: {bevel}"
+    );
+    assert!(
+        h.query_by_label("emissive").is_some(),
+        "the light of the selected layer is in its layer settings"
+    );
+    h.state_mut()
+        .pick_new_colour([160.0 / 255.0, 64.0 / 255.0, 48.0 / 255.0, 1.0]);
+    h.run_steps(3);
+    h.get_by_label("+ the current colour").click();
+    h.run_steps(3);
+    let glows = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.find_layer("shapes").unwrap().glows.clone();
+    assert_eq!(glows(&h), vec!["#a04030".to_string()]);
+    h.get_by_label("glow colour 1").click();
+    h.run_steps(3);
+    assert_eq!(
+        glows(&h),
+        vec!["#a04030".to_string()],
+        "a click on its square opens the picker"
+    );
+    let wheel = h.get_by_label("colour wheel").rect().center();
+    click(&mut h, wheel);
+    h.run_steps(3);
+    let picked = glows(&h);
+    assert_eq!(picked.len(), 1);
+    assert_ne!(picked[0], "#a04030", "a pick on the wheel changes what glows");
+    h.get_by_label("remove").click();
+    h.run_steps(3);
+    assert!(glows(&h).is_empty(), "remove in the picker stops the glow");
+    assert!(h.query_by_label("colour wheel").is_none(), "and closes it");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_map_layer_is_added_from_the_layers_panel_and_its_settings_switch_what_it_draws() {
+    let path = sample("maplayer");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    activate(&mut h, "colour");
+    h.state_mut().pick_new_colour([0.8, 0.2, 0.2, 1.0]);
+    h.run_steps(2);
+    assert!(h.state().scene.bundle.doc.maps.is_none());
+    h.get_by_label(&format!("{} map", theme::icon::MOUNTAINS)).click();
+    h.run_steps(3);
+    let added = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(added.map, Some(klad_core::maps::Role::Height));
+    assert!(
+        h.state().scene.bundle.doc.maps.is_some(),
+        "a map layer turns the maps on"
+    );
+    assert_eq!(h.state().color, [1.0; 4], "and paints in white");
+    assert!(h.query_by_label("height map layer").is_some());
+    h.get_by_label("normal").click();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.find_layer(&added.id).unwrap().map,
+        Some(klad_core::maps::Role::Normal)
+    );
+    assert!(h.query_by_label("shine ").is_none(), "no shine or glow on a map layer");
+    audit(&h, "a map layer's settings");
+    activate(&mut h, "colour");
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("emissive").is_some(),
+        "a colour layer has its light in its settings"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_colour_square_opens_the_picker_and_each_pick_is_one_step() {
+    let path = sample("squares");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Tool, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
+        .unwrap();
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    h.run_steps(3);
+    h.get_by_label("add a point light").click();
+    h.run_steps(3);
+    let light = |h: &Harness<'static, Editor>| {
+        h.state().scene.bundle.doc.maps.as_ref().unwrap().lights[0]
+            .color
+            .clone()
+    };
+    let before = light(&h);
+    h.state_mut().pick_new_colour([0.2, 0.4, 0.6, 1.0]);
+    h.get_by_label("the colour of light 1").click();
+    h.run_steps(3);
+    assert_eq!(light(&h), before, "a click opens the picker and changes nothing yet");
+    assert!(h.query_by_label("colour wheel").is_some());
+    audit(&h, "the colour picker");
+    h.get_by_label("use the current colour").click();
+    h.run_steps(3);
+    assert_eq!(light(&h), "#336699", "the current colour is one click inside it");
+    assert!(h.query_by_label("colour wheel").is_none(), "and closes it");
+    h.get_by_label("the colour of light 1").click();
+    h.run_steps(3);
+    let wheel = h.get_by_label("colour wheel").rect();
+    drag(
+        &mut h,
+        wheel.center(),
+        wheel.center() + vec2(wheel.width() * 0.2, -wheel.height() * 0.2),
+    );
+    h.run_steps(3);
+    let dragged = light(&h);
+    assert_ne!(dragged, "#336699", "a drag on the wheel picks");
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert_eq!(light(&h), "#336699", "the whole drag is one undo step");
+    let field = h.get_by_role_and_label(Role::TextInput, "hex");
+    field.click();
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by_role_and_label(Role::TextInput, "hex").type_text("#ff8000");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(light(&h), "#ff8000", "a hex typed in the picker is kept");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn an_effect_colour_previews_while_dragging_on_the_wheel_and_commits_once() {
+    let path = sample("effectsquare");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Tool, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
+        p.collapsed = false;
+    }
+    h.state_mut().settings.layout.timeline = false;
+    activate(&mut h, "colour");
+    let id = h.state().scene.active_id().unwrap();
+    h.state_mut()
+        .set(
+            &id,
+            vec![(
+                "effects".into(),
+                serde_json::json!([{"outline": {"width": 3, "color": "#000000"}}]),
+            )],
+        )
+        .unwrap();
+    h.run_steps(4);
+    let outline = |h: &Harness<'static, Editor>| {
+        serde_json::to_value(&h.state().scene.bundle.doc.find_layer("colour").unwrap().effects).unwrap()[0]["outline"]
+            ["color"]
+            .clone()
+    };
+    h.get_by_role_and_label(Role::Button, "the outline's colour").click();
+    h.run_steps(3);
+    let wheel = h.get_by_label("colour wheel").rect();
+    let (from, to) = (
+        wheel.center(),
+        wheel.center() + vec2(wheel.width() * 0.2, -wheel.height() * 0.2),
+    );
+    h.hover_at(from);
+    h.run_steps(1);
+    h.drag_at(from);
+    h.run_steps(1);
+    h.hover_at(to);
+    h.run_steps(2);
+    assert!(
+        h.state().look.draft.is_some(),
+        "the effect previews while the drag is under way"
+    );
+    assert_ne!(
+        outline(&h),
+        serde_json::json!("#000000"),
+        "in the colour under the pointer"
+    );
+    h.drop_at(to);
+    h.run_steps(3);
+    assert!(h.state().look.draft.is_none());
+    let picked = outline(&h);
+    assert_ne!(
+        picked,
+        serde_json::json!("#000000"),
+        "a drag on the wheel picks the outline colour"
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert_eq!(outline(&h), serde_json::json!("#000000"), "the drag is one undo step");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.query_by_label("colour wheel").is_none(), "Escape closes the picker");
+    h.state_mut().pick_new_colour([1.0, 0.5, 0.0, 1.0]);
+    h.get_by_role_and_label(Role::Button, "the outline's colour").click();
+    h.run_steps(3);
+    h.get_by_label("use the current colour").click();
+    h.run_steps(3);
+    assert_eq!(outline(&h), serde_json::json!("#ff8000"));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn shine_fog_ambient_and_fill_squares_open_the_picker_with_the_current_colour() {
+    let path = sample("moresquares");
+    let mut h = harness(editor(&path), vec2(1440.0, 1500.0));
+    [Pane::Brush, Pane::Tool, Pane::Preview, Pane::Notes, Pane::History]
+        .into_iter()
+        .filter(|pane| h.state().settings.layout.is_open(*pane))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|pane| h.state_mut().settings.layout.toggle(pane));
+    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
+        p.collapsed = false;
+    }
+    h.state_mut().settings.layout.timeline = false;
+    h.state_mut()
+        .apply(parse_lines(r#"{"op":"maps","surface":{"bevel":8}}"#).unwrap())
+        .unwrap();
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    activate(&mut h, "colour");
+    h.state_mut().pick_new_colour([0.2, 0.4, 0.6, 1.0]);
+    h.run_steps(2);
+    audit(&h, "a colour layer's light");
+    let pick = |h: &mut Harness<'static, Editor>, square: &str| {
+        h.get_by_role_and_label(Role::Button, square).click();
+        h.run_steps(3);
+        assert!(h.query_by_label("colour wheel").is_some(), "{square} opens the picker");
+        h.get_by_label("use the current colour").click();
+        h.run_steps(3);
+    };
+    pick(&mut h, "the colour of its shine");
+    assert_eq!(
+        h.state()
+            .scene
+            .bundle
+            .doc
+            .find_layer("colour")
+            .unwrap()
+            .specular
+            .as_deref(),
+        Some("#336699")
+    );
+    pick(
+        &mut h,
+        "the ambient colour, where no light reaches (Godot's CanvasModulate)",
+    );
+    assert_eq!(h.state().scene.bundle.doc.maps.as_ref().unwrap().ambient, "#336699");
+    h.state_mut()
+        .apply(parse_lines(r##"{"op":"atmosphere","color":"#a0a8b0"}"##).unwrap())
+        .unwrap();
+    h.state_mut().invoke(Cmd::MapsPane).unwrap();
+    h.run_steps(3);
+    pick(&mut h, "the fog colour");
+    assert_eq!(h.state().scene.bundle.doc.atmosphere.as_ref().unwrap().color, "#336699");
+    activate(&mut h, "shapes");
+    let rect = h.state().scene.bundle.doc.find_layer("shapes").unwrap().cels()[0].nodes[0]
+        .id
+        .clone();
+    h.state_mut().tool = Tool::Select;
+    h.state_mut().selection = Some(rect.clone());
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, "the fill colour").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_role_and_label(Role::Slider, "opacity").is_some(),
+        "a vector fill can be see-through"
+    );
+    h.get_by_label("use the current colour").click();
+    h.run_steps(3);
+    let fill = h.state().scene.bundle.doc.find_layer("shapes").unwrap().cels()[0].nodes[0]
+        .fill
+        .clone();
+    assert_eq!(
+        serde_json::to_value(fill).unwrap(),
+        serde_json::json!("#336699"),
+        "the fill takes the current colour"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }

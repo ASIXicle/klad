@@ -14,6 +14,7 @@ pub(super) struct Checks {
     pub gaps: Option<Gaps>,
     pub pixels: Option<PixelCheck>,
     pub arcs: Option<Arcs>,
+    pub maps: Option<Vec<MapFound>>,
     pub parts: bool,
     pub part: String,
     pub font: String,
@@ -45,6 +46,33 @@ pub(super) fn tally(found: &[klad_core::pixelcheck::Finding]) -> String {
         true => format!("nothing to look at on this layer{small}"),
         false => format!("to look at, marked on the canvas: {}{small}", parts.join(", ")),
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct MapFound {
+    pub kind: String,
+    pub frame: u32,
+    pub area: [f32; 4],
+    pub note: String,
+}
+
+pub(super) fn map_findings(output: &str) -> Option<Vec<MapFound>> {
+    let found = json_of(output)?;
+    Some(
+        found["findings"]
+            .as_array()?
+            .iter()
+            .filter_map(|f| {
+                let area = numbers(&f["area"]);
+                (area.len() == 4).then(|| MapFound {
+                    kind: f["kind"].as_str().unwrap_or_default().to_string(),
+                    frame: f["frame"].as_u64().unwrap_or(0) as u32,
+                    area: [area[0], area[1], area[2], area[3]],
+                    note: f["note"].as_str().unwrap_or_default().to_string(),
+                })
+            })
+            .collect(),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -247,6 +275,14 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn check_maps(&mut self) {
+        if self.checks.maps.take().is_some() {
+            return;
+        }
+        let args = strings(&["check", &self.bundle_arg(), "--maps", "--all", "--json"]);
+        self.run_job(Tag::Maps, "check the light maps".to_string(), args, quiet);
+    }
+
     pub(super) fn show_gaps(&mut self) -> Result<()> {
         if self.checks.gaps.take().is_some() {
             return Ok(());
@@ -431,6 +467,20 @@ impl Editor {
                 self.checks.arcs = arcs_from(output, track);
             }
             Tag::Compare => self.compared(output),
+            Tag::Maps => {
+                self.checks.maps = map_findings(output);
+                let count = self.checks.maps.as_ref().map_or(0, Vec::len);
+                self.say(
+                    match count {
+                        0 => Tone::Done,
+                        _ => Tone::Refused,
+                    },
+                    match count {
+                        0 => "the light maps look right on every frame".to_string(),
+                        n => format!("{n} things to look at in the light maps: listed in the light maps panel, boxed on the canvas"),
+                    },
+                );
+            }
             _ => {}
         }
     }
@@ -499,6 +549,22 @@ impl Editor {
                 .expand(2.0);
                 painter.rect_stroke(r, 1.0, dark, egui::StrokeKind::Middle);
                 painter.rect_stroke(r, 1.0, Stroke::new(1.5, tint), egui::StrokeKind::Middle);
+            });
+        }
+        if let Some(found) = &self.checks.maps {
+            let warn = Color32::from_rgb(255, 170, 60);
+            found.iter().filter(|f| f.frame == frame).for_each(|f| {
+                let b = f.area;
+                let r = Rect::from_two_pos(place(vec2(b[0], b[1])), place(vec2(b[0] + b[2], b[1] + b[3]))).expand(3.0);
+                painter.rect_stroke(r, 2.0, dark, egui::StrokeKind::Middle);
+                painter.rect_stroke(r, 2.0, Stroke::new(1.5, warn), egui::StrokeKind::Middle);
+                painter.text(
+                    r.left_top() + vec2(0.0, -2.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    &f.kind,
+                    egui::FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
             });
         }
         if let Some(gaps) = &self.checks.gaps {

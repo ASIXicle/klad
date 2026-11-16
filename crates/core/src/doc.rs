@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const FORMAT: &str = "klad/7";
+pub const FORMAT: &str = "klad/8";
 pub const MAX_SIZE: u32 = 16384;
 pub const MASK: usize = usize::MAX;
 
@@ -28,6 +28,8 @@ pub struct Document {
     pub export: Exports,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atmosphere: Option<Atmosphere>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maps: Option<crate::maps::Maps>,
     #[serde(skip)]
     pub next_id: u64,
     #[serde(skip)]
@@ -44,6 +46,7 @@ impl PartialEq for Document {
             && self.layers == other.layers
             && self.export == other.export
             && self.atmosphere == other.atmosphere
+            && self.maps == other.maps
     }
 }
 
@@ -246,6 +249,20 @@ pub struct Layer {
     pub effects: Vec<Effect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<crate::maps::Surface>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<crate::maps::Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shine: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specular: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub emissive: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "colour_list")]
+    pub glows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<f32>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reference: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -603,6 +620,23 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+fn colour_list<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Colours {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Colours::deserialize(d)? {
+        Colours::One(text) => text
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect(),
+        Colours::Many(list) => list,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Loc {
     Layer(Vec<usize>),
@@ -631,6 +665,13 @@ impl Layer {
             mask: None,
             effects: Vec::new(),
             depth: None,
+            surface: None,
+            map: None,
+            shine: None,
+            specular: None,
+            emissive: false,
+            glows: Vec::new(),
+            z: None,
             reference: false,
             bones: Vec::new(),
             ik: Vec::new(),
@@ -1141,6 +1182,7 @@ impl Document {
             layers: Vec::new(),
             export: Exports::default(),
             atmosphere: None,
+            maps: None,
             next_id: 0,
             here: Here::default(),
         }
@@ -1579,6 +1621,9 @@ impl Document {
         if let Some(air) = &self.atmosphere {
             air.validate().context("atmosphere")?;
         }
+        if let Some(maps) = &self.maps {
+            maps.validate().context("maps")?;
+        }
         let layers = self.all_layers();
         if let Some(deep) = layers
             .iter()
@@ -1586,6 +1631,15 @@ impl Document {
         {
             bail!(
                 "layer {}: depth is for layers at the top of the stack (the planes)",
+                deep.id
+            );
+        }
+        if let Some(deep) = layers
+            .iter()
+            .find(|l| l.surface.is_some() && !self.layers.iter().any(|t| t.id == l.id))
+        {
+            bail!(
+                "layer {}: a surface of its own is for layers at the top of the stack; the layers inside take the surface of the top layer they are in",
                 deep.id
             );
         }
@@ -1634,6 +1688,71 @@ impl Document {
                 && (!depth.is_finite() || depth < 0.0)
             {
                 bail!("layer {}: depth {depth} must be 0 or more", layer.id);
+            }
+            if let Some(surface) = &layer.surface {
+                surface.validate().with_context(|| format!("layer {}", layer.id))?;
+            }
+            if let Some(role) = layer.map {
+                if !matches!(layer.kind(), Kind::Paint | Kind::Vector) {
+                    bail!(
+                        "layer {}: a {} map is drawn on a paint or vector layer, not a {} layer",
+                        layer.id,
+                        role.name(),
+                        layer.kind().name()
+                    );
+                }
+                if layer.surface.is_some() || layer.depth.is_some() {
+                    bail!(
+                        "layer {}: a map layer draws into the {} map of the layer it belongs to, so it has no surface or depth of its own",
+                        layer.id,
+                        role.name()
+                    );
+                }
+                if layer.shine.is_some()
+                    || layer.specular.is_some()
+                    || layer.emissive
+                    || !layer.glows.is_empty()
+                    || layer.z.is_some()
+                {
+                    bail!(
+                        "layer {}: a map layer draws into the {} map, so it has no shine, glow or z of its own: set those on the layers it lies over",
+                        layer.id,
+                        role.name()
+                    );
+                }
+            }
+            if let Some(shine) = layer.shine
+                && (!shine.is_finite() || !(0.0..=1.0).contains(&shine))
+            {
+                bail!(
+                    "layer {}: shine {shine} is from 0 (matte) to 1 (as shiny as it gets)",
+                    layer.id
+                );
+            }
+            if let Some(colour) = &layer.specular {
+                parse_hex(colour).with_context(|| format!("layer {}: specular", layer.id))?;
+            }
+            layer.glows.iter().try_for_each(|colour| {
+                parse_hex(colour)
+                    .map(|_| ())
+                    .with_context(|| format!("layer {}: glows takes #rrggbb colours", layer.id))
+            })?;
+            if let Some(z) = layer.z
+                && (!z.is_finite() || z.abs() > 100_000.0)
+            {
+                bail!("layer {}: z {z} must be a number of px, nearer above 0", layer.id);
+            }
+            if matches!(layer.kind(), Kind::Adjust | Kind::Bones)
+                && (layer.shine.is_some()
+                    || layer.specular.is_some()
+                    || layer.emissive
+                    || !layer.glows.is_empty()
+                    || layer.z.is_some())
+            {
+                bail!(
+                    "layer {}: shine, specular, emissive, glows and z are for layers that draw: paint, vector and groups",
+                    layer.id
+                );
             }
             layer
                 .cels()
@@ -1932,5 +2051,22 @@ mod tests {
         let stroke: StrokeStyle = serde_json::from_str(r#"{"width":3}"#).unwrap();
         assert_eq!(stroke.paint, Paint::Solid("#000000".into()));
         assert_eq!(stroke.cap, Cap::Round);
+    }
+
+    #[test]
+    fn glow_colours_come_as_a_list_or_one_string_and_must_be_colours() {
+        let layer = |glows: &str| -> Layer {
+            serde_json::from_str(&format!(
+                r#"{{"id":"l1","name":"a","kind":"paint","cels":[],"glows":{glows}}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(layer(r##""#bff2ff, #ffd040""##).glows, vec!["#bff2ff", "#ffd040"]);
+        assert_eq!(layer(r##"["#bff2ff"]"##).glows, vec!["#bff2ff"]);
+        let mut doc = Document::new(8, 8);
+        doc.layers = vec![layer(r#""eyes""#)];
+        assert!(doc.validate().unwrap_err().to_string().contains("glows"));
+        doc.layers = vec![layer(r##""#bff2ff""##)];
+        doc.validate().unwrap();
     }
 }

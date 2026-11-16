@@ -6,10 +6,13 @@ pub mod export;
 pub mod fonts;
 pub mod form;
 pub mod gif;
+pub mod maps;
+pub mod occluders;
 pub mod onion;
 pub mod overlay;
 pub mod pixelise;
 pub mod pngwrite;
+pub mod shaders;
 pub mod shapes;
 pub mod sheet;
 pub mod shift;
@@ -271,7 +274,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn shows(self, layer: &Layer) -> bool {
-        layer.visible && (self.references || !layer.reference)
+        layer.visible && (self.references || !layer.reference) && layer.map.is_none()
     }
 }
 

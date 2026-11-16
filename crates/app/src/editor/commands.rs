@@ -317,7 +317,25 @@ impl Editor {
             | Cmd::NewVectorLayer
             | Cmd::NewGroupLayer
             | Cmd::NewBonesLayer
-            | Cmd::NewAdjustLayer => self.timeline_edit(),
+            | Cmd::NewAdjustLayer
+            | Cmd::NewMapLayer => self.timeline_edit(),
+            Cmd::MakeMapLayer => match layer {
+                None => pick_layer(),
+                Some(_) if self.scene.active_is_mask() => Some("a mask stays a mask: pick the layer itself".into()),
+                Some(l) if l.map.is_some() => Some(format!(
+                    "{} is a map layer already: its layer settings switch what it draws",
+                    l.name
+                )),
+                Some(l) if !matches!(l.kind(), LayerKind::Paint | LayerKind::Vector) => {
+                    Some("only paint and vector layers can draw a map".into())
+                }
+                _ => self.timeline_edit(),
+            },
+            Cmd::MakeColourLayer => match layer {
+                None => pick_layer(),
+                Some(l) if l.map.is_none() => Some(format!("{} draws colour already", l.name)),
+                _ => self.timeline_edit(),
+            },
             Cmd::Unwrap => match self.selection.as_deref().map(|id| self.scene.bundle.doc.item(id)) {
                 Some(Some(klad_core::doc::Item::Node(_, _, n))) if n.shape.generates() => None,
                 _ => Some("select a repeat, scatter or mirror with V first".to_string()),
@@ -398,6 +416,14 @@ impl Editor {
                 .jobs
                 .busy(crate::jobs::Tag::Gaps)
                 .then(|| "the gaps are being looked for: wait a moment".to_string()),
+            Cmd::CheckMaps if self.checks.maps.is_some() => None,
+            Cmd::CheckMaps if self.scene.bundle.doc.maps.is_none() => {
+                Some("the light maps are off: turn them on in Window > Light maps first".to_string())
+            }
+            Cmd::CheckMaps => self
+                .jobs
+                .busy(crate::jobs::Tag::Maps)
+                .then(|| "the light maps are being checked: wait a moment".to_string()),
             Cmd::ShowArcs if self.checks.arcs.is_some() => None,
             Cmd::ShowArcs => self.track().err().map(|e| e.to_string()),
             Cmd::CompareReference => super::compare::reference_image(&self.scene.bundle.root, &self.scene.bundle.doc)
@@ -447,6 +473,11 @@ impl Editor {
             Cmd::PixelGrid => self.settings.pixel_grid,
             Cmd::WrapCanvas => self.scene.bundle.doc.canvas.wrap,
             Cmd::PreviewPane => layout.dock && layout.is_open(Pane::Preview),
+            Cmd::MapsPane => layout.dock && layout.is_open(Pane::Maps),
+            Cmd::LitView => self.maps.show == Some(super::maps::Show::Lit),
+            Cmd::MapView => matches!(self.maps.show, Some(super::maps::Show::Map(_))),
+            Cmd::ShowOccluders => self.maps.outlines,
+            Cmd::CheckMaps => self.checks.maps.is_some(),
             Cmd::Fill => self.tool == Tool::Fill,
             Cmd::Shapes => self.tool == Tool::Select,
             Cmd::Strokes => self.tool == Tool::Strokes,
@@ -538,6 +569,17 @@ impl Editor {
     fn pane(&mut self, pane: Pane) {
         self.settings.layout.toggle(pane);
         self.settings_dirty = true;
+        if !self.settings.layout.is_open(pane) {
+            return;
+        }
+        let folded = self.settings.layout.make_room(pane, self.dock_room);
+        if !folded.is_empty() {
+            let names: Vec<&str> = folded.iter().map(|p| p.title()).collect();
+            self.say(
+                Tone::Info,
+                format!("folded {} to make room for {}", names.join(" and "), pane.title()),
+            );
+        }
     }
 
     fn retime(&mut self, how: Retime) -> Result<()> {
@@ -687,7 +729,11 @@ impl Editor {
                     Op::Palette(PaletteEdit::Ramp { name, keys }),
                 ])?;
             }
-            Cmd::Parallax => {}
+            Cmd::Parallax | Cmd::LightPreview => {}
+            Cmd::MapView => self.next_map(),
+            Cmd::LitView => self.toggle_lit(),
+            Cmd::ShowOccluders => self.maps.outlines = !self.maps.outlines,
+            Cmd::CheckMaps => self.check_maps(),
             Cmd::Note => self.tool = Tool::Note,
             Cmd::Smaller if self.scene.on_grid() => self.pixel_size = self.pixel_size.saturating_sub(1).max(1),
             Cmd::Bigger if self.scene.on_grid() => {
@@ -852,6 +898,9 @@ impl Editor {
             Cmd::NewAdjustLayer => {
                 self.add_layer_value(json!({"kind": "adjust", "name": "curves", "adjust": {"curves": {}}}))?
             }
+            Cmd::NewMapLayer => self.new_map_layer()?,
+            Cmd::MakeMapLayer => self.make_map_layer()?,
+            Cmd::MakeColourLayer => self.make_colour_layer()?,
             Cmd::GroupLayer => self.new_group(true)?,
             Cmd::DuplicateLayer => self.duplicate_layer()?,
             Cmd::DeleteLayer => self.delete_layer()?,
@@ -1070,6 +1119,7 @@ impl Editor {
             Cmd::NotesPane => self.pane(Pane::Notes),
             Cmd::HistoryPane => self.pane(Pane::History),
             Cmd::PreviewPane => self.pane(Pane::Preview),
+            Cmd::MapsPane => self.pane(Pane::Maps),
             Cmd::PixelGrid => {
                 self.settings.pixel_grid = !self.settings.pixel_grid;
                 self.settings_dirty = true;

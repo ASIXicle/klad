@@ -1,10 +1,12 @@
 use crate::layers::{self, Vectors};
-use crate::sprites::{bundle_dir, bundle_stem, file_safe, read};
+use crate::sprites::{Extras, bundle_dir, bundle_stem, file_safe, read, tagged};
 use anyhow::{Context, Result, bail};
 use klad_brush::{BrushSet, Raster, TILE};
 use klad_core::bundle::{Bundle, write_atomic};
-use klad_core::doc::Layer;
-use klad_render::sprites::{header_uid, import_uid, node_name, number, quoted, uid_for};
+use klad_core::doc::{Document, Layer};
+use klad_render::maps::{Map, MapSet};
+use klad_render::occluders::Polygon;
+use klad_render::sprites::{Pixels, canvas_texture, header_uid, import_uid, node_name, number, quoted, uid_for};
 use klad_render::{Rasters, flatten_with};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,6 +74,127 @@ pub struct Plane {
     pub name: String,
     pub depth: f32,
     pub file: PathBuf,
+    pub maps: Vec<(Map, PathBuf)>,
+    pub shapes: Vec<Polygon>,
+}
+
+fn cropped(set: &MapSet, map: Map, [x0, y0, w, h]: [u32; 4]) -> Pixels {
+    let full = Pixels::of_map(set, map);
+    full.crop(klad_render::sprites::Rect { x: x0, y: y0, w, h })
+}
+
+fn write_maps(set: &MapSet, maps: &[Map], file: &Path, area: [u32; 4]) -> Result<Vec<(Map, PathBuf)>> {
+    maps.iter()
+        .map(|map| {
+            let out = tagged(file, map.suffix());
+            write_atomic(&out, &cropped(set, *map, area).png()?)?;
+            Ok((*map, out))
+        })
+        .collect()
+}
+
+fn traced(raster: &Raster, area: [u32; 4], tolerance: f32) -> Vec<Polygon> {
+    let [x0, y0, w, h] = area;
+    let pixels = rgba(raster);
+    let full = raster.width as usize;
+    let alpha: Vec<f32> = (0..(w * h) as usize)
+        .map(|i| {
+            let (x, y) = (x0 as usize + i % w as usize, y0 as usize + i / w as usize);
+            pixels[(y * full + x) * 4 + 3] as f32 / 255.0
+        })
+        .collect();
+    klad_render::occluders::polygons(&alpha, w as usize, h as usize, tolerance)
+        .into_iter()
+        .map(|ring| ring.into_iter().map(|[x, y]| [x + x0 as f32, y + y0 as f32]).collect())
+        .collect()
+}
+
+fn occluder_lines(id: &str, rings: &[Polygon], at: impl Fn([f32; 2]) -> [f32; 2]) -> (String, Vec<String>) {
+    let subs: String = rings
+        .iter()
+        .enumerate()
+        .map(|(k, ring)| {
+            let points: Vec<String> = ring
+                .iter()
+                .map(|p| {
+                    let [x, y] = at(*p);
+                    format!("{}, {}", number(x), number(y))
+                })
+                .collect();
+            format!(
+                "[sub_resource type=\"OccluderPolygon2D\" id=\"{id}_{k}\"]\ncull_mode = 2\npolygon = PackedVector2Array({})\n\n",
+                points.join(", ")
+            )
+        })
+        .collect();
+    (subs, (0..rings.len()).map(|k| format!("{id}_{k}")).collect())
+}
+
+fn lit_texture(
+    id: usize,
+    diffuse: &str,
+    maps: &[(Map, PathBuf)],
+    ext: &mut String,
+    shininess: f32,
+    nearest: bool,
+) -> String {
+    let find = |m: Map| maps.iter().find(|(map, _)| *map == m).map(|(_, f)| f);
+    let mut line = |m: Map, tag: &str| {
+        find(m).map(|f| {
+            *ext += &format!(
+                "[ext_resource type=\"Texture2D\" uid={} path={} id=\"{id}_{tag}\"]\n",
+                quoted(&texture_uid(f)),
+                quoted(&f.file_name().unwrap_or_default().to_string_lossy())
+            );
+            format!("ExtResource(\"{id}_{tag}\")")
+        })
+    };
+    let normal = line(Map::Normal, "normal");
+    let specular = line(Map::Specular, "specular");
+    canvas_texture(
+        &format!("CanvasTexture_{id}"),
+        diffuse,
+        normal.as_deref(),
+        specular.as_deref(),
+        shininess,
+        nearest,
+    )
+}
+
+fn shader_material(
+    id: usize,
+    shader: Option<&(PathBuf, String)>,
+    effects: &[klad_render::shaders::Effect],
+    maps: &[(Map, PathBuf)],
+    ext: &mut String,
+) -> Option<String> {
+    shader?;
+    let params: String = effects
+        .iter()
+        .filter_map(|e| {
+            let found = maps.iter().find(|(m, _)| *m == e.map()).map(|(_, f)| f)?;
+            *ext += &format!(
+                "[ext_resource type=\"Texture2D\" uid={} path={} id=\"{id}_{}\"]\n",
+                quoted(&texture_uid(found)),
+                quoted(&found.file_name().unwrap_or_default().to_string_lossy()),
+                e.uniform()
+            );
+            Some(format!(
+                "shader_parameter/{} = ExtResource(\"{id}_{}\")\n",
+                e.uniform(),
+                e.uniform()
+            ))
+        })
+        .collect();
+    Some(format!(
+        "\n[sub_resource type=\"ShaderMaterial\" id=\"ShaderMaterial_{id}\"]\nshader = ExtResource(\"0_shader\")\n{params}"
+    ))
+}
+
+fn alone_doc(doc: &Document, layers: Vec<Layer>) -> Document {
+    let mut solo = doc.clone();
+    solo.layers = layers;
+    solo
 }
 
 pub fn rasters_at(bundle: &Bundle, frame: u32) -> Result<Rasters> {
@@ -81,16 +204,23 @@ pub fn rasters_at(bundle: &Bundle, frame: u32) -> Result<Rasters> {
     Ok(rasters)
 }
 
-pub fn parallax(path: &Path, dir: Option<PathBuf>, frame: u32) -> Result<Vec<PathBuf>> {
+pub fn parallax(path: &Path, dir: Option<PathBuf>, frame: u32, extras: &Extras) -> Result<Vec<PathBuf>> {
     let bundle = Bundle::open(path)?;
     let doc = &bundle.doc;
     let target = target(&bundle, dir)?;
     let stem = file_safe(&bundle_stem(&bundle));
     let rasters = rasters_at(&bundle, frame)?;
-    let shown: Vec<&Layer> = doc.layers.iter().filter(|l| l.visible && !l.reference).collect();
+    let shown: Vec<&Layer> = doc
+        .layers
+        .iter()
+        .filter(|l| l.visible && !l.reference && l.map.is_none())
+        .collect();
     if shown.is_empty() {
         bail!("nothing to export: no visible layers");
     }
+    let wanted = crate::sprites::lit_maps(doc, &extras.shaders)?;
+    let (cw, ch) = (doc.canvas.width, doc.canvas.height);
+    let whole = [0, 0, cw, ch];
     let background = doc.canvas.background.clone();
     let planes: Vec<Plane> = shown
         .iter()
@@ -100,50 +230,102 @@ pub fn parallax(path: &Path, dir: Option<PathBuf>, frame: u32) -> Result<Vec<Pat
             let flat = flatten_with(doc, frame, &rasters, &[*layer], back, None, false)?;
             let file = target.join(format!("{stem}-{i:02}-{}.png", file_safe(&layer.name)));
             write_atomic(&file, &png(flat.width, flat.height, rgba(&flat))?)?;
+            let maps = match wanted.is_empty() {
+                true => Vec::new(),
+                false => {
+                    let mut own: Vec<Layer> = vec![(*layer).clone()];
+                    let at = doc.layers.iter().position(|l| l.id == layer.id).unwrap_or(0);
+                    own.extend(doc.layers[at + 1..].iter().take_while(|l| l.map.is_some()).cloned());
+                    let solo = alone_doc(doc, own);
+                    let set = klad_render::maps::render(&solo, frame, &rasters, 1.0)?;
+                    write_maps(&set, &wanted, &file, whole)?
+                }
+            };
+            let shapes = match extras.occluders {
+                Some(tolerance) => {
+                    let bare = flatten_with(doc, frame, &rasters, &[*layer], None, None, false)?;
+                    let rings = traced(&bare, whole, tolerance);
+                    let area: f32 = rings.iter().map(|r| klad_render::occluders::area(r)).sum();
+                    match area.abs() > 0.9 * (cw * ch) as f32 {
+                        true => Vec::new(),
+                        false => rings,
+                    }
+                }
+                None => Vec::new(),
+            };
             Ok(Plane {
                 name: node_name(&layer.name),
                 depth: layer.depth.unwrap_or(0.0),
                 file,
+                maps,
+                shapes,
             })
         })
         .collect::<Result<_>>()?;
+    let nearest = doc.pixel_art();
+    let shininess = klad_core::maps::godot_shininess(klad_render::maps::settings(doc).shininess);
+    let shader = crate::sprites::shader_file(&target, &stem, &extras.shaders, nearest)?;
+    let mut ext = String::new();
+    if let Some((file, uid)) = &shader {
+        ext += &format!(
+            "[ext_resource type=\"Shader\" uid={} path={} id=\"0_shader\"]\n",
+            quoted(uid),
+            quoted(&file.file_name().unwrap_or_default().to_string_lossy())
+        );
+    }
+    let mut subs = String::new();
+    let mut nodes = String::new();
+    planes.iter().enumerate().for_each(|(i, p)| {
+        let id = i + 1;
+        ext += &format!(
+            "[ext_resource type=\"Texture2D\" uid={} path={} id=\"{id}_plane\"]\n",
+            quoted(&texture_uid(&p.file)),
+            quoted(&p.file.file_name().unwrap_or_default().to_string_lossy())
+        );
+        let texture = match p.maps.is_empty() {
+            true => format!("ExtResource(\"{id}_plane\")"),
+            false => {
+                subs += &lit_texture(id, &format!("ExtResource(\"{id}_plane\")"), &p.maps, &mut ext, shininess, nearest);
+                format!("SubResource(\"CanvasTexture_{id}\")")
+            }
+        };
+        let material = shader_material(id, shader.as_ref(), &extras.shaders, &p.maps, &mut ext).map(|m| {
+            subs += &m;
+            format!("material = SubResource(\"ShaderMaterial_{id}\")\n")
+        });
+        let (occluders, polygons) = occluder_lines(&format!("OccluderPolygon2D_{id}"), &p.shapes, |v| v);
+        subs += &occluders.trim_end().replace("[sub_resource", "\n[sub_resource");
+        let s = number(scroll_scale(p.depth));
+        let name = quoted(&format!("{:02} {}", i, p.name));
+        nodes += &format!(
+            "\n[node name={name} type=\"Parallax2D\" parent=\".\"]\nscroll_scale = Vector2({s}, {s})\n\n[node name=\"Sprite2D\" type=\"Sprite2D\" parent={name}]\n{}texture = {texture}\ncentered = false\n",
+            material.unwrap_or_default()
+        );
+        polygons.iter().enumerate().for_each(|(k, poly)| {
+            nodes += &format!(
+                "\n[node name=\"occluder {}\" type=\"LightOccluder2D\" parent={}]\noccluder = SubResource(\"{poly}\")\n",
+                k + 1,
+                quoted(&format!("{:02} {}/Sprite2D", i, p.name))
+            );
+        });
+    });
     let scene = target.join(format!("{stem}-parallax.tscn"));
-    let resources: String = planes
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            format!(
-                "[ext_resource type=\"Texture2D\" uid={} path={} id=\"{}_plane\"]\n",
-                quoted(&texture_uid(&p.file)),
-                quoted(&p.file.file_name().unwrap_or_default().to_string_lossy()),
-                i + 1
-            )
-        })
-        .collect();
-    let nodes: String = planes
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let s = number(scroll_scale(p.depth));
-            format!(
-                "\n[node name={name} type=\"Parallax2D\" parent=\".\"]\nscroll_scale = Vector2({s}, {s})\n\n[node name=\"Sprite2D\" type=\"Sprite2D\" parent={name}]\ntexture = ExtResource(\"{}_plane\")\ncentered = false\n",
-                i + 1,
-                name = quoted(&format!("{:02} {}", i, p.name)),
-            )
-        })
-        .collect();
-    let sharp = match bundle.doc.pixel_art() {
+    let sharp = match nearest {
         true => "texture_filter = 1\n",
         false => "",
     };
     let text = format!(
-        "[gd_scene load_steps={} format=3 uid={}]\n\n{resources}\n[node name={} type=\"Node2D\"]\n{sharp}{nodes}",
-        planes.len() + 1,
+        "[gd_scene format=3 uid={}]\n\n{ext}{subs}\n\n[node name={} type=\"Node2D\"]\n{sharp}{nodes}",
         quoted(&uid_of(&scene)),
         quoted(&node_name(&bundle_stem(&bundle))),
     );
     write_atomic(&scene, text.as_bytes())?;
-    Ok(planes.iter().map(|p| p.file.clone()).chain([scene]).collect())
+    Ok(planes
+        .iter()
+        .flat_map(|p| std::iter::once(p.file.clone()).chain(p.maps.iter().map(|(_, f)| f.clone())))
+        .chain(shader.map(|(f, _)| f))
+        .chain([scene])
+        .collect())
 }
 
 struct Part {
@@ -153,6 +335,9 @@ struct Part {
     vertices: Vec<[f32; 2]>,
     triangles: Vec<[usize; 3]>,
     bone: Option<usize>,
+    maps: Vec<(Map, PathBuf)>,
+    shapes: Vec<Polygon>,
+    holder: Option<usize>,
 }
 
 const GRID: u32 = 16;
@@ -267,10 +452,13 @@ fn floats(values: &[f32]) -> String {
     )
 }
 
-pub fn rig(path: &Path, dir: Option<PathBuf>) -> Result<Vec<PathBuf>> {
+pub fn rig(path: &Path, dir: Option<PathBuf>, extras: &Extras) -> Result<Vec<PathBuf>> {
     let bundle = Bundle::open(path)?;
     let doc = &bundle.doc;
     let target = target(&bundle, dir)?;
+    let wanted: Vec<Map> = crate::sprites::lit_maps(doc, &[])?;
+    let nearest = doc.pixel_art();
+    let shininess = klad_core::maps::godot_shininess(klad_render::maps::settings(doc).shininess);
     let stem = file_safe(&bundle_stem(&bundle));
     let owners = crate::rig::owners(doc);
     if owners.is_empty() {
@@ -333,20 +521,47 @@ pub fn rig(path: &Path, dir: Option<PathBuf>) -> Result<Vec<PathBuf>> {
                     .map(|(x, y)| alpha[(y * cw + x) as usize])
                     .collect();
                 let (vertices, triangles) = mesh(&small, w, h, [x0 as f32, y0 as f32]);
+                let area = [x0, y0, w, h];
+                let maps = match wanted.is_empty() {
+                    true => Vec::new(),
+                    false => {
+                        let mut alone = Layer::paint("part", "part", "cpart");
+                        if let klad_core::doc::LayerContent::Paint { pixel, .. } = &mut alone.content {
+                            *pixel = layer.pixel();
+                        }
+                        let solo = alone_doc(doc, vec![alone]);
+                        let rasters: Rasters = [("cpart".to_string(), raster.clone())].into_iter().collect();
+                        let set = klad_render::maps::render(&solo, 0, &rasters, 1.0)?;
+                        write_maps(&set, &wanted, &file, area)?
+                    }
+                };
+                let bone = layer.follows().and_then(|b| bones.iter().position(|o| o.name == b));
+                let centre = [x0 as f32 + w as f32 / 2.0, y0 as f32 + h as f32 / 2.0];
+                let holder = bone.or_else(|| {
+                    weights
+                        .at(bones, centre)
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.total_cmp(b.1))
+                        .map(|(i, _)| i)
+                });
                 parts.push(Part {
                     name: node_name(&format!("{} {}", layer.name, part)),
                     file,
                     origin: [x0 as f32, y0 as f32],
                     vertices,
                     triangles,
-                    bone: layer.follows().and_then(|b| bones.iter().position(|o| o.name == b)),
+                    bone,
+                    maps,
+                    shapes: extras.occluders.map_or(Vec::new(), |t| traced(&raster, area, t)),
+                    holder,
                 });
                 Ok(())
             })
         })?;
         let scene = target.join(format!("{stem}-{name}-rig.tscn"));
         let paths = bone_paths(bones);
-        let resources: String = parts
+        let mut resources: String = parts
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -358,6 +573,36 @@ pub fn rig(path: &Path, dir: Option<PathBuf>) -> Result<Vec<PathBuf>> {
                 )
             })
             .collect();
+        let mut lit = String::new();
+        let mut shadows = String::new();
+        let mut shadow_nodes = String::new();
+        parts.iter().enumerate().for_each(|(k, p)| {
+            if !p.maps.is_empty() {
+                lit += &lit_texture(
+                    k + 1,
+                    &format!("ExtResource(\"{}_part\")", k + 1),
+                    &p.maps,
+                    &mut resources,
+                    shininess,
+                    nearest,
+                );
+            }
+            let (head, angle) = p.holder.map_or(([0.0, 0.0], 0.0), |b| (bones[b].head, bones[b].angle()));
+            let (sin, cos) = (angle.sin(), angle.cos());
+            let (subs, ids) = occluder_lines(&format!("OccluderPolygon2D_{}", k + 1), &p.shapes, |[x, y]| {
+                let (dx, dy) = (x - head[0], y - head[1]);
+                [dx * cos + dy * sin, -dx * sin + dy * cos]
+            });
+            shadows += &subs;
+            let parent = p.holder.map_or(".".to_string(), |b| format!("Skeleton2D/{}", paths[b]));
+            ids.iter().enumerate().for_each(|(j, id)| {
+                shadow_nodes += &format!(
+                    "\n[node name={} type=\"LightOccluder2D\" parent={}]\noccluder = SubResource(\"{id}\")\n",
+                    quoted(&format!("{:02} {} occluder {}", k, p.name, j + 1)),
+                    quoted(&parent)
+                );
+            });
+        });
         let fps = doc.timeline.fps.max(1) as f32;
         let clips: Vec<(String, u32, u32, bool, f32)> = match doc.timeline.clips.is_empty() {
             true => vec![("all".into(), 0, doc.timeline.frames.saturating_sub(1), true, fps)],
@@ -515,10 +760,13 @@ pub fn rig(path: &Path, dir: Option<PathBuf>) -> Result<Vec<PathBuf>> {
                         )
                     })
                     .collect();
+                let texture = match p.maps.is_empty() {
+                    true => format!("ExtResource(\"{}_part\")", k + 1),
+                    false => format!("SubResource(\"CanvasTexture_{}\")", k + 1),
+                };
                 format!(
-                    "\n[node name={} type=\"Polygon2D\" parent=\".\"]\ntexture = ExtResource(\"{}_part\")\nskeleton = NodePath(\"../Skeleton2D\")\npolygon = PackedVector2Array({})\nuv = PackedVector2Array({})\npolygons = [{}]\nbones = [{}]\n",
+                    "\n[node name={} type=\"Polygon2D\" parent=\".\"]\ntexture = {texture}\nskeleton = NodePath(\"../Skeleton2D\")\npolygon = PackedVector2Array({})\nuv = PackedVector2Array({})\npolygons = [{}]\nbones = [{}]\n",
                     quoted(&format!("{:02} {}", k, p.name)),
-                    k + 1,
                     points.join(", "),
                     uv.join(", "),
                     tris.join(", "),
@@ -527,7 +775,7 @@ pub fn rig(path: &Path, dir: Option<PathBuf>) -> Result<Vec<PathBuf>> {
             })
             .collect();
         let text = format!(
-            "[gd_scene load_steps={} format=3 uid={}]\n\n{resources}\n{}{library}\n[node name={} type=\"Node2D\"]\n{polygons}\n[node name=\"Skeleton2D\" type=\"Skeleton2D\" parent=\".\"]\n{skeleton}\n[node name=\"AnimationPlayer\" type=\"AnimationPlayer\" parent=\".\"]\nlibraries = {{\n&\"\": SubResource(\"AnimationLibrary_1\")\n}}\nautoplay = {}\n",
+            "[gd_scene load_steps={} format=3 uid={}]\n\n{resources}{lit}\n{shadows}{}{library}\n[node name={} type=\"Node2D\"]\n{polygons}\n[node name=\"Skeleton2D\" type=\"Skeleton2D\" parent=\".\"]\n{skeleton}{shadow_nodes}\n[node name=\"AnimationPlayer\" type=\"AnimationPlayer\" parent=\".\"]\nlibraries = {{\n&\"\": SubResource(\"AnimationLibrary_1\")\n}}\nautoplay = {}\n",
             parts.len() + clips.len() + 2,
             quoted(&uid_of(&scene)),
             animations.join(""),
@@ -544,7 +792,11 @@ pub fn rig(path: &Path, dir: Option<PathBuf>) -> Result<Vec<PathBuf>> {
                 owner.name
             );
         }
-        written.extend(parts.iter().map(|p| p.file.clone()));
+        written.extend(
+            parts
+                .iter()
+                .flat_map(|p| std::iter::once(p.file.clone()).chain(p.maps.iter().map(|(_, f)| f.clone()))),
+        );
         written.push(scene);
         Ok(())
     })?;
@@ -612,18 +864,7 @@ func _process(_delta):
         }
     }
 
-    #[test]
-    fn a_rig_and_a_parallax_scene_export_for_godot() {
-        let dir = std::env::temp_dir().join(format!("klad-scene-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let project = dir.join("game");
-        fs::create_dir_all(project.join("art")).unwrap();
-        fs::write(
-            project.join("project.godot"),
-            "config_version=5\n\n[application]\n\nconfig/name=\"klad check\"\n",
-        )
-        .unwrap();
-        fs::write(project.join("check.gd"), CHECK).unwrap();
+    fn arm(dir: &Path) -> PathBuf {
         let path = dir.join("arm.klad");
         let mut doc = Document::new(600, 400);
         doc.canvas.background = Some("#f0e8dc".into());
@@ -649,7 +890,24 @@ func _process(_delta):
         );
         edit(r#"{"op":"weights","layer":"rig","auto":true}"#);
         edit(r#"{"op":"pose","layer":"rig","from":0,"to":4,"bones":{"fore":-70}}"#);
-        let made = rig(&path, Some(project.join("art"))).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_rig_and_a_parallax_scene_export_for_godot() {
+        let dir = std::env::temp_dir().join(format!("klad-scene-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("game");
+        fs::create_dir_all(project.join("art")).unwrap();
+        fs::write(
+            project.join("project.godot"),
+            "config_version=5\n\n[application]\n\nconfig/name=\"klad check\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("check.gd"), CHECK).unwrap();
+        let path = arm(&dir);
+        let edit = |ops: &str| crate::agent::edit(&path, &parse_lines(ops).unwrap(), &quiet()).unwrap();
+        let made = rig(&path, Some(project.join("art")), &Extras::default()).unwrap();
         let text = fs::read_to_string(made.last().unwrap()).unwrap();
         assert!(text.contains("type=\"Skeleton2D\"") && text.contains("NodePath(\"Skeleton2D/upper/fore:rotation\")"));
         assert!(
@@ -667,17 +925,23 @@ func _process(_delta):
             "a layer that bends blends its bones"
         );
         edit(r#"{"op":"attach","layer":"arm","bone":"fore"}"#);
-        let attached = fs::read_to_string(rig(&path, Some(project.join("art"))).unwrap().last().unwrap()).unwrap();
+        let attached = fs::read_to_string(
+            rig(&path, Some(project.join("art")), &Extras::default())
+                .unwrap()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
         assert!(
             weights_of(&attached, "upper").iter().all(|w| *w == 0.0)
                 && weights_of(&attached, "upper/fore").iter().all(|w| *w == 1.0),
             "a layer attached to a bone is all that bone's"
         );
-        let planes = parallax(&path, Some(project.join("art")), 0).unwrap();
+        let planes = parallax(&path, Some(project.join("art")), 0, &Extras::default()).unwrap();
         let scene = fs::read_to_string(planes.last().unwrap()).unwrap();
         assert!(scene.contains("scroll_scale = Vector2(0.25, 0.25)") && scene.contains("scroll_scale = Vector2(1, 1)"));
         let again = uid_of(planes.last().unwrap());
-        parallax(&path, Some(project.join("art")), 0).unwrap();
+        parallax(&path, Some(project.join("art")), 0, &Extras::default()).unwrap();
         assert_eq!(uid_of(planes.last().unwrap()), again, "a re-export keeps its uid");
         let binary = std::env::var("GODOT").unwrap_or_else(|_| "godot".into());
         if !Command::new(&binary)
@@ -690,7 +954,7 @@ func _process(_delta):
         }
         let run = |args: &[&str]| {
             let o = Command::new(&binary)
-                .args(["--headless", "--path"])
+                .args(["--headless", "--quit-after", "600", "--path"])
                 .arg(&project)
                 .args(args)
                 .output()
@@ -721,6 +985,112 @@ func _process(_delta):
             "the far plane scrolls at a quarter of the camera: {planes:?}"
         );
         assert!(moved(near).abs() < 1e-3);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const LIT: &str = r#"extends SceneTree
+
+func _init():
+	var out := {}
+	var rig = load("res://art/arm-arm_bones-rig.tscn").instantiate()
+	var poly: Polygon2D = rig.get_child(0)
+	out["part"] = poly.texture.get_class()
+	var held := 0
+	for bone in [rig.get_node("Skeleton2D/upper"), rig.get_node("Skeleton2D/upper/fore")]:
+		for c in bone.get_children():
+			if c is LightOccluder2D and c.occluder != null:
+				held += 1
+	out["bone_shadows"] = held
+	var scene = load("res://art/arm-parallax.tscn").instantiate()
+	var planes := []
+	for p in scene.get_children():
+		var sprite: Sprite2D = p.get_child(0)
+		var shadows := 0
+		for c in sprite.get_children():
+			if c is LightOccluder2D:
+				shadows += 1
+		planes.append([sprite.texture.get_class(), sprite.material.shader.get_shader_uniform_list().size(), shadows])
+	out["planes"] = planes
+	rig.free()
+	scene.free()
+	print("RESULT ", JSON.stringify(out))
+	quit()
+"#;
+
+    #[test]
+    fn a_lit_rig_and_parallax_scene_carry_their_maps_shadows_and_shaders() {
+        let dir = std::env::temp_dir().join(format!("klad-scene-lit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("game");
+        fs::create_dir_all(project.join("art")).unwrap();
+        let path = arm(&dir);
+        crate::agent::edit(
+            &path,
+            &parse_lines(r#"{"op":"maps","surface":{"bevel":6}}"#).unwrap(),
+            &quiet(),
+        )
+        .unwrap();
+        let extras = Extras {
+            occluders: Some(1.5),
+            shaders: klad_render::shaders::Effect::list("fog,occlusion").unwrap(),
+        };
+        let made = rig(&path, Some(project.join("art")), &extras).unwrap();
+        assert!(made.iter().any(|f| f.to_string_lossy().ends_with("_n.png")));
+        let text = fs::read_to_string(made.last().unwrap()).unwrap();
+        assert!(
+            text.contains("type=\"CanvasTexture\"")
+                && text.contains("type=\"LightOccluder2D\" parent=\"Skeleton2D/upper")
+        );
+        let planes = parallax(&path, Some(project.join("art")), 0, &extras).unwrap();
+        let scene = fs::read_to_string(planes.last().unwrap()).unwrap();
+        assert!(scene.contains("[sub_resource type=\"ShaderMaterial\" id=\"ShaderMaterial_1\"]"));
+        assert!(project.join("art/arm-00-far_d.png").exists() && project.join("art/arm-maps.gdshader.uid").exists());
+        let binary = std::env::var("GODOT").unwrap_or_else(|_| "godot".into());
+        if !Command::new(&binary)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("no godot on PATH (or $GODOT): skipping the import check");
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        fs::write(
+            project.join("project.godot"),
+            "config_version=5\n\n[application]\n\nconfig/name=\"klad lit scene\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("lit.gd"), LIT).unwrap();
+        let run = |args: &[&str]| {
+            let o = Command::new(&binary)
+                .args(["--headless", "--quit-after", "600", "--path"])
+                .arg(&project)
+                .args(args)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)
+        };
+        run(&["--import"]);
+        let output = run(&["-s", "lit.gd"]);
+        assert!(!output.contains("SHADER ERROR"), "{output}");
+        let line = output
+            .lines()
+            .find_map(|l| l.strip_prefix("RESULT "))
+            .unwrap_or_else(|| panic!("{output}"));
+        let got: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(got["part"], "CanvasTexture", "{got}");
+        assert!(got["bone_shadows"].as_u64().unwrap() >= 1, "{got}");
+        let planes = got["planes"].as_array().unwrap();
+        assert_eq!(planes.len(), 3, "far, arm and the bones layer");
+        planes.iter().for_each(|p| {
+            assert_eq!(p[0], "CanvasTexture");
+            assert!(p[1].as_u64().unwrap() >= 5, "the plane's shader has its uniforms: {p}");
+        });
+        assert!(
+            planes[..2].iter().all(|p| p[2].as_u64().unwrap() >= 1),
+            "each drawn plane casts its shadow: {planes:?}"
+        );
+        assert_eq!(planes[2][2], 0, "the bones draw nothing, so cast nothing");
         fs::remove_dir_all(&dir).unwrap();
     }
 }

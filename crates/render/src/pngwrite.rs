@@ -7,7 +7,15 @@ const IDAT: usize = 1 << 20;
 const ADLER: u32 = 65521;
 
 pub fn write(width: u32, height: u32, depth: u8, rows: &[u8]) -> Vec<u8> {
-    let bpp = 4 * depth as usize / 8;
+    encode(width, height, depth, 4, true, rows)
+}
+
+pub fn data(width: u32, height: u32, depth: u8, channels: u8, rows: &[u8]) -> Vec<u8> {
+    encode(width, height, depth, channels, false, rows)
+}
+
+fn encode(width: u32, height: u32, depth: u8, channels: u8, srgb: bool, rows: &[u8]) -> Vec<u8> {
+    let bpp = channels as usize * depth as usize / 8;
     let line = width as usize * bpp;
     let filtered: Vec<Vec<u8>> = (0..height as usize)
         .into_par_iter()
@@ -35,9 +43,17 @@ pub fn write(width: u32, height: u32, depth: u8, rows: &[u8]) -> Vec<u8> {
     let mut header = Vec::with_capacity(13);
     header.extend_from_slice(&width.to_be_bytes());
     header.extend_from_slice(&height.to_be_bytes());
-    header.extend_from_slice(&[depth, 6, 0, 0, 0]);
+    let kind = match channels {
+        1 => 0,
+        2 => 4,
+        3 => 2,
+        _ => 6,
+    };
+    header.extend_from_slice(&[depth, kind, 0, 0, 0]);
     chunk(&mut out, b"IHDR", &header);
-    chunk(&mut out, b"sRGB", &[0]);
+    if srgb {
+        chunk(&mut out, b"sRGB", &[0]);
+    }
     zlib.chunks(IDAT).for_each(|part| chunk(&mut out, b"IDAT", part));
     chunk(&mut out, b"IEND", &[]);
     out

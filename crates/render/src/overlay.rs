@@ -123,6 +123,7 @@ pub struct Overlay {
     pub bones: Vec<Shown>,
     pub targets: Vec<([f32; 2], [f32; 2])>,
     pub heat: Option<Heat>,
+    pub outlines: Vec<Vec<[f32; 2]>>,
 }
 
 pub type Shown = (String, [f32; 2], [f32; 2]);
@@ -174,6 +175,36 @@ fn draw_bones(
         canvas.draw_circle(a, 4.0 * px, &color([0.0, 0.0, 0.0], 0.7));
         canvas.draw_circle(a, 2.5 * px, &color(hue, 1.0));
         draw_label(canvas, name, (a.0 + b.0) / 2.0 + 4.0, (a.1 + b.1) / 2.0, px, hue);
+    });
+}
+
+fn draw_outlines(canvas: &Canvas, outlines: &[Vec<[f32; 2]>], to_out: impl Fn([f32; 2]) -> (f32, f32), px: f32) {
+    outlines.iter().filter(|ring| ring.len() > 1).for_each(|ring| {
+        let mut path = skia_safe::PathBuilder::new();
+        ring.iter().enumerate().for_each(|(i, p)| {
+            let at = to_out(*p);
+            match i {
+                0 => path.move_to(at),
+                _ => path.line_to(at),
+            };
+        });
+        path.close();
+        let path = path.detach();
+        [
+            (color([0.0, 0.0, 0.0], 0.6), 3.0 * px),
+            (color([1.0, 0.85, 0.2], 1.0), 1.5 * px),
+        ]
+        .into_iter()
+        .for_each(|(mut paint, width)| {
+            paint.set_style(PaintStyle::Stroke);
+            paint.set_stroke_width(width);
+            canvas.draw_path(&path, &paint);
+        });
+        let dot = color([1.0, 0.85, 0.2], 1.0);
+        ring.iter().for_each(|p| {
+            let (x, y) = to_out(*p);
+            canvas.draw_circle((x, y), 2.0 * px, &dot);
+        });
     });
 }
 
@@ -426,6 +457,12 @@ pub fn apply(image: &skia_safe::Image, overlay: &Overlay, view: &View) -> Result
     if let Some(heat) = &overlay.heat {
         draw_heat(canvas, heat, |p| ((p[0] - origin.0) * s, (p[1] - origin.1) * s));
     }
+    draw_outlines(
+        canvas,
+        &overlay.outlines,
+        |p| ((p[0] - origin.0) * s, (p[1] - origin.1) * s),
+        px,
+    );
     draw_arcs(canvas, overlay, |p| ((p[0] - origin.0) * s, (p[1] - origin.1) * s), px);
     draw_bones(
         canvas,

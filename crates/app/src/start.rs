@@ -406,7 +406,16 @@ impl Start {
                     ui.checkbox(&mut self.paper, "Colour");
                     match self.paper {
                         true => {
-                            egui::color_picker::color_edit_button_srgb(ui, &mut self.colour);
+                            if let Some(rgba) = crate::color::Square::new(
+                                ui,
+                                "start.paper",
+                                crate::color::from_srgb(self.colour),
+                                "the paper colour",
+                            )
+                            .pick(ui)
+                            {
+                                self.colour = crate::color::to_srgb(rgba);
+                            }
                         }
                         false => {
                             ui.label(RichText::new("transparent").color(theme::WEAK));

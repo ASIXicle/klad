@@ -130,11 +130,29 @@ pub fn add_op(what: &str, rest: &[String], place: Place) -> Result<Op> {
             let (kind, props) = match rest.split_first() {
                 Some((kind, props)) if !kind.contains('=') => (kind.clone(), props),
                 _ => bail!(
-                    "say which kind: klad add <bundle> layer paint|pixel|vector|group|adjust|image [key=value ...]"
+                    "say which kind: klad add <bundle> layer paint|pixel|vector|group|adjust|map|image [key=value ...]"
                 ),
             };
             let layer = match kind.as_str() {
                 "adjust" => crate::looks::adjust_layer(props)?,
+                "map" => {
+                    let (role, props) = match props.split_first() {
+                        Some((role, props)) if !role.contains('=') => (role.clone(), props),
+                        _ => bail!(
+                            "say which map: klad add <bundle> layer map height|normal|specular|emission [key=value ...]"
+                        ),
+                    };
+                    if !klad_core::maps::Role::ALL.iter().any(|r| r.name() == role) {
+                        bail!("a map layer draws height, normal, specular or emission, not {role:?}");
+                    }
+                    let mut layer = nest(parse_props(props)?);
+                    layer["kind"] = Value::String("paint".into());
+                    layer["map"] = Value::String(role.clone());
+                    if layer.get("name").is_none() {
+                        layer["name"] = Value::String(role);
+                    }
+                    layer
+                }
                 _ => {
                     let mut layer = nest(parse_props(props)?);
                     layer["kind"] = Value::String(kind);
@@ -219,6 +237,7 @@ pub struct Kinds {
     pub arcs: bool,
     pub bones: bool,
     pub weights: Option<String>,
+    pub occluders: bool,
 }
 
 pub fn overlay_flags(kinds: &str) -> Result<Kinds> {
@@ -235,6 +254,7 @@ pub fn overlay_flags(kinds: &str) -> Result<Kinds> {
                 "parts" => Kinds { parts: true, ..acc },
                 "arcs" => Kinds { arcs: true, ..acc },
                 "bones" => Kinds { bones: true, ..acc },
+                "occluders" => Kinds { occluders: true, ..acc },
                 w if w.starts_with("weights:") => Kinds {
                     weights: Some(w.trim_start_matches("weights:").to_string()),
                     bones: true,
@@ -247,7 +267,7 @@ pub fn overlay_flags(kinds: &str) -> Result<Kinds> {
                     ..acc
                 },
                 other => bail!(
-                    "unknown overlay {other:?}: use ids, bbox, grid, onion, parts, arcs, bones, weights:<bone> or all"
+                    "unknown overlay {other:?}: use ids, bbox, grid, onion, parts, arcs, bones, weights:<bone>, occluders or all"
                 ),
             })
         })
@@ -381,6 +401,26 @@ pub fn focus_view(bundle: &Bundle, id: &str, frame: u32, scale: Option<f32>) -> 
     })
 }
 
+pub fn outlines(bundle: &Bundle, frame: u32, rasters: &Rasters) -> Result<Vec<klad_render::occluders::Polygon>> {
+    let doc = &bundle.doc;
+    let options = klad_render::export::Options {
+        scale: 1.0,
+        background: false,
+        references: false,
+        detail: 1.0,
+    };
+    let image = klad_render::export::render(doc, frame, rasters, &klad_render::export::Target::Frame, options)?;
+    let picture = klad_render::read_rgba8(&image)?;
+    let (w, h) = (picture.width as usize, picture.height as usize);
+    let alpha: Vec<f32> = picture.rgba.chunks(4).map(|p| p[3] as f32 / 255.0).collect();
+    Ok(klad_render::occluders::polygons(
+        &alpha,
+        w,
+        h,
+        klad_render::occluders::TOLERANCE,
+    ))
+}
+
 pub struct Rendered {
     pub path: PathBuf,
     pub frame: Frame,
@@ -402,41 +442,46 @@ pub fn render_look(
     let brushes = BrushSet::for_bundle(bundle)?;
     let loaded = layers::load(bundle, frame, &brushes, use_cache)?;
     let kinds = look.kinds()?;
-    let overlay = (kinds.ids || kinds.bbox || kinds.grid || kinds.parts || kinds.arcs || kinds.bones)
-        .then(|| {
-            let mut found = if kinds.ids || kinds.bbox {
-                marks(bundle, frame, look.focus.as_deref(), look.depth)?
-            } else {
-                Vec::new()
-            };
-            if kinds.parts {
-                found.extend(crate::arcs::part_marks(bundle, frame)?);
-            }
-            Ok::<_, anyhow::Error>(Overlay {
-                marks: found,
-                boxes: kinds.bbox || kinds.parts,
-                ids: kinds.ids || kinds.parts,
-                grid: kinds.grid,
-                cells: bundle.doc.pixel_art(),
-                arcs: arcs_of(bundle, look, frame, kinds.arcs)?,
-                frame: Some(frame),
-                numbers: true,
-                bones: match kinds.bones {
-                    true => crate::rig::bones_at(bundle, frame)?,
-                    false => Vec::new(),
-                },
-                targets: match kinds.bones {
-                    true => crate::rig::targets_at(bundle, frame),
-                    false => Vec::new(),
-                },
-                heat: kinds
-                    .weights
-                    .as_deref()
-                    .map(|b| crate::rig::heat(bundle, b))
-                    .transpose()?,
+    let overlay =
+        (kinds.ids || kinds.bbox || kinds.grid || kinds.parts || kinds.arcs || kinds.bones || kinds.occluders)
+            .then(|| {
+                let mut found = if kinds.ids || kinds.bbox {
+                    marks(bundle, frame, look.focus.as_deref(), look.depth)?
+                } else {
+                    Vec::new()
+                };
+                if kinds.parts {
+                    found.extend(crate::arcs::part_marks(bundle, frame)?);
+                }
+                Ok::<_, anyhow::Error>(Overlay {
+                    marks: found,
+                    boxes: kinds.bbox || kinds.parts,
+                    ids: kinds.ids || kinds.parts,
+                    grid: kinds.grid,
+                    cells: bundle.doc.pixel_art(),
+                    arcs: arcs_of(bundle, look, frame, kinds.arcs)?,
+                    frame: Some(frame),
+                    numbers: true,
+                    bones: match kinds.bones {
+                        true => crate::rig::bones_at(bundle, frame)?,
+                        false => Vec::new(),
+                    },
+                    targets: match kinds.bones {
+                        true => crate::rig::targets_at(bundle, frame),
+                        false => Vec::new(),
+                    },
+                    heat: kinds
+                        .weights
+                        .as_deref()
+                        .map(|b| crate::rig::heat(bundle, b))
+                        .transpose()?,
+                    outlines: match kinds.occluders {
+                        true => outlines(bundle, frame, &loaded.rasters)?,
+                        false => Vec::new(),
+                    },
+                })
             })
-        })
-        .transpose()?;
+            .transpose()?;
     let onions = kinds
         .onion
         .then(|| onions(bundle, frame, &onion_layers(bundle, look)?, look, &brushes))
@@ -602,11 +647,48 @@ pub fn preview(bundle: &Bundle, out: &Output) -> Result<Option<PathBuf>> {
     Ok(Some(render_look(bundle, out.frame, view, &look, None, true)?.path))
 }
 
+pub fn height_notes(doc: &klad_core::doc::Document, ops: &[Op]) -> Vec<String> {
+    let mut notes: Vec<String> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Stroke(s) => Some((&s.layer, &s.color)),
+            Op::Fill(f) => Some((&f.layer, &f.color)),
+            _ => None,
+        })
+        .filter_map(|(layer, colour)| {
+            let layer = doc.find_layer(layer).ok()?;
+            if layer.map != Some(klad_core::maps::Role::Height) {
+                return None;
+            }
+            let hex = doc.resolve_color(colour).ok()?;
+            let rgba = klad_core::color::parse_hex(&hex).ok()?;
+            let spread = rgba[..3].iter().fold(f32::MIN, |a, v| a.max(*v)) - rgba[..3].iter().fold(f32::MAX, |a, v| a.min(*v));
+            if spread < 0.02 {
+                return None;
+            }
+            let range = klad_render::maps::height_range(doc, layer);
+            let px = klad_render::maps::lift(rgba) * range;
+            let does = match px {
+                p if p.abs() < 0.05 => "leaves it flat".to_string(),
+                p if p > 0.0 => format!("raises it {p:.1} px"),
+                p => format!("lowers it {:.1} px", -p),
+            };
+            Some(format!(
+                "note: {} is a height layer, which reads only lightness: {colour} {does} (white raises {range:.0} px, black lowers as much, #808080 leaves it)",
+                layer.name
+            ))
+        })
+        .collect();
+    notes.dedup();
+    notes
+}
+
 pub fn edit(path: &Path, ops: &[Op], out: &Output) -> Result<()> {
     let mut bundle = Bundle::open(path)?;
     let mut ops = ops.to_vec();
     ops.iter()
         .try_for_each(|op| klad_core::ops::grid_refusal(&bundle.doc, op))?;
+    height_notes(&bundle.doc, &ops).iter().for_each(|n| eprintln!("{n}"));
     crate::paintover::resolve(&bundle, &mut ops)?
         .iter()
         .for_each(|n| eprintln!("{n}"));
@@ -713,6 +795,9 @@ fn layer_summary(bundle: &Bundle, layer: &Layer, frame: u32) -> Result<Value> {
     });
     if let Some(cel) = cel {
         value["cel"] = json!({ "id": cel.id, "frame": cel.frame, "hold": cel.hold, "link": cel.link });
+    }
+    if let Some(role) = layer.map {
+        value["map"] = json!(role.name());
     }
     if layer.clip {
         value["clip"] = json!(true);
@@ -879,9 +964,13 @@ fn print_layer(v: &Value, depth: usize, frames: u32) {
     let bounds = serde_json::from_value::<Option<[f32; 4]>>(v["bounds"].clone())
         .ok()
         .flatten();
-    let kind = match v["kind"].as_str() {
-        Some("paint") if depth > 0 && v["role"] == json!("mask") => "mask",
-        other => other.unwrap_or(""),
+    let kind = match (v["kind"].as_str(), v["map"].as_str()) {
+        (Some("paint"), _) if depth > 0 && v["role"] == json!("mask") => "mask",
+        (_, Some(role)) => {
+            flags.insert(0, format!("draws {role}"));
+            "map"
+        }
+        (other, _) => other.unwrap_or(""),
     };
     println!(
         "{:indent$}{:<6} {:<6} {:<16} {:<12} {}{}{}",
@@ -1015,6 +1104,40 @@ mod tests {
         let node = add_op("rect", &["w=5".into()], Place::default()).unwrap();
         assert!(matches!(node, Op::AddNode { ref node, .. } if node["type"] == "rect"));
         assert!(add_op("layer", &["name=x".into()], Place::default()).is_err());
+        let map = add_op(
+            "layer",
+            &["map".into(), "normal".into(), "name=bumps".into()],
+            Place::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(map, Op::AddLayer { ref layer, .. } if layer["kind"] == "paint" && layer["map"] == "normal" && layer["name"] == "bumps")
+        );
+        let named = add_op("layer", &["map".into(), "height".into()], Place::default()).unwrap();
+        assert!(matches!(named, Op::AddLayer { ref layer, .. } if layer["name"] == "height"));
+        assert!(add_op("layer", &["map".into(), "glow".into()], Place::default()).is_err());
+        assert!(add_op("layer", &["map".into()], Place::default()).is_err());
         assert!(add_op("cel", &[], Place::default()).is_err());
+    }
+
+    #[test]
+    fn painting_a_height_layer_in_a_colour_says_what_its_lightness_does() {
+        let mut doc = klad_core::doc::Document::new(64, 64);
+        let mut bump = Layer::paint("l1", "bumps", "c1");
+        bump.map = Some(klad_core::maps::Role::Height);
+        doc.layers = vec![Layer::paint("l0", "paint", "c0"), bump];
+        let ops = parse_lines(
+            r##"{"op":"stroke","layer":"l1","color":"#c0392b","path":"M0 0 L10 10"}
+{"op":"stroke","layer":"l1","color":"#ffffff","path":"M0 0 L10 10"}
+{"op":"fill","layer":"l1","polygon":[[0,0],[9,0],[9,9]],"color":"#808080"}
+{"op":"stroke","layer":"l0","color":"#c0392b","path":"M0 0 L10 10"}"##,
+        )
+        .unwrap();
+        let notes = height_notes(&doc, &ops);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("bumps") && notes[0].contains("lowers it"),
+            "{notes:?}"
+        );
     }
 }

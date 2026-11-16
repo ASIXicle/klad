@@ -31,6 +31,13 @@ const LAYER_KEYS: &[&str] = &[
     "effects",
     "adjust",
     "depth",
+    "surface",
+    "map",
+    "shine",
+    "specular",
+    "emissive",
+    "glows",
+    "z",
     "reference",
     "bones",
     "ik",
@@ -147,6 +154,7 @@ pub enum Op {
         tile: Option<Option<[u32; 2]>>,
     },
     Atmosphere(Option<crate::look::Atmosphere>),
+    Maps(Option<crate::maps::Maps>),
     Frames(FrameSpec),
     Cel(CelSpec),
     Retime(RetimeSpec),
@@ -630,6 +638,8 @@ pub struct StrokeSpec {
     pub part: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<String>,
 }
 
 fn default_brush() -> String {
@@ -1603,7 +1613,13 @@ impl StrokeSpec {
         if taper.iter().any(|t| !(0.0..=10_000.0).contains(t)) {
             bail!("taper lengths must be within 0..10000 px");
         }
-        let color = parse_hex(&self.color)?;
+        let color = match &self.normal {
+            Some(text) => {
+                let [r, g, b] = crate::maps::encoded(crate::maps::direction(text)?);
+                [r, g, b, 1.0]
+            }
+            None => parse_hex(&self.color)?,
+        };
         let second = self.second.as_deref().map(parse_hex).transpose()?;
         let step = (self.speed / 200.0).clamp(1.0, 4.0);
         let dt = step / self.speed * 1000.0;
@@ -1822,6 +1838,11 @@ impl Op {
                 Some(Value::Bool(true)) => Op::Atmosphere(None),
                 Some(other) if other != Value::Bool(false) => bail!("atmosphere: off takes true or false"),
                 _ => Op::Atmosphere(Some(serde_json::from_value(Value::Object(std::mem::take(&mut map)))?)),
+            },
+            "maps" => match map.remove("off") {
+                Some(Value::Bool(true)) => Op::Maps(None),
+                Some(other) if other != Value::Bool(false) => bail!("maps: off takes true or false"),
+                _ => Op::Maps(Some(serde_json::from_value(Value::Object(std::mem::take(&mut map)))?)),
             },
             "canvas" => Op::Canvas {
                 wrap: match map.remove("wrap") {
@@ -4221,6 +4242,13 @@ pub fn apply(doc: &mut Document, op: &Op, out: &mut Applied) -> Result<()> {
             }
             doc.atmosphere = air.clone();
             out.changed.push("atmosphere".into());
+        }
+        Op::Maps(maps) => {
+            if let Some(maps) = maps {
+                maps.validate()?;
+            }
+            doc.maps = maps.clone();
+            out.changed.push("maps".into());
         }
         Op::Canvas { wrap, tile } => {
             if wrap.is_none() && tile.is_none() {

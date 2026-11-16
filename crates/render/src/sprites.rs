@@ -97,6 +97,7 @@ pub struct Rect {
 pub enum Data {
     Rgba8(Vec<u8>),
     Rgba16(Vec<half::f16>),
+    Grey16(Vec<u16>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +105,7 @@ pub struct Pixels {
     pub width: u32,
     pub height: u32,
     pub data: Data,
+    pub linear: bool,
 }
 
 impl Pixels {
@@ -117,7 +119,32 @@ impl Pixels {
             width: image.width() as u32,
             height: image.height() as u32,
             data,
+            linear: false,
         })
+    }
+
+    pub fn of_map(set: &crate::maps::MapSet, map: crate::maps::Map) -> Self {
+        let values = set.straight(map);
+        let data = match map.wide() {
+            true => Data::Grey16(
+                values
+                    .iter()
+                    .flat_map(|p| [p[0], p[3]].map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16))
+                    .collect(),
+            ),
+            false => Data::Rgba8(
+                values
+                    .iter()
+                    .flat_map(|p| p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+                    .collect(),
+            ),
+        };
+        Self {
+            width: set.width as u32,
+            height: set.height as u32,
+            data,
+            linear: true,
+        }
     }
 
     pub fn blank(width: u32, height: u32, depth: u8) -> Self {
@@ -126,13 +153,40 @@ impl Pixels {
             16 => Data::Rgba16(vec![half::f16::ZERO; n]),
             _ => Data::Rgba8(vec![0; n]),
         };
-        Self { width, height, data }
+        Self {
+            width,
+            height,
+            data,
+            linear: false,
+        }
+    }
+
+    pub fn blank_like(&self, width: u32, height: u32) -> Self {
+        let n = width as usize * height as usize;
+        let data = match &self.data {
+            Data::Rgba8(_) => Data::Rgba8(vec![0; n * 4]),
+            Data::Rgba16(_) => Data::Rgba16(vec![half::f16::ZERO; n * 4]),
+            Data::Grey16(_) => Data::Grey16(vec![0; n * 2]),
+        };
+        Self {
+            width,
+            height,
+            data,
+            linear: self.linear,
+        }
     }
 
     pub fn depth(&self) -> u8 {
         match self.data {
             Data::Rgba8(_) => 8,
-            Data::Rgba16(_) => 16,
+            Data::Rgba16(_) | Data::Grey16(_) => 16,
+        }
+    }
+
+    fn channels(&self) -> usize {
+        match self.data {
+            Data::Grey16(_) => 2,
+            _ => 4,
         }
     }
 
@@ -140,15 +194,22 @@ impl Pixels {
         match &self.data {
             Data::Rgba8(d) => d,
             Data::Rgba16(d) => bytemuck::cast_slice(d),
+            Data::Grey16(d) => bytemuck::cast_slice(d),
+        }
+    }
+
+    pub fn alpha(&self, x: u32, y: u32) -> f32 {
+        let c = self.channels();
+        let at = (y as usize * self.width as usize + x as usize) * c + c - 1;
+        match &self.data {
+            Data::Rgba8(d) => d[at] as f32 / 255.0,
+            Data::Rgba16(d) => d[at].to_f32(),
+            Data::Grey16(d) => d[at] as f32 / 65535.0,
         }
     }
 
     fn covered(&self, x: u32, y: u32) -> bool {
-        let at = (y as usize * self.width as usize + x as usize) * 4 + 3;
-        match &self.data {
-            Data::Rgba8(d) => d[at] > 0,
-            Data::Rgba16(d) => d[at].to_f32() > 0.0,
-        }
+        self.alpha(x, y) > 0.0
     }
 
     pub fn trim(&self) -> Rect {
@@ -175,30 +236,37 @@ impl Pixels {
     }
 
     pub fn blit(&mut self, from: &Pixels, src: Rect, x: u32, y: u32) {
-        let (fw, tw) = (from.width as usize * 4, self.width as usize * 4);
-        let row = src.w as usize * 4;
+        let c = self.channels();
+        let (fw, tw) = (from.width as usize * c, self.width as usize * c);
+        let row = src.w as usize * c;
         (0..src.h as usize).for_each(|r| {
-            let a = (src.y as usize + r) * fw + src.x as usize * 4;
-            let b = (y as usize + r) * tw + x as usize * 4;
+            let a = (src.y as usize + r) * fw + src.x as usize * c;
+            let b = (y as usize + r) * tw + x as usize * c;
             match (&mut self.data, &from.data) {
                 (Data::Rgba8(to), Data::Rgba8(d)) => to[b..b + row].copy_from_slice(&d[a..a + row]),
                 (Data::Rgba16(to), Data::Rgba16(d)) => to[b..b + row].copy_from_slice(&d[a..a + row]),
+                (Data::Grey16(to), Data::Grey16(d)) => to[b..b + row].copy_from_slice(&d[a..a + row]),
                 _ => {}
             }
         });
     }
 
     pub fn crop(&self, rect: Rect) -> Pixels {
-        let mut out = Pixels::blank(rect.w, rect.h, self.depth());
+        let mut out = self.blank_like(rect.w, rect.h);
         out.blit(self, rect, 0, 0);
         out
     }
 
     pub fn png(&mut self) -> Result<Vec<u8>> {
         let (w, h) = (self.width, self.height);
-        Ok(match &self.data {
-            Data::Rgba8(d) => crate::pngwrite::write(w, h, 8, d),
-            Data::Rgba16(d) => png_of_f16(w, h, d),
+        Ok(match (&self.data, self.linear) {
+            (Data::Rgba8(d), false) => crate::pngwrite::write(w, h, 8, d),
+            (Data::Rgba8(d), true) => crate::pngwrite::data(w, h, 8, 4, d),
+            (Data::Rgba16(d), _) => png_of_f16(w, h, d),
+            (Data::Grey16(d), _) => {
+                let wide: Vec<u8> = d.iter().flat_map(|v| v.to_be_bytes()).collect();
+                crate::pngwrite::data(w, h, 16, 2, &wide)
+            }
         })
     }
 }
@@ -369,6 +437,11 @@ pub struct Texture {
     pub uid: Option<String>,
 }
 
+pub struct Lighting {
+    pub normal: Texture,
+    pub specular: Option<Texture>,
+}
+
 pub struct SpriteFrames<'a> {
     pub uid: &'a str,
     pub textures: &'a [Texture],
@@ -376,34 +449,91 @@ pub struct SpriteFrames<'a> {
     pub trims: &'a [Rect],
     pub placed: &'a [Placed],
     pub animations: &'a [(Animation, Vec<Run>)],
+    pub lighting: &'a [Lighting],
+    pub shininess: f32,
+    pub nearest: bool,
+}
+
+fn texture_line(t: &Texture, id: &str) -> String {
+    let uid = t
+        .uid
+        .as_deref()
+        .map_or(String::new(), |u| format!(" uid={}", quoted(u)));
+    format!(
+        "\n[ext_resource type=\"Texture2D\"{uid} path={} id=\"{id}\"]",
+        quoted(&t.path)
+    )
+}
+
+pub fn canvas_texture(
+    id: &str,
+    diffuse: &str,
+    normal: Option<&str>,
+    specular: Option<&str>,
+    shininess: f32,
+    nearest: bool,
+) -> String {
+    let mut out = format!("\n[sub_resource type=\"CanvasTexture\" id=\"{id}\"]\ndiffuse_texture = {diffuse}\n");
+    if let Some(n) = normal {
+        out += &format!("normal_texture = {n}\n");
+    }
+    if let Some(s) = specular {
+        out += &format!(
+            "specular_texture = {s}\nspecular_color = Color(1, 1, 1, 1)\nspecular_shininess = {}\n",
+            number(shininess)
+        );
+    }
+    if nearest {
+        out += "texture_filter = 1\n";
+    }
+    out
 }
 
 pub fn sprite_frames(res: &SpriteFrames) -> String {
     let (sw, sh) = res.source;
+    let lit = !res.lighting.is_empty();
     let mut out = format!("[gd_resource type=\"SpriteFrames\" format=3 uid={}]\n", quoted(res.uid));
     res.textures.iter().enumerate().for_each(|(i, t)| {
-        let uid = t
-            .uid
-            .as_deref()
-            .map_or(String::new(), |u| format!(" uid={}", quoted(u)));
-        out += &format!(
-            "\n[ext_resource type=\"Texture2D\"{uid} path={} id=\"{}_sheet\"]",
-            quoted(&t.path),
-            i + 1
-        );
-    });
-    out += "\n";
-    res.trims.iter().zip(res.placed).enumerate().for_each(|(i, (trim, at))| {
-        out += &format!(
-            "\n[sub_resource type=\"AtlasTexture\" id=\"AtlasTexture_{i}\"]\natlas = ExtResource(\"{}_sheet\")\nregion = {}\n",
-            at.page + 1,
-            rect2([at.x, at.y, trim.w, trim.h].map(|v| v as f32))
-        );
-        let margin = [trim.x, trim.y, sw - trim.w, sh - trim.h];
-        if margin != [0; 4] {
-            out += &format!("margin = {}\n", rect2(margin.map(|v| v as f32)));
+        out += &texture_line(t, &format!("{}_sheet", i + 1));
+        if let Some(l) = res.lighting.get(i) {
+            out += &texture_line(&l.normal, &format!("{}_normal", i + 1));
+            if let Some(spec) = &l.specular {
+                out += &texture_line(spec, &format!("{}_specular", i + 1));
+            }
         }
     });
+    out += "\n";
+    res.lighting.iter().enumerate().for_each(|(i, l)| {
+        out += &canvas_texture(
+            &format!("CanvasTexture_{}", i + 1),
+            &format!("ExtResource(\"{}_sheet\")", i + 1),
+            Some(&format!("ExtResource(\"{}_normal\")", i + 1)),
+            l.specular
+                .as_ref()
+                .map(|_| format!("ExtResource(\"{}_specular\")", i + 1))
+                .as_deref(),
+            res.shininess,
+            res.nearest,
+        );
+    });
+    res.trims
+        .iter()
+        .zip(res.placed)
+        .enumerate()
+        .for_each(|(i, (trim, at))| {
+            let atlas = match lit {
+                true => format!("SubResource(\"CanvasTexture_{}\")", at.page + 1),
+                false => format!("ExtResource(\"{}_sheet\")", at.page + 1),
+            };
+            out += &format!(
+                "\n[sub_resource type=\"AtlasTexture\" id=\"AtlasTexture_{i}\"]\natlas = {atlas}\nregion = {}\n",
+                rect2([at.x, at.y, trim.w, trim.h].map(|v| v as f32))
+            );
+            let margin = [trim.x, trim.y, sw - trim.w, sh - trim.h];
+            if margin != [0; 4] {
+                out += &format!("margin = {}\n", rect2(margin.map(|v| v as f32)));
+            }
+        });
     let animations: Vec<String> = res
         .animations
         .iter()
@@ -436,20 +566,38 @@ pub struct TileSet<'a> {
     pub texture: &'a Texture,
     pub tile: [u32; 2],
     pub tiles: &'a [(u32, u32)],
+    pub lighting: Option<&'a Lighting>,
+    pub shininess: f32,
+    pub nearest: bool,
 }
 
 pub fn tile_set(set: &TileSet) -> String {
-    let uid = set
-        .texture
-        .uid
-        .as_deref()
-        .map_or(String::new(), |u| format!(" uid={}", quoted(u)));
     let [w, h] = set.tile;
     let tiles: String = set.tiles.iter().map(|(x, y)| format!("{x}:{y}/0 = 0\n")).collect();
+    let mut ext = texture_line(set.texture, "1_tiles");
+    let (canvas, texture) = match set.lighting {
+        Some(l) => {
+            ext += &texture_line(&l.normal, "1_normal");
+            if let Some(spec) = &l.specular {
+                ext += &texture_line(spec, "1_specular");
+            }
+            (
+                canvas_texture(
+                    "CanvasTexture_1",
+                    "ExtResource(\"1_tiles\")",
+                    Some("ExtResource(\"1_normal\")"),
+                    l.specular.as_ref().map(|_| "ExtResource(\"1_specular\")"),
+                    set.shininess,
+                    set.nearest,
+                ),
+                "SubResource(\"CanvasTexture_1\")",
+            )
+        }
+        None => (String::new(), "ExtResource(\"1_tiles\")"),
+    };
     format!(
-        "[gd_resource type=\"TileSet\" load_steps=3 format=3 uid={}]\n\n[ext_resource type=\"Texture2D\"{uid} path={} id=\"1_tiles\"]\n\n[sub_resource type=\"TileSetAtlasSource\" id=\"TileSetAtlasSource_1\"]\ntexture = ExtResource(\"1_tiles\")\ntexture_region_size = Vector2i({w}, {h})\n{tiles}\n[resource]\ntile_size = Vector2i({w}, {h})\nsources/0 = SubResource(\"TileSetAtlasSource_1\")\n",
+        "[gd_resource type=\"TileSet\" load_steps=3 format=3 uid={}]\n{ext}\n{canvas}\n[sub_resource type=\"TileSetAtlasSource\" id=\"TileSetAtlasSource_1\"]\ntexture = {texture}\ntexture_region_size = Vector2i({w}, {h})\n{tiles}\n[resource]\ntile_size = Vector2i({w}, {h})\nsources/0 = SubResource(\"TileSetAtlasSource_1\")\n",
         quoted(set.uid),
-        quoted(&set.texture.path),
     )
 }
 
@@ -461,6 +609,103 @@ pub struct Scene<'a> {
     pub animation: &'a str,
     pub origin: [f32; 2],
     pub pixel: bool,
+    pub glow: Option<(&'a str, &'a str)>,
+    pub shadows: Option<Shadows<'a>>,
+    pub material: Option<Material<'a>>,
+}
+
+pub struct Shadows<'a> {
+    pub shapes: &'a [Vec<Vec<[f32; 2]>>],
+    pub pictures: &'a [(String, Vec<usize>)],
+}
+
+pub struct Material<'a> {
+    pub shader: (&'a str, &'a str),
+    pub params: &'a [(String, String)],
+    pub textures: &'a [(String, Vec<Texture>)],
+    pub pages: &'a [(String, Vec<usize>)],
+}
+
+pub fn gdscript(id: &str, source: &str) -> String {
+    format!(
+        "\n[sub_resource type=\"GDScript\" id=\"{id}\"]\nscript/source = {}\n",
+        quoted(source)
+    )
+}
+
+const GLOW: &str = "extends AnimatedSprite2D
+
+func _ready():
+\tvar body := get_parent() as AnimatedSprite2D
+\tbody.frame_changed.connect(_follow)
+\tbody.animation_changed.connect(_follow)
+\t_follow()
+
+func _follow():
+\tvar body := get_parent() as AnimatedSprite2D
+\tif animation != body.animation:
+\t\tanimation = body.animation
+\tframe = body.frame
+";
+
+const SHADOWS: &str = "extends Node2D
+
+@export var shapes: Array = []
+@export var pictures: Dictionary = {}
+
+func _ready():
+\tvar body := get_parent() as AnimatedSprite2D
+\tbody.frame_changed.connect(_follow)
+\tbody.animation_changed.connect(_follow)
+\t_follow()
+
+func _follow():
+\tvar body := get_parent() as AnimatedSprite2D
+\tvar list: PackedInt32Array = pictures.get(String(body.animation), PackedInt32Array())
+\tvar shown: Array = []
+\tif body.frame < list.size():
+\t\tshown = shapes[list[body.frame]]
+\tfor i in get_child_count():
+\t\tvar occluder := get_child(i) as LightOccluder2D
+\t\toccluder.occluder = shown[i] if i < shown.size() else null
+";
+
+const PAGES: &str = "extends Node
+
+@export var pages: Dictionary = {}
+@export var maps: Dictionary = {}
+
+func _ready():
+\tvar body := get_parent() as AnimatedSprite2D
+\tbody.frame_changed.connect(_follow)
+\tbody.animation_changed.connect(_follow)
+\t_follow()
+
+func _follow():
+\tvar body := get_parent() as AnimatedSprite2D
+\tvar list: PackedInt32Array = pages.get(String(body.animation), PackedInt32Array())
+\tif body.frame >= list.size():
+\t\treturn
+\tvar page := list[body.frame]
+\tfor name in maps:
+\t\tbody.material.set_shader_parameter(name, maps[name][page])
+";
+
+fn ints(values: &[usize]) -> String {
+    format!(
+        "PackedInt32Array({})",
+        values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+    )
+}
+
+fn by_animation(list: &[(String, Vec<usize>)]) -> String {
+    format!(
+        "{{\n{}\n}}",
+        list.iter()
+            .map(|(name, values)| format!("{}: {}", quoted(name), ints(values)))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    )
 }
 
 pub fn node_name(stem: &str) -> String {
@@ -478,20 +723,280 @@ pub fn node_name(stem: &str) -> String {
 }
 
 pub fn scene(s: &Scene) -> String {
-    format!(
-        "[gd_scene format=3 uid={}]\n\n[ext_resource type=\"SpriteFrames\" uid={} path={} id=\"1_frames\"]\n\n[node name={} type=\"AnimatedSprite2D\"]\nsprite_frames = ExtResource(\"1_frames\")\nanimation = &{}\nautoplay = {}\ncentered = false\noffset = Vector2({}, {})\n",
-        quoted(s.uid),
+    let mut ext = format!(
+        "\n[ext_resource type=\"SpriteFrames\" uid={} path={} id=\"1_frames\"]",
         quoted(s.frames_uid),
-        quoted(s.frames_path),
+        quoted(s.frames_path)
+    );
+    if let Some((path, uid)) = s.glow {
+        ext += &format!(
+            "\n[ext_resource type=\"SpriteFrames\" uid={} path={} id=\"2_glow\"]",
+            quoted(uid),
+            quoted(path)
+        );
+    }
+    let mut subs = String::new();
+    let mut nodes = String::new();
+    if let Some(m) = &s.material {
+        ext += &format!(
+            "\n[ext_resource type=\"Shader\" uid={} path={} id=\"3_shader\"]",
+            quoted(m.shader.1),
+            quoted(m.shader.0)
+        );
+        m.textures.iter().for_each(|(name, pages)| {
+            pages.iter().enumerate().for_each(|(i, t)| {
+                ext += &texture_line(t, &format!("{}_{name}", i + 4));
+            });
+        });
+        let params: String = m
+            .params
+            .iter()
+            .map(|(k, v)| format!("shader_parameter/{k} = {v}\n"))
+            .chain(
+                m.textures
+                    .iter()
+                    .map(|(name, _)| format!("shader_parameter/{name} = ExtResource(\"4_{name}\")\n")),
+            )
+            .collect();
+        subs += &format!(
+            "\n[sub_resource type=\"ShaderMaterial\" id=\"ShaderMaterial_maps\"]\nshader = ExtResource(\"3_shader\")\n{params}"
+        );
+        if m.textures.iter().any(|(_, pages)| pages.len() > 1) {
+            subs += &gdscript("GDScript_pages", PAGES);
+            let maps: Vec<String> = m
+                .textures
+                .iter()
+                .map(|(name, pages)| {
+                    let list: Vec<String> = (0..pages.len())
+                        .map(|i| format!("ExtResource(\"{}_{name}\")", i + 4))
+                        .collect();
+                    format!("{}: [{}]", quoted(name), list.join(", "))
+                })
+                .collect();
+            nodes += &format!(
+                "\n[node name=\"pages\" type=\"Node\" parent=\".\"]\nscript = SubResource(\"GDScript_pages\")\npages = {}\nmaps = {{\n{}\n}}\n",
+                by_animation(m.pages),
+                maps.join(",\n")
+            );
+        }
+    }
+    let offset = format!("Vector2({}, {})", number(-s.origin[0]), number(-s.origin[1]));
+    if s.glow.is_some() {
+        subs += "\n[sub_resource type=\"CanvasItemMaterial\" id=\"CanvasItemMaterial_glow\"]\nlight_mode = 1\n";
+        subs += &gdscript("GDScript_glow", GLOW);
+        nodes += &format!(
+            "\n[node name=\"glow\" type=\"AnimatedSprite2D\" parent=\".\"]\nmaterial = SubResource(\"CanvasItemMaterial_glow\")\nsprite_frames = ExtResource(\"2_glow\")\nanimation = &{}\ncentered = false\noffset = {offset}\nscript = SubResource(\"GDScript_glow\")\n",
+            quoted(s.animation)
+        );
+    }
+    if let Some(shadows) = &s.shadows {
+        let most = shadows.shapes.iter().map(Vec::len).max().unwrap_or(0);
+        let list: Vec<String> = shadows
+            .shapes
+            .iter()
+            .enumerate()
+            .map(|(p, rings)| {
+                let ids: Vec<String> = rings
+                    .iter()
+                    .enumerate()
+                    .map(|(k, ring)| {
+                        let id = format!("OccluderPolygon2D_{p}_{k}");
+                        let points: Vec<String> = ring
+                            .iter()
+                            .map(|v| format!("{}, {}", number(v[0] - s.origin[0]), number(v[1] - s.origin[1])))
+                            .collect();
+                        subs += &format!(
+                            "\n[sub_resource type=\"OccluderPolygon2D\" id=\"{id}\"]\ncull_mode = 2\npolygon = PackedVector2Array({})\n",
+                            points.join(", ")
+                        );
+                        format!("SubResource(\"{id}\")")
+                    })
+                    .collect();
+                format!("[{}]", ids.join(", "))
+            })
+            .collect();
+        subs += &gdscript("GDScript_shadows", SHADOWS);
+        nodes += &format!(
+            "\n[node name=\"shadows\" type=\"Node2D\" parent=\".\"]\nscript = SubResource(\"GDScript_shadows\")\nshapes = [{}]\npictures = {}\n",
+            list.join(", "),
+            by_animation(shadows.pictures)
+        );
+        (0..most).for_each(|k| {
+            nodes += &format!(
+                "\n[node name=\"occluder {}\" type=\"LightOccluder2D\" parent=\"shadows\"]\n",
+                k + 1
+            );
+        });
+    }
+    let material = match s.material {
+        Some(_) => "material = SubResource(\"ShaderMaterial_maps\")\n",
+        None => "",
+    };
+    format!(
+        "[gd_scene format=3 uid={}]\n{ext}\n{subs}\n[node name={} type=\"AnimatedSprite2D\"]\n{material}sprite_frames = ExtResource(\"1_frames\")\nanimation = &{}\nautoplay = {}\ncentered = false\noffset = {offset}\n",
+        quoted(s.uid),
         quoted(s.node),
         quoted(s.animation),
         quoted(s.animation),
-        number(-s.origin[0]),
-        number(-s.origin[1])
     ) + match s.pixel {
         true => "texture_filter = 1\n",
         false => "",
+    } + &nodes
+}
+
+pub struct LitScene<'a> {
+    pub uid: &'a str,
+    pub node: &'a str,
+    pub sprite: (&'a str, &'a str),
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+    pub scale: f32,
+    pub maps: &'a klad_core::maps::Maps,
+    pub outline: &'a [Vec<[f32; 2]>],
+}
+
+fn inside(rings: &[Vec<[f32; 2]>], [x, y]: [f32; 2]) -> bool {
+    rings
+        .iter()
+        .flat_map(|ring| {
+            let n = ring.len();
+            (0..n).map(move |i| (ring[i], ring[(i + n - 1) % n]))
+        })
+        .filter(|(a, b)| (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0])
+        .count()
+        % 2
+        == 1
+}
+
+fn colour(hex: &str) -> Result<String> {
+    let [r, g, b, a] = klad_core::color::parse_hex(hex)?;
+    Ok(format!(
+        "Color({}, {}, {}, {})",
+        number(r),
+        number(g),
+        number(b),
+        number(a)
+    ))
+}
+
+const POINTER: &str = "extends PointLight2D
+
+@export var shadows: NodePath
+
+func _process(_delta):
+\tglobal_position = get_global_mouse_position()
+\tshadow_enabled = not _inside()
+
+func _inside() -> bool:
+\tvar holder := get_node_or_null(shadows)
+\tif holder == null:
+\t\treturn false
+\tvar hits := 0
+\tfor child in holder.get_children():
+\t\tvar occluder := child as LightOccluder2D
+\t\tif occluder != null and occluder.occluder != null:
+\t\t\tvar local := occluder.get_global_transform().affine_inverse() * global_position
+\t\t\tif Geometry2D.is_point_in_polygon(local, occluder.occluder.polygon):
+\t\t\t\thits += 1
+\treturn hits % 2 == 1
+";
+
+const SOFT_SHADOWS: &str = "shadow_enabled = true\nshadow_filter = 1\nshadow_filter_smooth = 1.0\n";
+
+pub fn lit_scene(s: &LitScene) -> Result<String> {
+    let k = s.scale;
+    let fade = (0..=4).map(|i| 1.0 - i as f32 / 4.0).map(|t| t * t);
+    let colours: Vec<String> = fade.map(|v| format!("{0}, {0}, {0}, 1", number(v))).collect();
+    let (w, h) = (s.size[0] * k, s.size[1] * k);
+    let mut nodes = format!(
+        "\n[node name={} type=\"Node2D\"]\n\n[node name=\"ambient\" type=\"CanvasModulate\" parent=\".\"]\ncolor = {}\n\n[node name=\"backdrop (catches the light and the shadows)\" type=\"ColorRect\" parent=\".\"]\noffset_left = {}\noffset_top = {}\noffset_right = {}\noffset_bottom = {}\ncolor = Color(0.72, 0.7, 0.66, 1)\n\n[node name={} parent=\".\" instance=ExtResource(\"1_sprite\")]\nposition = Vector2({}, {})\n",
+        quoted(&format!("{}_lit", s.node)),
+        colour(&s.maps.ambient)?,
+        number(-w),
+        number(-h),
+        number(2.0 * w),
+        number(2.0 * h),
+        quoted(s.node),
+        number(s.origin[0] * k),
+        number(s.origin[1] * k)
+    );
+    let mut lights = s.maps.lights.clone();
+    if !lights.iter().any(|l| l.kind == klad_core::maps::LightKind::Point) {
+        let longest = s.size[0].max(s.size[1]);
+        lights.insert(
+            0,
+            klad_core::maps::Light {
+                at: [s.size[0] * 0.25, s.size[1] * 0.25],
+                height: (longest * 0.15).round(),
+                range: longest,
+                ..klad_core::maps::Light::default()
+            },
+        );
     }
+    let mut follows = true;
+    lights.iter().enumerate().try_for_each(|(i, l)| {
+        match l.kind {
+            klad_core::maps::LightKind::Point => {
+                let pointer = std::mem::take(&mut follows);
+                let held = !pointer && inside(s.outline, [l.at[0] * k, l.at[1] * k]);
+                let name = match (pointer, held) {
+                    (true, _) => format!("light {} (follows the mouse)", i + 1),
+                    (false, true) => format!("light {} (inside the sprite, so no shadow of it)", i + 1),
+                    (false, false) => format!("light {}", i + 1),
+                };
+                let script = match (pointer, s.outline.is_empty()) {
+                    (false, _) => String::new(),
+                    (true, true) => "script = SubResource(\"GDScript_pointer\")\n".to_string(),
+                    (true, false) => format!(
+                        "script = SubResource(\"GDScript_pointer\")\nshadows = NodePath({})\n",
+                        quoted(&format!("../{}/shadows", s.node))
+                    ),
+                };
+                nodes += &format!(
+                    "\n[node name={} type=\"PointLight2D\" parent=\".\"]\nposition = Vector2({}, {})\ncolor = {}\nenergy = {}\n{}texture = SubResource(\"GradientTexture2D_fade\")\ntexture_scale = {}\nheight = {}\n{}",
+                    quoted(&name),
+                    number(l.at[0] * k),
+                    number(l.at[1] * k),
+                    colour(&l.color)?,
+                    number(l.energy),
+                    if held { "shadow_enabled = false\n" } else { SOFT_SHADOWS },
+                    number(l.range * k / 128.0),
+                    number(l.height * k),
+                    script
+                );
+            }
+            klad_core::maps::LightKind::Directional => {
+                let toward = [-l.at[0], -l.at[1]];
+                let rotation = libm::atan2f(-toward[0], toward[1]);
+                nodes += &format!(
+                    "\n[node name={} type=\"DirectionalLight2D\" parent=\".\"]\nrotation = {}\ncolor = {}\nenergy = {}\nheight = {}\n",
+                    quoted(&format!("light {}", i + 1)),
+                    number(rotation),
+                    colour(&l.color)?,
+                    number(l.energy),
+                    number(l.height)
+                );
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })?;
+    let view = [1152.0, 648.0];
+    let zoom = ((view[0] / (s.size[0] * k)).min(view[1] / (s.size[1] * k)) * 0.9).clamp(0.05, 64.0);
+    nodes += &format!(
+        "\n[node name=\"Camera2D\" type=\"Camera2D\" parent=\".\"]\nposition = Vector2({}, {})\nzoom = Vector2({}, {})\n",
+        number(s.size[0] * k / 2.0),
+        number(s.size[1] * k / 2.0),
+        number(zoom),
+        number(zoom)
+    );
+    Ok(format!(
+        "[gd_scene format=3 uid={}]\n\n[ext_resource type=\"PackedScene\" uid={} path={} id=\"1_sprite\"]\n\n[sub_resource type=\"Gradient\" id=\"Gradient_fade\"]\noffsets = PackedFloat32Array(0, 0.25, 0.5, 0.75, 1)\ncolors = PackedColorArray({})\n\n[sub_resource type=\"GradientTexture2D\" id=\"GradientTexture2D_fade\"]\ngradient = SubResource(\"Gradient_fade\")\nwidth = 256\nheight = 256\nfill = 1\nfill_from = Vector2(0.5, 0.5)\nfill_to = Vector2(1, 0.5)\n{}{nodes}",
+        quoted(s.uid),
+        quoted(s.sprite.1),
+        quoted(s.sprite.0),
+        colours.join(", "),
+        gdscript("GDScript_pointer", POINTER)
+    ))
 }
 
 pub fn uid_text(mut id: u64) -> String {
@@ -762,6 +1267,9 @@ mod tests {
             trims: &trims,
             placed: &placed,
             animations: &anims,
+            lighting: &[],
+            shininess: 0.0,
+            nearest: false,
         });
         assert!(tres.starts_with("[gd_resource type=\"SpriteFrames\" format=3 uid=\"uid://frames\"]\n"));
         assert!(tres.contains("[ext_resource type=\"Texture2D\" uid=\"uid://abc\" path=\"ball.png\" id=\"1_sheet\"]"));
@@ -778,6 +1286,9 @@ mod tests {
             animation: "idle",
             origin: [16.0, 30.5],
             pixel: false,
+            glow: None,
+            shadows: None,
+            material: None,
         });
         assert!(tscn.contains("[node name=\"ball_v2\" type=\"AnimatedSprite2D\"]"));
         assert!(tscn.contains("offset = Vector2(-16, -30.5)\n"));
@@ -797,5 +1308,62 @@ mod tests {
         assert_eq!(uid_text(0), "uid://a");
         assert_eq!(uid_text(34), "uid://ba");
         assert_eq!(uid_text(33), "uid://8");
+    }
+
+    #[test]
+    fn a_light_inside_the_sprite_casts_no_shadow_of_it() {
+        let maps = klad_core::maps::Maps {
+            lights: vec![
+                klad_core::maps::Light {
+                    at: [300.0, 300.0],
+                    ..Default::default()
+                },
+                klad_core::maps::Light {
+                    at: [20.0, 20.0],
+                    ..Default::default()
+                },
+                klad_core::maps::Light {
+                    at: [250.0, 50.0],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let outline = vec![
+            vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]],
+            vec![[40.0, 40.0], [40.0, 60.0], [60.0, 60.0], [60.0, 40.0]],
+        ];
+        let scene = |outline: &[Vec<[f32; 2]>]| {
+            lit_scene(&LitScene {
+                uid: "uid://a",
+                node: "lamp",
+                sprite: ("lamp.tscn", "uid://b"),
+                origin: [50.0, 100.0],
+                size: [400.0, 400.0],
+                scale: 1.0,
+                maps: &maps,
+                outline,
+            })
+            .unwrap()
+        };
+        let text = scene(&outline);
+        let block = |name: &str| {
+            let at = text.find(&format!("[node name=\"{name}")).unwrap();
+            text[at..].split("\n\n").next().unwrap().to_string()
+        };
+        let pointer = block("light 1 (follows the mouse)");
+        assert!(pointer.contains("shadows = NodePath(\"../lamp/shadows\")"), "{pointer}");
+        assert!(pointer.contains("shadow_enabled = true"));
+        let held = block("light 2 (inside the sprite, so no shadow of it)");
+        assert!(held.contains("shadow_enabled = false"), "{held}");
+        assert!(block("light 3\"").contains("shadow_enabled = true"));
+        assert!(
+            inside(&outline, [20.0, 20.0]) && !inside(&outline, [50.0, 50.0]),
+            "a hole is outside"
+        );
+        assert!(
+            !scene(&[]).contains("shadows = NodePath"),
+            "no occluders, nothing to look for"
+        );
     }
 }

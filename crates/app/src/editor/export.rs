@@ -3,6 +3,8 @@ use super::clips::resolve;
 use crate::jobs::{Spec, Tag};
 use crate::theme::Hint;
 use anyhow::{Result, bail};
+use klad_render::maps::Map;
+use klad_render::shaders::Effect;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,6 +30,9 @@ pub(super) struct Form {
     pub padding: u32,
     pub max: u32,
     pub out: String,
+    pub maps: Vec<Map>,
+    pub occluders: bool,
+    pub shaders: Vec<Effect>,
 }
 
 impl Default for Form {
@@ -44,7 +49,34 @@ impl Default for Form {
             padding: 2,
             max: 4096,
             out: String::new(),
+            maps: Vec::new(),
+            occluders: false,
+            shaders: Vec::new(),
         }
+    }
+}
+
+fn listed<T>(items: &[T], name: impl Fn(&T) -> &'static str) -> String {
+    items.iter().map(name).collect::<Vec<_>>().join(",")
+}
+
+pub(super) fn godot_extras(form: &Form) -> Vec<String> {
+    let mut out = Vec::new();
+    if form.occluders {
+        out.push("--occluders".to_string());
+    }
+    if !form.shaders.is_empty() {
+        out.push("--shaders".to_string());
+        out.push(listed(&form.shaders, |e| e.name()));
+    }
+    out
+}
+
+fn toggled<T: PartialEq + Copy + Ord>(list: &mut Vec<T>, item: T, on: bool) {
+    list.retain(|x| *x != item);
+    if on {
+        list.push(item);
+        list.sort();
     }
 }
 
@@ -90,6 +122,9 @@ pub(super) fn args(bundle: &Path, home: &Path, frame: u32, form: &Form) -> Vec<S
     if form.what == What::Sheet {
         push("--padding", Some(form.padding.to_string()));
         push("--max", Some(form.max.to_string()));
+    }
+    if !form.maps.is_empty() && form.layer.is_none() && matches!(form.what, What::Image | What::Frames | What::Sheet) {
+        push("--maps", Some(listed(&form.maps, |m| m.name())));
     }
     if !form.out.trim().is_empty() {
         push("-o", Some(resolve(home, &form.out).to_string_lossy().to_string()));
@@ -275,6 +310,47 @@ impl Editor {
             ui.checkbox(&mut form.dither, "dither")
                 .hint("a GIF holds 255 colours: mix them in a fine pattern so soft gradients do not band; off keeps flat areas of one colour");
         }
+        let lit = doc.maps.is_some();
+        if matches!(form.what, What::Image | What::Frames | What::Sheet) {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("light maps");
+                Map::ALL.iter().for_each(|m| {
+                    let mut on = form.maps.contains(m);
+                    if ui
+                        .add_enabled(form.layer.is_none(), egui::Checkbox::new(&mut on, m.name()))
+                        .hint(format!(
+                            "the {} map beside the picture, the same size, trim and layout, its file name ending in {}",
+                            m.name(),
+                            m.suffix()
+                        ))
+                        .on_disabled_hover_text("light maps are made for the whole image: export the whole image")
+                        .changed()
+                    {
+                        toggled(&mut form.maps, *m, on);
+                    }
+                });
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Godot");
+            ui.checkbox(&mut form.occluders, "shadows")
+                .hint("the buttons below add an occluder traced from the silhouette of every picture, so lights cast its shadow");
+            Effect::ALL.iter().for_each(|e| {
+                let mut on = form.shaders.contains(e);
+                if ui
+                    .add_enabled(lit, egui::Checkbox::new(&mut on, format!("{} shader", e.name())))
+                    .hint(match e {
+                        Effect::Fog => "a sample shader on the sprite: fog towards a colour by the depth map",
+                        Effect::Rim => "a sample shader on the sprite: a rim light from the height map",
+                        Effect::Occlusion => "a sample shader on the sprite: darker creases from the occlusion map",
+                    })
+                    .on_disabled_hover_text("the shaders read the light maps: turn them on in Window > Light maps")
+                    .changed()
+                {
+                    toggled(&mut form.shaders, *e, on);
+                }
+            });
+        });
         if form.what == What::Sheet {
             ui.add(egui::Slider::new(&mut form.padding, 0..=16).text("padding px"))
                 .hint("space between the cells of the sheet");
@@ -295,7 +371,7 @@ impl Editor {
             run = ui.button("export").hint("write it, as klad export does").clicked();
             if ui
                 .button("export to Godot")
-                .hint("the sheet, SpriteFrames and scene into the Godot folder of the clip row")
+                .hint("the sheet, SpriteFrames and scene into the Godot folder of the clip row; with light maps on, lit by Godot's 2D lights, with a sample scene")
                 .clicked()
             {
                 self.export_godot();
@@ -436,5 +512,29 @@ mod tests {
             ),
             "/w/art-hop@8x.gif"
         );
+        let lit = Form {
+            what: What::Sheet,
+            maps: vec![Map::Normal, Map::Depth],
+            ..Form::default()
+        };
+        assert_eq!(
+            args(bundle, home, 0, &lit).join(" "),
+            "export /w/art.klad --sheet all --padding 2 --max 4096 --maps normal,depth"
+        );
+        let one = Form {
+            layer: Some("l2".into()),
+            ..lit.clone()
+        };
+        assert!(
+            !args(bundle, home, 0, &one).contains(&"--maps".to_string()),
+            "maps go with the whole image"
+        );
+        let godot = Form {
+            occluders: true,
+            shaders: vec![Effect::Fog, Effect::Occlusion],
+            ..Form::default()
+        };
+        assert_eq!(godot_extras(&godot).join(" "), "--occluders --shaders fog,occlusion");
+        assert!(godot_extras(&Form::default()).is_empty());
     }
 }

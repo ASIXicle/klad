@@ -251,6 +251,9 @@ impl StrokePainter {
 
     fn colour_here(&mut self, at: Point, along: f32) -> Option<[f32; 3]> {
         let c = self.brush.def.color?;
+        if c.facing {
+            return Some(klad_core::maps::encoded(klad_core::maps::leaning(at.tilt.0, at.tilt.1)));
+        }
         let towards_second = {
             let pressure = c.pressure.map_or(0.0, |curve| 1.0 - curve.at(at.p).clamp(0.0, 1.0));
             let along = match c.along > 0.0 {

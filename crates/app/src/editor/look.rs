@@ -71,12 +71,16 @@ fn check(ui: &mut egui::Ui, touch: &mut Touch, value: &mut bool, text: &str, hin
 
 fn swatch(ui: &mut egui::Ui, touch: &mut Touch, hex: &mut String, current: [f32; 4], what: &str) {
     let rgba = color::rgba_of(hex).unwrap_or([0.0, 0.0, 0.0, 1.0]);
-    if color::swatch(ui, rgba, false, theme::TARGET)
-        .hint(format!("{what}, {hex}; click to use the current colour"))
-        .clicked()
-    {
-        *hex = color::hex(current);
-        touch.add(Touch::Commit);
+    match color::Square::new(ui, what, rgba, what).current(current).show(ui) {
+        Some(color::Pick::Dragging(rgba)) => {
+            *hex = color::hex(rgba);
+            touch.add(Touch::Preview);
+        }
+        Some(color::Pick::Chosen(rgba)) => {
+            *hex = color::hex(rgba);
+            touch.add(Touch::Commit);
+        }
+        _ => {}
     }
 }
 

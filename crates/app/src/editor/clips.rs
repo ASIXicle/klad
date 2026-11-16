@@ -336,7 +336,10 @@ impl Editor {
 
     pub(super) fn export_godot_as(&mut self, how: &str) {
         let typed = self.godot_folder();
-        let args = godot_args(&self.scene.bundle.root, how, &resolve(&self.bundle_home(), &typed));
+        let mut args = godot_args(&self.scene.bundle.root, how, &resolve(&self.bundle_home(), &typed));
+        if how != "--tileset" {
+            args.extend(super::export::godot_extras(&self.export));
+        }
         self.start_job(Spec {
             tag: Tag::Export,
             name: format!(
@@ -367,6 +370,7 @@ impl Editor {
             args.push(resolve(&self.bundle_home(), &typed).to_string_lossy().to_string());
             args.push("--store".into());
         }
+        args.extend(super::export::godot_extras(&self.export));
         self.start_job(Spec {
             tag: Tag::Export,
             name: format!("export to Godot ({typed})"),

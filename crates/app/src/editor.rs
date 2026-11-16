@@ -16,6 +16,7 @@ mod keys;
 mod layers;
 mod look;
 mod make;
+mod maps;
 mod options;
 mod paintover;
 mod panels;
@@ -57,7 +58,6 @@ use klad_brush::{
 };
 use klad_core::brushes::{BrushDef, Curve, TipDef, pick_id};
 use klad_core::bundle::now_ms;
-use klad_core::color::parse_hex;
 use klad_core::doc::{Item, Kind, Linear, Loc, MASK, Node, Paint, Radial, Shape, Stop};
 use klad_core::fill::{self, Fill, FillRef, FillSource, Seed};
 use klad_core::history::Stack;
@@ -637,6 +637,7 @@ pub(crate) struct Editor {
     embedded: BTreeMap<String, BrushDef>,
     buffer: StrokeBuffer,
     live: Option<Live>,
+    dock_room: f32,
     tool: Tool,
     brush: String,
     previous_brush: String,
@@ -707,6 +708,7 @@ pub(crate) struct Editor {
     palette_path: String,
     swatch_picked: Option<usize>,
     depth: depth::Parallax,
+    maps: maps::MapsView,
     batch: usize,
     pen_path: Option<PenPath>,
     pen_fill: bool,
@@ -786,20 +788,6 @@ pub(crate) struct Editor {
     clipboard: Option<copy::Copied>,
 }
 
-fn hex_of(c: Color32) -> String {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
-    if a == 255 {
-        format!("#{r:02x}{g:02x}{b:02x}")
-    } else {
-        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
-    }
-}
-
-fn color_of(hex: &str) -> Option<Color32> {
-    let [r, g, b, a] = parse_hex(hex).ok()?.map(|v| (v * 255.0).round() as u8);
-    Some(Color32::from_rgba_unmultiplied(r, g, b, a))
-}
-
 impl Editor {
     pub(crate) fn open(ctx: egui::Context, path: &Path) -> Result<Self> {
         let start = Instant::now();
@@ -841,6 +829,7 @@ impl Editor {
             brushes,
             embedded,
             live: None,
+            dock_room: 0.0,
             tool: Tool::Brush,
             brush: "ink".into(),
             previous_brush: "ink".into(),
@@ -910,6 +899,7 @@ impl Editor {
             palette_path: String::new(),
             swatch_picked: None,
             depth: depth::Parallax::default(),
+            maps: maps::MapsView::default(),
             batch: timeline::FILL,
             pen_path: None,
             pen_fill: true,
@@ -3194,10 +3184,13 @@ impl Editor {
                 self.brush
             )
         })?;
-        let def = match &self.custom {
+        let mut def = match &self.custom {
             Some(def) => def.clone(),
             None => self.tuning.shape(base),
         };
+        if self.tilted_brush() {
+            def.color = Some(klad_core::brushes::ColorDef::tilted());
+        }
         Ok((pick_id(&self.brush, &def, &self.embedded), def))
     }
 
@@ -3803,6 +3796,8 @@ impl Editor {
                 stats: self.stats.clone(),
             },
         ));
+        self.map_overlay(ui, view, rect);
+        self.occluder_overlay(ui, view, rect);
         self.parallax(ui, view, rect);
         self.prepare_typing(&ctx, view, rect);
         let hover = ui
@@ -4905,21 +4900,18 @@ impl Editor {
                 })
                 .response
                 .hint("no fill, one colour, or a linear or radial gradient");
-            if kind == "solid" {
-                let mut colour = color_of(&base).unwrap_or(Color32::BLACK);
-                if egui::color_picker::color_edit_button_srgba(ui, &mut colour, egui::color_picker::Alpha::OnlyBlend)
-                    .hint("the fill colour")
-                    .changed()
-                {
-                    out = Some(Paint::Solid(hex_of(colour)));
-                }
-                if ui
-                    .button("use brush colour")
-                    .hint("fill it with the current colour")
-                    .clicked()
-                {
-                    out = Some(Paint::Solid(color::hex(self.color)));
-                }
+            if kind == "solid"
+                && let Some(rgba) = color::Square::new(
+                    ui,
+                    format!("{id}.fill"),
+                    color::rgba_of(&base).unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    "the fill colour",
+                )
+                .current(self.color)
+                .alpha()
+                .pick(ui)
+            {
+                out = Some(Paint::Solid(color::hex(rgba)));
             }
         });
         if chosen != kind {
@@ -5052,20 +5044,17 @@ impl Editor {
                     next[i].0 = v;
                     changed = true;
                 }
-                let mut colour = color_of(hex).unwrap_or(Color32::BLACK);
-                if egui::color_picker::color_edit_button_srgba(ui, &mut colour, egui::color_picker::Alpha::OnlyBlend)
-                    .hint("this stop's colour")
-                    .changed()
+                if let Some(rgba) = color::Square::new(
+                    ui,
+                    format!("{id}.g.c{i}"),
+                    color::rgba_of(hex).unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    "this stop's colour",
+                )
+                .current(self.color)
+                .alpha()
+                .pick(ui)
                 {
-                    next[i].1 = hex_of(colour);
-                    changed = true;
-                }
-                if ui
-                    .button("brush colour")
-                    .hint("give this stop the current colour")
-                    .clicked()
-                {
-                    next[i].1 = color::hex(self.color);
+                    next[i].1 = color::hex(rgba);
                     changed = true;
                 }
                 if stops.len() > 1 && ui.button(crate::theme::icon::CLOSE).hint("remove this stop").clicked() {
@@ -5154,7 +5143,10 @@ impl Editor {
             return Ok(());
         };
         let id = layer.id.clone();
-        ui.label(format!("{} layer", layer.kind_name()));
+        ui.label(match layer.map {
+            Some(role) => format!("{} map layer", role.name()),
+            None => format!("{} layer", layer.kind_name()),
+        });
         let mut props: Vec<(String, Value)> = Vec::new();
         ui.horizontal(|ui| {
             if let Some(name) = self.text(
@@ -5179,6 +5171,8 @@ impl Editor {
             );
             return self.set(&id, props);
         }
+        self.set(&id, std::mem::take(&mut props))?;
+        self.map_section(ui, &layer)?;
         ui.horizontal_wrapped(|ui| {
             self.command_check(ui, Cmd::ToggleLocked, "locked");
             self.command_check(ui, Cmd::ToggleClip, "clip to layer below");
@@ -5186,6 +5180,7 @@ impl Editor {
                 self.command_check(ui, Cmd::ToggleLockAlpha, "lock alpha");
             }
         });
+        self.light_section(ui, &layer)?;
         ui.horizontal_wrapped(|ui| match &layer.mask {
             Some(_) => {
                 self.command_check(ui, Cmd::ToggleMask, "mask on");
@@ -5208,17 +5203,25 @@ impl Editor {
             }
         });
         self.set(&id, props)?;
-        self.depth_section(ui, &layer)?;
+        if layer.map.is_none() {
+            self.depth_section(ui, &layer)?;
+        }
         self.adjust_section(ui, &layer)?;
         self.effects_section(ui, &layer)?;
         self.animation_section(ui, &id)
     }
 
     fn colour_panel(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        if self.on_normal_layer() {
+            return self.normal_panel(ui);
+        }
+        if self.on_height_layer() {
+            return self.height_panel(ui);
+        }
         let mut picked: Option<[f32; 4]> = None;
         let mut hsva = self.hsva;
         ui.horizontal(|ui| {
-            if color::picker(ui, &mut hsva, 150.0) {
+            if color::picker(ui, &mut hsva, 150.0).changed() {
                 self.color = hsva.rgba();
                 self.hsva = hsva;
             }
