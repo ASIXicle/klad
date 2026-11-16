@@ -3593,7 +3593,7 @@ mod tests {
                     .find(|(c, _)| c == cmd)
                     .map_or_else(|| "(no menu)".to_string(), |(_, path)| path.clone());
                 format!(
-                    "| {} | {} | {} | {} | `{}` | {} |",
+                    "| {} | {} | {} | {} | `{}` | `{cmd:?}` | {} |",
                     spec.group.name(),
                     cell(&menu),
                     cell(spec.name),
@@ -3604,7 +3604,7 @@ mod tests {
             })
             .collect();
         let text = format!(
-            "| group | menu | name | key or gesture | id | what it does |\n|---|---|---|---|---|---|\n{}\n",
+            "| group | menu | name | key or gesture | id | in the code | what it does |\n|---|---|---|---|---|---|---|\n{}\n",
             rows.join("\n")
         );
         std::fs::write(out, text).unwrap();

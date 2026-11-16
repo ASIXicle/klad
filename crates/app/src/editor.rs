@@ -33,6 +33,8 @@ pub(crate) use commands::install_job;
 #[cfg(test)]
 mod drag_time;
 #[cfg(test)]
+mod inventory;
+#[cfg(test)]
 mod journeys;
 #[cfg(test)]
 mod testkit;

@@ -88,5 +88,6 @@ drag-time bundle="":
 journeys out="":
     KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- journeys
 
-inventory out=(justfile_directory() / "scratch" / "inventory.md"):
-    KLAD_INVENTORY_OUT={{out}} cargo test -p klad-app -- --ignored command_inventory
+inventory out=(justfile_directory() / "scratch"):
+    KLAD_INVENTORY_OUT={{out}}/inventory.md cargo test -p klad-app -- --ignored command_inventory
+    KLAD_INVENTORY_OUT={{out}}/controls.md cargo test -p klad-app -- --ignored editor_inventory

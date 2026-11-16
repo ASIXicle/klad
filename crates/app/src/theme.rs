@@ -226,13 +226,25 @@ fn hinted_id() -> Id {
     Id::unique("klad hinted controls")
 }
 
+#[cfg(test)]
+fn hint_texts_id() -> Id {
+    Id::unique("klad hint texts")
+}
+
 pub fn clear_hints(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp::<Vec<Rect>>(hinted_id(), Vec::new()));
+    #[cfg(test)]
+    ctx.data_mut(|d| d.insert_temp::<Vec<(Rect, String)>>(hint_texts_id(), Vec::new()));
 }
 
 #[cfg(test)]
 pub fn hinted(ctx: &egui::Context) -> Vec<Rect> {
     ctx.data(|d| d.get_temp::<Vec<Rect>>(hinted_id()).unwrap_or_default())
+}
+
+#[cfg(test)]
+pub fn hints(ctx: &egui::Context) -> Vec<(Rect, String)> {
+    ctx.data(|d| d.get_temp::<Vec<(Rect, String)>>(hint_texts_id()).unwrap_or_default())
 }
 
 pub trait Hint {
@@ -242,8 +254,12 @@ pub trait Hint {
 impl Hint for Response {
     fn hint(self, text: impl Into<WidgetText>) -> Response {
         let rect = self.rect;
+        let text = text.into();
         self.ctx.data_mut(|d| {
             d.get_temp_mut_or_default::<Vec<Rect>>(hinted_id()).push(rect);
+            #[cfg(test)]
+            d.get_temp_mut_or_default::<Vec<(Rect, String)>>(hint_texts_id())
+                .push((rect, text.text().to_string()));
         });
         self.on_hover_text(text)
     }

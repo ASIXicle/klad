@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 const LAYERS: [&str; 7] = ["lines", "colour", "shade", "notes", "rim", "ground", "sky"];
 
-fn sample(name: &str) -> PathBuf {
+pub(super) fn sample(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("draw-ui-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut doc = Document::new(512, 384);
@@ -51,14 +51,14 @@ fn sample(name: &str) -> PathBuf {
     dir
 }
 
-fn editor(path: &Path) -> Editor {
+pub(super) fn editor(path: &Path) -> Editor {
     let mut editor = Editor::open(egui::Context::default(), path).unwrap();
     editor.settings = Settings::default();
     editor.settings_path = None;
     editor
 }
 
-fn harness(editor: Editor, size: egui::Vec2) -> Harness<'static, Editor> {
+pub(super) fn harness(editor: Editor, size: egui::Vec2) -> Harness<'static, Editor> {
     harness_stepping(editor, size, 0.25)
 }
 
@@ -74,7 +74,7 @@ fn harness_stepping(editor: Editor, size: egui::Vec2, step: f32) -> Harness<'sta
     h
 }
 
-fn activate(h: &mut Harness<'static, Editor>, name: &str) {
+pub(super) fn activate(h: &mut Harness<'static, Editor>, name: &str) {
     let path = {
         let ed = h.state();
         let id = ed.scene.bundle.doc.find_layer(name).unwrap().id.clone();
@@ -103,7 +103,7 @@ fn ready(h: &mut Harness<'static, Editor>) {
     assert!(h.state().canvas_current(), "the canvas never caught up");
 }
 
-const CONTROLS: [Role; 9] = [
+pub(super) const CONTROLS: [Role; 9] = [
     Role::Button,
     Role::CheckBox,
     Role::Slider,
@@ -1133,7 +1133,7 @@ fn settle(h: &mut Harness<'static, Editor>, done: impl Fn(&Editor) -> bool) {
     assert!(done(h.state()), "the editor did not settle");
 }
 
-fn drag(h: &mut Harness<'static, Editor>, from: egui::Pos2, to: egui::Pos2) {
+pub(super) fn drag(h: &mut Harness<'static, Editor>, from: egui::Pos2, to: egui::Pos2) {
     h.hover_at(from);
     h.run_steps(1);
     h.drag_at(from);
@@ -1510,7 +1510,7 @@ fn a_pixel_layer_is_added_shows_its_marks_hard_and_keeps_brush_strokes_out() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-fn pixel_sample(name: &str) -> PathBuf {
+pub(super) fn pixel_sample(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("draw-ui-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut bundle = Bundle::blank(
@@ -4310,7 +4310,7 @@ fn a_lasso_cut_spans_the_selected_layers() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-fn canvas_at(h: &Harness<'static, Editor>, x: f32, y: f32) -> egui::Pos2 {
+pub(super) fn canvas_at(h: &Harness<'static, Editor>, x: f32, y: f32) -> egui::Pos2 {
     let view = h.state().view.unwrap();
     let rect = h.state().canvas_rect;
     rect.min + view.to_screen(egui::Vec2::new(x, y), rect.size())
