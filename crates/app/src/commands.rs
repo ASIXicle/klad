@@ -3567,4 +3567,46 @@ mod tests {
             "new drawing here (K)\na blank drawing at this frame on the active layer"
         );
     }
+
+    fn menu_paths(prefix: &str, items: &[Item], out: &mut Vec<(Cmd, String)>) {
+        items.iter().for_each(|item| match item {
+            Item::Run(cmd) => out.push((*cmd, format!("{prefix} > {}", cmd.menu()))),
+            Item::Sub(name, inner) => menu_paths(&format!("{prefix} > {name}"), inner, out),
+            Item::Recent => out.push((Cmd::OpenRecent, format!("{prefix} > {}", Cmd::OpenRecent.menu()))),
+            Item::Line => {}
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn command_inventory() {
+        let out = std::env::var("KLAD_INVENTORY_OUT").expect("set KLAD_INVENTORY_OUT to the file to write");
+        let mut paths = Vec::new();
+        MENUS.iter().for_each(|m| menu_paths(m.title, m.items, &mut paths));
+        let cell = |text: &str| text.replace('|', "/").replace('\n', " ");
+        let rows: Vec<String> = Cmd::ALL
+            .iter()
+            .map(|cmd| {
+                let spec = cmd.spec();
+                let menu = paths
+                    .iter()
+                    .find(|(c, _)| c == cmd)
+                    .map_or_else(|| "(no menu)".to_string(), |(_, path)| path.clone());
+                format!(
+                    "| {} | {} | {} | {} | `{}` | {} |",
+                    spec.group.name(),
+                    cell(&menu),
+                    cell(spec.name),
+                    cell(&spec.key_label()),
+                    spec.id,
+                    cell(spec.about)
+                )
+            })
+            .collect();
+        let text = format!(
+            "| group | menu | name | key or gesture | id | what it does |\n|---|---|---|---|---|---|\n{}\n",
+            rows.join("\n")
+        );
+        std::fs::write(out, text).unwrap();
+    }
 }

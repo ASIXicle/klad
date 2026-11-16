@@ -1,3 +1,4 @@
+use super::testkit::copy_dir;
 use super::{Direct, Editor, Picked, Tool};
 use crate::commands::Cmd;
 use crate::layout::{self, Pane};
@@ -776,21 +777,6 @@ fn every_command_answers_whether_it_can_run_and_toggles_say_their_state() {
     h.state_mut().tool = Tool::Strokes;
     assert!(h.state().can_run(Cmd::Copy).is_none());
     let _ = std::fs::remove_dir_all(&path);
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    std::fs::read_dir(from).unwrap().for_each(|e| {
-        let e = e.unwrap();
-        let target = to.join(e.file_name());
-        match e.file_type().unwrap().is_dir() {
-            true if e.file_name() == ".cache" => {}
-            true => copy_dir(&e.path(), &target),
-            false => {
-                std::fs::copy(e.path(), target).unwrap();
-            }
-        }
-    });
 }
 
 #[test]
