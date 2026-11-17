@@ -1,4 +1,4 @@
-_Last updated: 2026-11-16 22:16_
+_Last updated: 2026-11-17 15:05_
 
 Agent-first 2D art application in Rust: a `klad` CLI for agents and a native editor for people with a pen, sharing one document bundle on disk. What and why: `docs/DESIGN.md`. How to build, test and send a change: `CONTRIBUTING.md`. How an agent draws with it: `docs/skill/SKILL.md`.
 
@@ -8,6 +8,7 @@ Agent-first 2D art application in Rust: a `klad` CLI for agents and a native edi
 - The editor (`crates/app`, `klad open`) runs on macOS for now. It compiles and its tests run on Linux too; `klad open` exists only in the macOS build.
 - The editor's panels run headless in tests through `egui_kittest` (`Editor::open` needs no GPU): click, type, drag, read sizes and accessible names. `just ui-pictures` and `cargo test -p klad-app -- --ignored start_pictures` render the UI into `scratch/ui/` with a blank canvas; `editor_picture` draws the canvas too, and `guide_pictures` renders the editor pictures in `docs/guide/` from the built samples (copy them from `scratch/ui/guide/` to `docs/images/guide-*.png`) (the kittest renderer gets the canvas resources, and the canvas is redrawn once it has caught up, since uploads made in a pass kittest did not render are lost). `just ui-time` measures UI work per frame; `just drag-time` (or `just drag-time <bundle>`, which drags in a copy) measures drags on a generated poster-like drawing: how often the preview updates, the release frame and what follows it, and a layer switch.
 - Journeys (`crates/app/src/editor/journeys.rs`, on the `Journey` helper in `testkit.rs`) walk a whole job through the start window and the editor the way a person would: labels, keys, drags, scrolls and pinches, never a command called directly. Each step checks what a person expects without stopping at the first miss, and a journey ends by comparing its misses with the list it carries: a new miss fails it, and so does a listed one that no longer happens (take it off the list). `just journeys` runs them without a GPU; `just journeys <absolute folder>` also writes a picture and a `steps.md` log per journey there. `just inventory [folder]` writes two files there (`scratch/` by default): `inventory.md`, every command with its menu, key and description, and `controls.md`, every control of the editor by tool, panel and window with its label, value and hover hint, read from the editor opened without a window (`crates/app/src/editor/inventory.rs`).
+- The sweep (`crates/app/src/editor/sweep.rs`) asks one thing of everything: does it change something a person can see, or say why not. The grid presses every tool on every kind of active layer (a click, a drag and a loop, on the layer's own mark, on another layer's paint and on empty canvas) and runs in `just test`. The command sweep runs every command in 23 prepared states, the way a menu runs it and from its keys; it takes minutes, so only `just sweep` runs it (after building the `klad` binary its jobs call). Both carry the list of acts and commands known to stay quiet, each with its reason, and fail on a new one and on a listed one that now answers (take it off the list). `just sweep <absolute folder>` also writes `grid.md` and `sweep.md` there. `KLAD_SWEEP_FRESH=1` opens a fresh drawing for every act (the default uses one editor again while an act leaves no trace), `KLAD_SWEEP_STATE=<name>` runs one state of the command sweep.
 - `cargo test -p klad-app` alone does not rebuild the `klad` binary that the job and thumbnail tests run; `just test` (the workspace) does.
 - macOS-only code (`crates/app/src/pen.rs`, `crates/app/src/picker.rs`) can be type-checked from Linux with `rustup target add aarch64-apple-darwin` and a small scratch crate holding the module and its objc2 dependencies (`cargo check --offline --target aarch64-apple-darwin`); the full workspace cannot, `zstd-sys` needs the macOS SDK.
 
@@ -23,6 +24,7 @@ Agent-first 2D art application in Rust: a `klad` CLI for agents and a native edi
 
 - Tests for new behaviour in the crate that owns it.
 - `just lint` (fmt check plus clippy with `-D warnings`), `just test` and `just audit` are clean.
+- A change to a tool, a command or what a kind of layer takes also runs `just sweep`.
 - A change that moves a sample's hash says why.
 
 ## Standing rules

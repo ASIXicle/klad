@@ -38,6 +38,14 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap()
 }
 
+pub(super) fn written(node: &egui_kittest::kittest::AccessKitNode<'_>) -> Option<String> {
+    match node.role() {
+        Role::Label => node.value(),
+        _ => node.label(),
+    }
+    .filter(|text| !text.is_empty())
+}
+
 fn tone(tone: Tone) -> &'static str {
     match tone {
         Tone::Info => "info",
@@ -205,17 +213,17 @@ impl Journey {
     fn screen(&self) -> Vec<String> {
         let mut seen = BTreeSet::new();
         self.h
-            .query_all(egui_kittest::kittest::By::new().predicate(|n| n.label().is_some_and(|l| !l.is_empty())))
+            .query_all(egui_kittest::kittest::By::new().predicate(|n| written(n).is_some()))
             .filter_map(|n| {
                 let node = n.accesskit_node();
-                let label = node.label().unwrap_or_default();
+                let label = written(&node)?;
                 let text = match node.role() {
                     Role::Label => label,
                     role => format!("{role:?} \"{label}\""),
                 };
                 seen.insert(text.clone()).then_some(text)
             })
-            .take(220)
+            .take(400)
             .collect()
     }
 

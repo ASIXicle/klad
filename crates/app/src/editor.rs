@@ -37,6 +37,8 @@ mod inventory;
 #[cfg(test)]
 mod journeys;
 #[cfg(test)]
+mod sweep;
+#[cfg(test)]
 mod testkit;
 #[cfg(test)]
 mod ui_tests;
