@@ -165,9 +165,8 @@ impl Editor {
         self.say(
             Tone::Done,
             format!(
-                "copied {} marks of {}: go to another frame and cmd V puts them there, in place",
-                copied.count(),
-                copied.whence()
+                "copied {}: cmd V puts a copy on this or another frame, in place",
+                counted(copied.count(), "mark")
             ),
         );
         self.clipboard = Some(copied);
