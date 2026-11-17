@@ -1314,6 +1314,11 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
     j.act("see the whole lantern again with F and click the pale body of the lamp, to change its colour");
     j.key(Key::F);
     j.tap(560.0, 650.0);
+    j.settle();
+    if j.heard().contains("still loading") {
+        j.note(format!("it said: {}", j.heard()));
+        j.tap(560.0, 650.0);
+    }
     j.look("clicked-the-body");
     let got = j.ed().map_or_else(String::new, |ed| {
         format!(
@@ -3555,4 +3560,1130 @@ fn someone_looks_for_help_and_finds_their_way_back() {
         "the-finder-knows-the-words-people-bring",
         "the-key-list-shows-its-rows",
     ]);
+}
+
+fn ring(cx: f32, cy: f32, rx: f32, ry: f32, gap: f32) -> Vec<(f32, f32, f32)> {
+    let steps = 28;
+    (0..=steps)
+        .map(|i| i as f32 / steps as f32 * (std::f32::consts::TAU - gap))
+        .map(|a| (cx + rx * a.cos(), cy + ry * a.sin(), 0.45 + 0.4 * (a * 0.5).sin().abs()))
+        .collect()
+}
+
+fn last_stroke(j: &Journey, layer: &str) -> Option<klad_core::stroke::Stroke> {
+    layer_marks(j, layer).iter().rev().find_map(|m| m.as_stroke().cloned())
+}
+
+fn fills(j: &Journey, layer: &str) -> Vec<[f32; 4]> {
+    layer_marks(j, layer)
+        .iter()
+        .filter(|m| m.as_fill().is_some())
+        .filter_map(|m| m.bounds())
+        .collect()
+}
+
+fn brush_named(j: &mut Journey, name: &str) -> bool {
+    if j.click(name) {
+        return true;
+    }
+    j.pick_in_list("the brush; the brush panel shows them with a sample stroke", name)
+}
+
+fn layer_of(j: &Journey, name: &str) -> Option<klad_core::doc::Layer> {
+    j.ed().and_then(|ed| ed.scene.bundle.doc.find_layer(name).ok().cloned())
+}
+
+fn rename_layer(j: &mut Journey, from: &str, to: &str) -> bool {
+    j.double_click(from);
+    j.type_text(to);
+    j.key(Key::Enter);
+    names(j).iter().any(|n| n == to)
+}
+
+#[test]
+fn someone_sketches_inks_and_colours_a_picture() {
+    let mut j = Journey::begin("illustrate-sketch-ink-colour", WINDOW, None);
+
+    j.act("make a drawing called mushroom and look at what it starts with");
+    let made = new_drawing(&mut j, "mushroom");
+    j.look("new");
+    if !made {
+        return j.finish(&[]);
+    }
+    j.note(format!(
+        "it starts with the layers {:?}, on {}",
+        tree(&j),
+        active_name(&j)
+    ));
+
+    j.act("sketch on the layer called sketch: click it, take the Pencil, draw the cap with a pen");
+    j.click("sketch");
+    let pencil = brush_named(&mut j, "Pencil");
+    let before = j.ed().map_or(0, |ed| ed.scene.total_marks());
+    j.pen_stroke(&ring(512.0, 400.0, 220.0, 150.0, 0.0));
+    j.look("sketched-on-sketch");
+    let landed = j.ed().map_or(0, |ed| ed.scene.total_marks()) > before;
+    j.note(format!(
+        "the Pencil was {}; the layer in hand is {}; it said: {}",
+        if pencil { "found" } else { "not found" },
+        active_name(&j),
+        j.heard()
+    ));
+    j.expect(
+        "the-sketch-layer-takes-a-pencil",
+        landed,
+        "a pencil stroke with the layer called sketch in hand lands in the drawing",
+    );
+
+    j.act("sketch on the paint layer then: the cap, the stem and the ground");
+    j.click("paint 1");
+    j.pen_stroke(&ring(512.0, 400.0, 220.0, 150.0, 0.0));
+    j.pen_stroke(&[
+        (440.0, 540.0, 0.4),
+        (430.0, 760.0, 0.7),
+        (600.0, 760.0, 0.7),
+        (585.0, 540.0, 0.4),
+    ]);
+    j.pen_stroke(&[(200.0, 780.0, 0.3), (512.0, 770.0, 0.8), (830.0, 785.0, 0.3)]);
+    j.look("sketched");
+    let sketch = layer_marks(&j, "paint 1");
+    let pressed: Vec<f32> = sketch
+        .first()
+        .and_then(|m| m.as_stroke())
+        .map(|s| s.samples.iter().map(|p| p.pressure()).collect())
+        .unwrap_or_default();
+    let (light, hard) = pressed
+        .iter()
+        .fold((f32::MAX, 0.0f32), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+    j.note(format!(
+        "three strokes: {}; the first is a {} stroke pressed {light:.2} to {hard:.2}",
+        sketch.len() == 3,
+        sketch
+            .first()
+            .and_then(|m| m.as_stroke())
+            .map_or("no", |s| s.brush.as_str())
+    ));
+    j.expect(
+        "a-pen-sketches-with-its-pressure",
+        sketch.len() == 3 && hard - light > 0.2,
+        "three pencil strokes land with the pen's pressure in them",
+    );
+
+    j.act("turn the sketch down to see through it: drag the layer's opacity");
+    let field =
+        j.h.query_all_by_label("opacity")
+            .map(|n| n.rect())
+            .find(|r| r.center().x > 1050.0);
+    match field {
+        Some(r) => j.drag_screen(
+            r.center(),
+            r.center() - vec2(70.0, 0.0),
+            "the layer's opacity number 70 px to the left",
+        ),
+        None => j.note("no layer opacity in sight"),
+    }
+    j.look("sketch-faint");
+    let faint = layer_of(&j, "paint 1").map(|l| l.opacity);
+    j.note(format!("the sketch layer's opacity is {faint:?}"));
+    j.expect(
+        "layer-opacity-turns-the-sketch-down",
+        faint.is_some_and(|o| o < 0.6),
+        "dragging the layer's opacity makes the sketch faint",
+    );
+
+    j.act("a new layer for the ink, called ink");
+    j.click("Layer");
+    j.click("New paint layer");
+    let fresh = active_name(&j);
+    let named = rename_layer(&mut j, &fresh, "ink");
+    j.look("ink-layer");
+    j.note(format!("the layers are now {:?}", tree(&j)));
+    j.expect(
+        "a-new-layer-is-named-by-double-click",
+        named && active_name(&j) == "ink",
+        "the new layer is above the sketch and takes its name from a double click",
+    );
+
+    j.act("ink the cap and the stem with the Inking pen at size 8");
+    let ink = brush_named(&mut j, "Inking pen");
+    j.click("8");
+    j.pen_stroke(&ring(512.0, 400.0, 220.0, 150.0, 0.0));
+    j.pen_stroke(&[
+        (440.0, 545.0, 0.5),
+        (430.0, 760.0, 0.8),
+        (600.0, 760.0, 0.8),
+        (585.0, 545.0, 0.5),
+    ]);
+    j.look("inked");
+    let line = last_stroke(&j, "ink");
+    j.note(format!(
+        "the ink layer has {} strokes; the last is {:?} at size {:?}",
+        count_on(&j, "ink"),
+        line.as_ref().map(|s| s.brush.clone()),
+        line.as_ref().map(|s| s.size)
+    ));
+    j.expect(
+        "ink-lands-on-the-ink-layer",
+        ink && count_on(&j, "ink") == 2 && line.is_some_and(|s| s.brush == "ink" && (s.size - 8.0).abs() < 0.1),
+        "two inked lines land on the ink layer at the size picked",
+    );
+
+    j.act("a line is too long: erase a piece of it with E, then go back to the brush with B");
+    let inked = j.picture();
+    j.key(Key::E);
+    j.drag(&[(515.0, 725.0), (515.0, 795.0)]);
+    j.look("erased");
+    let erased = j.picture();
+    j.key(Key::B);
+    let back = j.ed().map(|ed| (ed.tool, ed.brush.clone()));
+    j.note(format!("after B the tool and brush are {back:?}"));
+    j.expect(
+        "the-eraser-takes-ink-off",
+        erased != inked,
+        "an eraser stroke across the line changes the picture",
+    );
+    j.expect(
+        "b-brings-the-ink-brush-back",
+        back.is_some_and(|(tool, brush)| tool == Tool::Brush && brush == "ink"),
+        "B after the eraser is the Inking pen again",
+    );
+
+    j.act("a layer for the flat colours, under the ink: click the sketch layer, then Layer > New paint layer");
+    j.click("paint 1");
+    j.click("Layer");
+    j.click("New paint layer");
+    let fresh = active_name(&j);
+    let named = rename_layer(&mut j, &fresh, "flats");
+    j.look("flats-layer");
+    let order = names(&j);
+    j.note(format!("the layers are now {order:?}"));
+    let under = order
+        .iter()
+        .position(|n| n == "ink")
+        .zip(order.iter().position(|n| n == "flats"))
+        .is_some_and(|(ink, flats)| ink < flats);
+    j.expect(
+        "a-new-layer-lands-above-the-layer-in-hand",
+        named && under,
+        "a layer made with the sketch in hand lands above the sketch and under the ink",
+    );
+
+    j.act("fill the cap with red: G, a red, a click inside the cap");
+    j.key(Key::G);
+    j.retype("hex", "#c8342c");
+    j.tap(512.0, 400.0);
+    j.look("first-fill");
+    let first = fills(&j, "flats");
+    j.note(format!(
+        "the fill covers {first:?}; the cap's line covers about 292,250 to 732,550; it said: {}",
+        j.heard()
+    ));
+    let inside = |b: &[f32; 4]| b[0] > 250.0 && b[1] > 200.0 && b[2] < 780.0 && b[3] < 600.0;
+    j.expect(
+        "a-fill-on-the-colour-layer-stops-at-the-ink-above",
+        first.len() == 1 && first.iter().all(inside),
+        "a click inside the inked cap, on the layer under the ink, fills the cap",
+    );
+
+    j.act("it filled the whole page: undo, tell the fill to stop at everything visible, and click again");
+    if !(first.len() == 1 && first.iter().all(inside)) {
+        j.chord(CMD, Key::Z);
+    }
+    j.pick_in_list(
+        "the lines the fill stops at: this layer, everything visible, or a layer such as your lines",
+        "all visible layers",
+    );
+    if fills(&j, "flats").is_empty() {
+        j.tap(512.0, 400.0);
+    }
+    j.look("cap-filled");
+    let cap = fills(&j, "flats");
+    j.note(format!("the fill covers {cap:?}"));
+    j.expect(
+        "a-fill-stops-at-visible-lines",
+        cap.len() == 1 && cap.iter().all(inside),
+        "with everything visible as its lines the fill stays inside the cap",
+    );
+
+    j.act("the stem in a cream colour; its line was left open at the top");
+    j.retype("hex", "#e8dcc0");
+    j.tap(512.0, 660.0);
+    j.look("stem-filled");
+    let stem = fills(&j, "flats");
+    j.note(format!("the fills cover {stem:?}; it said: {}", j.heard()));
+    j.expect(
+        "a-fill-in-an-open-shape-is-held-or-explained",
+        stem.len() == 2 && stem.last().is_some_and(|b| b[2] - b[0] < 400.0),
+        "the stem, closed by the cap above it, fills without running over the page",
+    );
+
+    j.act("shade the cap: a new layer above the flats, clipped to them and set to multiply, a soft grey stroke");
+    j.click("Layer");
+    j.click("New paint layer");
+    let fresh = active_name(&j);
+    rename_layer(&mut j, &fresh, "shade");
+    j.click("Layer");
+    let clipped = j.click_containing("Clip to layer below");
+    j.pick_in_list("how the active layer mixes with what is below it", "multiply");
+    j.key(Key::B);
+    let soft = brush_named(&mut j, "Soft");
+    j.click("64");
+    j.retype("hex", "#808080");
+    let flat = j.picture();
+    j.pen_stroke(&[(330.0, 470.0, 0.6), (512.0, 520.0, 0.9), (700.0, 470.0, 0.6)]);
+    j.look("shaded");
+    let shade = layer_of(&j, "shade");
+    j.note(format!(
+        "the shade layer: clip {:?}, blend {:?}, {} strokes",
+        shade.as_ref().map(|l| l.clip),
+        shade.as_ref().map(|l| l.blend.name()),
+        count_on(&j, "shade")
+    ));
+    let shown = j.picture();
+    j.expect(
+        "a-clipped-multiply-layer-shades",
+        clipped && soft && shade.is_some_and(|l| l.clip) && count_on(&j, "shade") == 1 && shown != flat,
+        "a soft stroke on a layer clipped to the flats shades them",
+    );
+
+    j.act("take the cap's red back from the picture: hold alt and click the cap");
+    j.tap_with(420.0, 340.0, egui::PointerButton::Primary, Modifiers::ALT);
+    j.look("picked-colour");
+    let colour = j.ed().map(|ed| crate::color::hex(ed.color));
+    j.note(format!("the colour in hand is {colour:?}"));
+    j.expect(
+        "alt-click-picks-a-colour-from-the-picture",
+        colour.as_deref().is_some_and(|c| c != "#808080"),
+        "alt and a click take the colour under the pointer",
+    );
+
+    j.act("hide the sketch and look at the picture");
+    let with = j.picture();
+    j.press_hinted("show or hide paint 1");
+    j.look("sketch-hidden");
+    let without = j.picture();
+    j.expect(
+        "the-eye-hides-the-sketch",
+        without != with && layer_of(&j, "paint 1").is_some_and(|l| !l.visible),
+        "the eye hides the sketch layer",
+    );
+
+    j.finish(&[
+        "a-fill-on-the-colour-layer-stops-at-the-ink-above",
+        "the-sketch-layer-takes-a-pencil",
+    ]);
+}
+
+fn view_of(j: &Journey) -> (f32, bool) {
+    j.ed()
+        .and_then(|ed| ed.view)
+        .map_or((0.0, false), |v| (v.angle.to_degrees(), v.flip))
+}
+
+fn rendered(j: &mut Journey, drawing: &str) -> String {
+    let (_, said) = j.agent(&["render", drawing]);
+    said.split_whitespace()
+        .skip_while(|w| *w != "hash")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn someone_fixes_and_adjusts_a_painting() {
+    let mut j = Journey::begin("illustrate-fix-adjust", WINDOW, Some("ink-shapes.klad"));
+
+    j.act("open an inked drawing and flip the view with H, to see it fresh");
+    j.look("opened");
+    if j.ed().is_none() {
+        return j.finish(&[]);
+    }
+    let drawing = j.drawing();
+    let said = j.heard();
+    j.key(Key::H);
+    j.look("flipped");
+    let flipped = view_of(&j).1;
+    j.note(format!("the view is flipped: {flipped}; it said: {}", j.heard()));
+    j.expect("h-flips-the-view", flipped, "H mirrors the view");
+    j.expect(
+        "a-flipped-view-says-so",
+        j.heard() != said || j.shown("flipped") || j.shown("mirrored"),
+        "something on screen says that the view is mirrored, not the drawing",
+    );
+    j.key(Key::H);
+
+    j.act("turn the view with R to draw at an easier angle, and draw a line with the pen");
+    j.key(Key::R);
+    j.key(Key::R);
+    j.look("turned");
+    j.note(format!("the view is turned {:.0} degrees", view_of(&j).0));
+    j.click("lines");
+    let before = count_on(&j, "lines");
+    j.pen_stroke(&[(300.0, 620.0, 0.5), (420.0, 640.0, 0.9), (540.0, 620.0, 0.5)]);
+    j.look("drawn-turned");
+    let line = last_stroke(&j, "lines");
+    let start = line.as_ref().and_then(|s| s.samples.first().map(|p| p.pos()));
+    j.note(format!("the line starts at {start:?}; it was drawn from 300,620"));
+    j.expect(
+        "a-line-lands-under-the-pen-in-a-turned-view",
+        count_on(&j, "lines") == before + 1
+            && start.is_some_and(|(x, y)| (x - 300.0).abs() < 6.0 && (y - 620.0).abs() < 6.0),
+        "a line drawn in a turned view lands where the pen was",
+    );
+    j.chord(Modifiers::ALT, Key::R);
+    j.look("upright");
+    j.expect(
+        "alt-r-puts-the-view-upright",
+        view_of(&j).0.abs() < 0.5,
+        "alt R puts the view upright again",
+    );
+    j.chord(CMD, Key::Z);
+
+    j.act("the shape at the top left sits wrong: loop it with S and mirror it with the bar's flip");
+    j.key(Key::S);
+    j.drag(&[(70.0, 30.0), (270.0, 30.0), (270.0, 215.0), (70.0, 215.0), (70.0, 36.0)]);
+    j.look("looped");
+    let taken = picked_ids(&j);
+    let first = taken.first().copied().unwrap_or_default();
+    let head = |j: &Journey| {
+        mark_of(j, "lines", first).and_then(|m| m.as_stroke().and_then(|s| s.samples.first().map(|p| p.pos())))
+    };
+    let was = (box_of(&layer_marks(&j, "lines"), &taken), head(&j));
+    j.press_hinted("flip the selection left-right");
+    j.look("flipped-selection");
+    let now = (box_of(&layer_marks(&j, "lines"), &taken), head(&j));
+    j.note(format!(
+        "the loop took {} strokes; their box went from {:?} to {:?}, the first stroke's start from {:?} to {:?}",
+        taken.len(),
+        was.0,
+        now.0,
+        was.1,
+        now.1
+    ));
+    j.expect(
+        "the-bar-flips-a-selection-in-place",
+        !taken.is_empty() && near(was.0, now.0, 1.5) && was.1 != now.1,
+        "the flip mirrors the selected strokes inside their own box",
+    );
+
+    j.act("make it smaller by a corner of its box");
+    if let Some(c) = handle_corners(&j) {
+        let centre = (c[0].to_vec2() + c[2].to_vec2()) / 2.0;
+        let inward = (centre - c[2].to_vec2()).normalized() * 30.0;
+        j.drag_screen(c[2], c[2] + inward, "the bottom right corner 30 px inwards");
+    }
+    j.look("smaller");
+    let small = box_of(&layer_marks(&j, "lines"), &taken);
+    let width = |b: Option<[f32; 4]>| b.map_or(0.0, |b| b[2] - b[0]);
+    j.expect(
+        "a-corner-makes-the-selection-smaller",
+        width(small) < width(now.0) * 0.95,
+        "a corner dragged inwards makes the selection smaller",
+    );
+    j.key(Key::Escape);
+
+    j.act("rub out a part with a bigger eraser: E, ] three times, a drag over the lines");
+    j.key(Key::E);
+    let size = j.ed().map_or(0.0, |ed| ed.size);
+    (0..3).for_each(|_| j.key(Key::CloseBracket));
+    let pictured = j.picture();
+    j.drag(&[(380.0, 480.0), (560.0, 600.0)]);
+    j.look("rubbed-out");
+    let grown = j.ed().map_or(0.0, |ed| ed.size);
+    let after = j.picture();
+    j.note(format!("the eraser went from {size:.1} to {grown:.1} px"));
+    j.expect(
+        "a-bigger-eraser-rubs-out",
+        grown > size * 1.5 && after != pictured,
+        "the eraser grows with ] and rubs the lines out",
+    );
+    j.key(Key::B);
+    let brush_size = j.ed().map_or(0.0, |ed| ed.size);
+    j.note(format!("back on the brush its size is {brush_size:.1} px"));
+    j.expect(
+        "the-eraser-keeps-its-own-size",
+        (brush_size - size).abs() < 0.1,
+        "making the eraser bigger leaves the brush as it was",
+    );
+
+    j.act(
+        "take the colour out of everything with an adjustment layer: Layer > New adjustment layer, hue and saturation",
+    );
+    j.click("Layer");
+    j.click("New adjustment layer");
+    j.look("adjustment-added");
+    let list = "what this adjustment layer does to the layers under it in its group (or the one it is clipped to)";
+    let seen = j.in_sight(list);
+    j.note(format!(
+        "the layer in hand is {}; its settings are {}",
+        active_name(&j),
+        if seen { "in sight" } else { "below the fold" }
+    ));
+    j.expect(
+        "an-adjustment-layers-settings-are-in-sight",
+        seen,
+        "the new adjustment layer's settings are in sight",
+    );
+    if !seen {
+        j.press_hinted("fold Colour to its title");
+        j.press_hinted("fold Brush to its title");
+        j.scroll_to(list);
+    }
+    let before = j.picture();
+    let chosen = j.pick_in_list(list, "hue and saturation");
+    j.scroll_to("lightness");
+    j.click_inside("lightness", 0.95, 0.5);
+    j.look("adjusted");
+    let after = j.picture();
+    j.expect(
+        "an-adjustment-changes-the-picture",
+        chosen && after != before,
+        "hue and saturation on an adjustment layer changes the picture under it",
+    );
+    j.press_hinted(&format!("show or hide {}", active_name(&j)));
+    let hidden = j.picture();
+    j.expect(
+        "hiding-the-adjustment-brings-the-picture-back",
+        hidden == before,
+        "with the adjustment layer hidden the picture is as it was",
+    );
+
+    j.act("hide a part without erasing it: a mask on the lines, painted with the brush");
+    j.click("lines");
+    let masked = j.menu("Layer", "Mask", "Add mask");
+    j.look("mask-added");
+    j.note(format!(
+        "the layer in hand is {}; it said: {}",
+        active_name(&j),
+        j.heard()
+    ));
+    let strokes = count_on(&j, "lines");
+    let before = j.picture();
+    j.key(Key::B);
+    (0..4).for_each(|_| j.key(Key::CloseBracket));
+    j.drag(&[(640.0, 80.0), (860.0, 200.0)]);
+    j.look("masked");
+    let after = j.picture();
+    j.expect(
+        "a-mask-hides-without-erasing",
+        masked && after != before && count_on(&j, "lines") == strokes,
+        "painting on the mask hides a part of the lines and leaves the strokes as they were",
+    );
+    let back = j.menu("Layer", "Mask", "Back to layer");
+    j.note(format!(
+        "back on the layer: {back}; the layer in hand is {}",
+        active_name(&j)
+    ));
+
+    j.act("bring in a picture to draw from: File > Import picture…, then mark it as a reference");
+    let hash = rendered(&mut j, &drawing);
+    let photo = j.folder.join("photo.png").display().to_string();
+    let (_, shot) = j.agent(&["render", &drawing, "--out", &photo]);
+    j.note(format!(
+        "made a picture to bring in: {}",
+        shot.lines().next().unwrap_or_default()
+    ));
+    j.click("File");
+    j.click_containing("Import picture");
+    j.look("import-window");
+    j.type_into("PNG or JPEG file", &photo);
+    j.click("import");
+    j.look("imported");
+    let layers = names(&j);
+    j.note(format!(
+        "the layers are now {layers:?}; the layer in hand is {}; it said: {}",
+        active_name(&j),
+        j.heard()
+    ));
+    j.expect(
+        "a-picture-comes-in-as-a-layer",
+        layers.len() == 4,
+        "the picture is on a new layer",
+    );
+    j.scroll_to("reference");
+    let ticked = j.click("reference");
+    j.look("reference");
+    let (_, listed) = j.agent(&["ls", &drawing]);
+    j.note(format!(
+        "the agent sees the layers: {}",
+        listed.lines().take(4).collect::<Vec<_>>().join(" / ")
+    ));
+    let reference = layer_of(&j, &active_name(&j)).is_some_and(|l| l.reference);
+    j.expect(
+        "a-layer-is-marked-as-a-reference",
+        ticked && reference,
+        "the reference box in Layer settings marks the layer",
+    );
+    let now = rendered(&mut j, &drawing);
+    j.expect(
+        "a-reference-stays-out-of-the-picture",
+        !hash.is_empty() && now == hash,
+        "the rendered picture is the same with the reference in the drawing",
+    );
+
+    j.act("put the picture away and soften an edge with the Smudge brush");
+    j.press_hinted("show or hide photo");
+    j.click("lines");
+    let smudge = brush_named(&mut j, "Smudge");
+    let before = (count_on(&j, "lines"), j.picture());
+    j.drag(&[(120.0, 500.0), (260.0, 560.0)]);
+    j.look("smudged");
+    let after = (count_on(&j, "lines"), j.picture());
+    j.note(format!(
+        "lines went from {} to {} marks; the last one uses {:?}",
+        before.0,
+        after.0,
+        last_stroke(&j, "lines").map(|s| s.brush)
+    ));
+    j.expect(
+        "smudge-moves-the-paint",
+        smudge && after.0 == before.0 + 1 && after.1 != before.1,
+        "a smudge stroke over the lines changes them",
+    );
+
+    j.finish(&[
+        "an-adjustment-layers-settings-are-in-sight",
+        "the-eraser-keeps-its-own-size",
+    ]);
+}
+
+#[test]
+fn someone_paints_fast_with_brushes_sizes_and_opacity() {
+    let mut j = Journey::begin("illustrate-brushes", WINDOW, None);
+    let size = |j: &Journey| j.ed().map_or(0.0, |ed| ed.size);
+    let brush = |j: &Journey| j.ed().map_or_else(String::new, |ed| ed.brush.clone());
+
+    j.act("make a drawing and change the brush size with the keys: ] three times, [ once");
+    let made = new_drawing(&mut j, "brushes");
+    if !made {
+        return j.finish(&[]);
+    }
+    let first = size(&j);
+    (0..3).for_each(|_| j.key(Key::CloseBracket));
+    let bigger = size(&j);
+    j.key(Key::OpenBracket);
+    let smaller = size(&j);
+    j.look("sizes");
+    j.note(format!(
+        "the size went from {first:.1} to {bigger:.1} and back to {smaller:.1}"
+    ));
+    j.expect(
+        "the-bracket-keys-size-the-brush",
+        bigger > first * 1.8 && smaller < bigger,
+        "] makes the brush bigger and [ smaller",
+    );
+
+    j.act("pick a size from the Brush panel, and half the opacity in the bar");
+    j.click("32");
+    let slider = |j: &Journey| {
+        j.h.query_all_by_label("opacity")
+            .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Slider)
+            .map(|n| n.rect())
+            .find(|r| r.center().y < 70.0)
+    };
+    if let Some(r) = slider(&j) {
+        j.drag_screen(
+            r.center(),
+            r.center(),
+            "a click in the middle of the bar's opacity slider",
+        );
+    }
+    j.drag(&[(120.0, 120.0), (400.0, 150.0)]);
+    j.look("size-and-opacity");
+    let stroke = last_stroke(&j, "paint 1");
+    j.note(format!(
+        "the stroke has size {:?} and opacity {:?}",
+        stroke.as_ref().map(|s| s.size),
+        stroke.as_ref().map(|s| s.opacity)
+    ));
+    j.expect(
+        "a-size-tile-and-the-opacity-slider-set-the-stroke",
+        stroke.is_some_and(|s| (s.size - 32.0).abs() < 0.1 && s.opacity > 0.3 && s.opacity < 0.7),
+        "the stroke takes the size of the tile and the opacity of the slider",
+    );
+    if let Some(r) = slider(&j) {
+        let end = egui::pos2(r.right() - 1.0, r.center().y);
+        j.drag_screen(
+            r.center(),
+            end + vec2(30.0, 0.0),
+            "the opacity slider all the way to the right",
+        );
+    }
+    j.click("12");
+
+    j.act("paint a line with every brush in the list, top to bottom");
+    let listed: Vec<(String, String)> = j.ed().map_or_else(Vec::new, |ed| {
+        ed.brushes
+            .defs()
+            .map(|(id, def)| (id.to_string(), def.name.clone()))
+            .collect()
+    });
+    let mut wrong = Vec::new();
+    listed.iter().enumerate().for_each(|(i, (id, name))| {
+        let before = count_on(&j, "paint 1");
+        let picked = j.pick_in_list("the brush; the brush panel shows them with a sample stroke", name);
+        let y = 220.0 + (i % 12) as f32 * 62.0;
+        let x = 100.0 + (i / 12) as f32 * 460.0;
+        j.pen_stroke(&[(x, y, 0.4), (x + 180.0, y + 12.0, 0.9), (x + 360.0, y, 0.5)]);
+        let used = last_stroke(&j, "paint 1").map(|s| s.brush);
+        if !picked || count_on(&j, "paint 1") != before + 1 || used.as_deref() != Some(id.as_str()) {
+            wrong.push(format!(
+                "{name}: picked {picked}, marks {} to {}, used {used:?}",
+                before,
+                count_on(&j, "paint 1")
+            ));
+        }
+    });
+    j.look("every-brush");
+    j.note(format!(
+        "{} brushes in the list; not as expected: {wrong:?}",
+        listed.len()
+    ));
+    j.expect(
+        "every-brush-in-the-list-paints",
+        listed.len() > 20 && wrong.is_empty(),
+        "each brush of the list can be picked and leaves its own stroke",
+    );
+
+    j.act("press lightly and then hard with the Inking pen");
+    brush_named(&mut j, "Inking pen");
+    j.pen_stroke(&[(560.0, 100.0, 0.08), (700.0, 110.0, 0.5), (900.0, 100.0, 1.0)]);
+    j.look("pressure");
+    let pressed: Vec<f32> = last_stroke(&j, "paint 1")
+        .map(|s| s.samples.iter().map(|p| p.pressure()).collect())
+        .unwrap_or_default();
+    let (light, hard) = pressed
+        .iter()
+        .fold((f32::MAX, 0.0f32), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+    j.note(format!("the stroke holds pressures from {light:.2} to {hard:.2}"));
+    j.expect(
+        "the-pens-pressure-is-in-the-stroke",
+        light < 0.3 && hard > 0.8,
+        "a stroke pressed lightly and then hard keeps both",
+    );
+
+    j.act("swap the two colours with X and back");
+    let colour = |j: &Journey| j.ed().map(|ed| crate::color::hex(ed.color)).unwrap_or_default();
+    let ink = colour(&j);
+    j.key(Key::X);
+    let swapped = colour(&j);
+    j.key(Key::X);
+    j.note(format!(
+        "the colour went from {ink} to {swapped} and back to {}",
+        colour(&j)
+    ));
+    j.expect(
+        "x-swaps-the-colours",
+        swapped != ink && colour(&j) == ink,
+        "X swaps the colour in hand with the second one",
+    );
+
+    j.act("take the Marker, rub out with E, and go back with B");
+    brush_named(&mut j, "Marker");
+    j.key(Key::E);
+    let erasing = brush(&j);
+    j.key(Key::B);
+    j.look("marker-again");
+    j.note(format!("E gave {erasing}, B gave {}", brush(&j)));
+    j.expect(
+        "b-returns-to-the-brush-in-hand",
+        erasing == "eraser" && brush(&j) == "marker",
+        "B after the eraser is the brush that was in hand",
+    );
+
+    j.act("open the brush's more menu and give it a taper at the start");
+    let opened = j.press_hinted("hardness, feather, pressure curve, taper, stabiliser and smoothing");
+    j.look("more");
+    j.click_inside("taper in px", 0.5, 0.5);
+    j.key(Key::Escape);
+    j.drag(&[(560.0, 160.0), (900.0, 170.0)]);
+    j.look("tapered");
+    let taper = last_stroke(&j, "paint 1").map(|s| s.taper);
+    j.note(format!("the stroke's taper is {taper:?}"));
+    j.expect(
+        "the-more-menu-sets-a-taper",
+        opened && taper.is_some_and(|t| t[0] > 0.0),
+        "a taper set in the more menu is in the next stroke",
+    );
+
+    j.act("paint with the mirror on");
+    let before = count_on(&j, "paint 1");
+    let ticked = j.click("mirror");
+    j.drag(&[(160.0, 960.0), (300.0, 990.0)]);
+    j.look("mirrored");
+    j.note(format!("one drag made {} marks", count_on(&j, "paint 1") - before));
+    j.expect(
+        "mirror-paints-both-sides",
+        ticked && count_on(&j, "paint 1") == before + 2,
+        "with mirror on, one stroke lands on both sides",
+    );
+    j.click("mirror");
+
+    j.act("size the brush on the canvas: hold cmd and alt and drag sideways");
+    let before = (size(&j), count_on(&j, "paint 1"));
+    j.drag_with(
+        &[(500.0, 500.0), (580.0, 500.0)],
+        Modifiers {
+            alt: true,
+            ..Modifiers::COMMAND
+        },
+    );
+    j.look("sized-on-canvas");
+    j.note(format!("the size went from {:.1} to {:.1}", before.0, size(&j)));
+    j.expect(
+        "cmd-alt-drag-sizes-the-brush",
+        size(&j) > before.0 && count_on(&j, "paint 1") == before.1,
+        "a sideways drag with cmd and alt held changes the size and paints nothing",
+    );
+
+    j.act("twelve quick strokes, then twelve undos");
+    let before = count_on(&j, "paint 1");
+    (0..12).for_each(|i| {
+        let y = 300.0 + i as f32 * 40.0;
+        j.drag(&[(620.0, y), (940.0, y + 10.0)]);
+    });
+    let painted = count_on(&j, "paint 1");
+    (0..12).for_each(|_| j.chord(CMD, Key::Z));
+    j.look("undone");
+    j.expect(
+        "twelve-strokes-and-twelve-undos",
+        painted == before + 12 && count_on(&j, "paint 1") == before,
+        "twelve strokes land and twelve undos take them off",
+    );
+
+    j.act("move the paper with the space bar held, then draw a line that starts off the paper");
+    let before = (centre(&j), count_on(&j, "paint 1"));
+    j.hold(Key::Space, true);
+    j.drag(&[(500.0, 500.0), (600.0, 560.0)]);
+    j.hold(Key::Space, false);
+    j.look("panned");
+    let after = (centre(&j), count_on(&j, "paint 1"));
+    j.note(format!(
+        "the middle of the view went from {:.0},{:.0} to {:.0},{:.0}",
+        before.0.x, before.0.y, after.0.x, after.0.y
+    ));
+    j.expect(
+        "space-and-a-drag-move-the-paper",
+        (after.0 - before.0).length() > 30.0 && after.1 == before.1,
+        "with space held a drag moves the view and paints nothing",
+    );
+    j.key(Key::F);
+    j.drag(&[(-60.0, 880.0), (140.0, 900.0)]);
+    j.look("from-off-the-paper");
+    let off = last_stroke(&j, "paint 1").and_then(|s| s.samples.first().map(|p| p.pos()));
+    j.note(format!(
+        "paint 1 went from {} to {} marks; the last one starts at {off:?}",
+        after.1,
+        count_on(&j, "paint 1")
+    ));
+    j.expect(
+        "a-line-from-off-the-paper-lands",
+        count_on(&j, "paint 1") == after.1 + 1,
+        "a line that starts beside the paper and runs onto it is painted",
+    );
+
+    j.act("pick a colour on the wheel, keep it in the palette, and take it again from there");
+    let ink = colour(&j);
+    j.click_inside("colour wheel", 0.5, 0.06);
+    let picked = colour(&j);
+    let added = j.click_containing("add colour");
+    j.look("palette");
+    let kept = j.ed().map_or(0, |ed| ed.scene.bundle.doc.palette.len());
+    j.retype("hex", "#101010");
+    let swatch = j.click(&picked);
+    j.look("from-the-palette");
+    j.note(format!(
+        "the wheel gave {picked} (it was {ink}); the palette holds {kept} colours; after a click on its square the colour is {}",
+        colour(&j)
+    ));
+    j.expect(
+        "the-wheel-and-the-palette-keep-a-colour",
+        picked != ink && added && kept == 1 && swatch && colour(&j) == picked,
+        "a colour from the wheel goes into the palette and comes back from it",
+    );
+
+    j.act("look at the brush itself: F5");
+    j.key(Key::F5);
+    j.look("brush-window");
+    j.expect(
+        "f5-opens-the-brush-window",
+        j.ed().is_some_and(|ed| ed.windows.brush),
+        "F5 opens the window that edits the brush",
+    );
+    j.key(Key::F5);
+
+    j.finish(&[]);
+}
+
+fn shapes_in(drawing: &str) -> Vec<(String, String, [f32; 4])> {
+    let Some(klad) = crate::start::draw_binary() else {
+        return Vec::new();
+    };
+    let out = std::process::Command::new(klad)
+        .args(["ls", drawing])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    out.lines()
+        .filter(|l| l.starts_with("  "))
+        .filter_map(|l| {
+            let words: Vec<&str> = l.split_whitespace().collect();
+            let (id, kind) = (words.first()?, words.get(1)?);
+            let place: Vec<f32> = words.get(2)?.split(',').filter_map(|v| v.parse().ok()).collect();
+            let size: Vec<f32> = words.get(3)?.split('x').filter_map(|v| v.parse().ok()).collect();
+            (place.len() == 2 && size.len() == 2)
+                .then(|| (id.to_string(), kind.to_string(), [place[0], place[1], size[0], size[1]]))
+        })
+        .collect()
+}
+
+fn shown_as(drawing: &str, id: &str) -> String {
+    crate::start::draw_binary()
+        .and_then(|klad| {
+            std::process::Command::new(klad)
+                .args(["show", drawing, id])
+                .output()
+                .ok()
+        })
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
+
+#[test]
+fn someone_draws_shapes_and_text() {
+    let mut j = Journey::begin("illustrate-shapes-text", WINDOW, None);
+
+    j.act("make a drawing and drag a rectangle with U");
+    let made = new_drawing(&mut j, "label");
+    if !made {
+        return j.finish(&[]);
+    }
+    let drawing = j.drawing();
+    let kinds = |drawing: &str, kind: &str| -> Vec<(String, [f32; 4])> {
+        shapes_in(drawing)
+            .into_iter()
+            .filter(|(_, k, _)| k == kind)
+            .map(|(id, _, b)| (id, b))
+            .collect()
+    };
+    j.key(Key::U);
+    j.drag(&[(200.0, 200.0), (500.0, 400.0)]);
+    j.look("rectangle");
+    let rects = kinds(&drawing, "rect");
+    j.note(format!(
+        "rectangles: {rects:?}; the layers are {:?}, in hand {}; it said: {}",
+        tree(&j),
+        active_name(&j),
+        j.heard()
+    ));
+    j.expect(
+        "u-drags-a-rectangle",
+        rects.len() == 1
+            && rects
+                .iter()
+                .all(|(_, b)| (b[2] - 300.0).abs() < 8.0 && (b[3] - 200.0).abs() < 8.0),
+        "a drag with U makes a rectangle of the size dragged",
+    );
+
+    j.act("a circle: the ellipse button, and shift held while dragging");
+    j.click("ellipse");
+    j.drag_with(&[(600.0, 200.0), (800.0, 330.0)], Modifiers::SHIFT);
+    j.look("circle");
+    let circles = kinds(&drawing, "ellipse");
+    j.note(format!("ellipses: {circles:?}"));
+    j.expect(
+        "shift-makes-a-circle",
+        circles.len() == 1 && circles.iter().all(|(_, b)| (b[2] - b[3]).abs() < 3.0),
+        "with shift held the ellipse is a circle",
+    );
+
+    j.act("pick the rectangle with V and give it a green fill and a dark outline from the bar");
+    j.key(Key::V);
+    j.tap(350.0, 300.0);
+    j.look("rectangle-picked");
+    let picked = j.ed().and_then(|ed| ed.selection.clone());
+    j.press_hinted("the shape's fill");
+    j.retype_leftmost("hex", "#3a7a4a");
+    j.key(Key::Escape);
+    if j.ed().is_some_and(|ed| ed.selection.is_none()) {
+        j.tap(350.0, 300.0);
+    }
+    j.press_hinted("the shape's outline");
+    j.retype_leftmost("hex", "#202020");
+    j.look("rectangle-coloured");
+    let look = picked.as_deref().map(|id| shown_as(&drawing, id)).unwrap_or_default();
+    j.note(format!(
+        "the rectangle is now: {}",
+        look.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(260)
+            .collect::<String>()
+    ));
+    j.expect(
+        "the-bar-colours-a-shape",
+        look.contains("3a7a4a") && look.contains("202020"),
+        "the bar's two colour buttons set the shape's fill and outline",
+    );
+    j.key(Key::Escape);
+    j.key(Key::Escape);
+
+    j.act("make the rectangle wider by its right edge, and turn it by the knob");
+    j.tap(350.0, 300.0);
+    if let Some(c) = handle_corners(&j) {
+        let edge = c[1].lerp(c[2], 0.5);
+        j.drag_screen(
+            edge,
+            edge + vec2(40.0, 0.0),
+            "the middle of the right edge 40 px to the right",
+        );
+    }
+    j.look("wider");
+    let wide = kinds(&drawing, "rect");
+    j.note(format!("rectangles: {wide:?}"));
+    j.expect(
+        "an-edge-stretches-a-shape",
+        wide.iter().any(|(_, b)| b[2] > 380.0 && (b[3] - 200.0).abs() < 8.0),
+        "dragging an edge makes the rectangle wider and no taller",
+    );
+    if let Some(c) = handle_corners(&j) {
+        let top = c[0].lerp(c[1], 0.5);
+        let centre = (c[0].to_vec2() + c[2].to_vec2()) / 2.0;
+        let knob = top + (top.to_vec2() - centre).normalized() * 30.0;
+        j.drag_screen(
+            knob,
+            knob + vec2(40.0, 12.0),
+            "the knob above the rectangle to the right",
+        );
+    }
+    j.look("turned");
+    let turned = picked.as_deref().map(|id| shown_as(&drawing, id)).unwrap_or_default();
+    j.expect(
+        "the-knob-turns-a-shape",
+        turned.contains("\"rotate\"") && !turned.contains("\"rotate\": 0.0"),
+        "the knob turns the rectangle",
+    );
+    j.chord(CMD, Key::Z);
+    j.key(Key::Escape);
+
+    j.act("draw a roof with the pen: three clicks and a click on the first point to close it");
+    j.key(Key::P);
+    j.tap(200.0, 620.0);
+    j.tap(350.0, 520.0);
+    j.tap(500.0, 620.0);
+    j.tap(200.0, 620.0);
+    j.look("roof");
+    let paths = kinds(&drawing, "path");
+    j.note(format!("paths: {paths:?}; it said: {}", j.heard()));
+    j.expect(
+        "the-pen-closes-a-path",
+        paths.len() == 1 && paths.iter().all(|(_, b)| (b[2] - 300.0).abs() < 12.0),
+        "three clicks and a click on the first point make a closed shape",
+    );
+
+    j.act("lift the top of the roof: A, a click on the shape, a drag on its top point");
+    j.key(Key::A);
+    j.tap(350.0, 590.0);
+    j.look("roof-points");
+    let anchors: Vec<[f32; 2]> = j
+        .ed()
+        .and_then(|ed| ed.shaped.as_ref())
+        .map(|s| {
+            klad_core::pathedit::anchors(&s.subs)
+                .iter()
+                .map(|(_, a)| a.at)
+                .collect()
+        })
+        .unwrap_or_default();
+    j.note(format!("the roof shows {} points", anchors.len()));
+    if let Some(top) = anchors.iter().min_by(|a, b| a[1].total_cmp(&b[1])) {
+        let from = j.at(top[0], top[1]);
+        j.drag_screen(from, from - vec2(0.0, 30.0), "the top point 30 px up");
+        j.wait("the reshaped roof", |ed| {
+            ed.point_drag.is_none() && ed.path_commit.is_none()
+        });
+    }
+    j.look("roof-lifted");
+    let lifted = kinds(&drawing, "path");
+    j.note(format!("paths: {lifted:?}"));
+    j.expect(
+        "a-moves-a-point-of-a-shape",
+        anchors.len() == 3 && lifted.iter().any(|(_, b)| b[3] > 150.0),
+        "A shows the roof's three points and a drag lifts its top",
+    );
+    j.key(Key::Escape);
+
+    j.act("write two lines of text: T, a click, Mushroom, Return, house, Esc");
+    j.key(Key::T);
+    j.tap(560.0, 560.0);
+    j.type_text("Mushroom");
+    j.key(Key::Enter);
+    j.type_text("house");
+    j.look("typing");
+    j.key(Key::Escape);
+    j.look("text");
+    let texts = kinds(&drawing, "text");
+    let words = texts.first().map(|(id, _)| shown_as(&drawing, id)).unwrap_or_default();
+    j.note(format!("texts: {texts:?}; it said: {}", j.heard()));
+    j.expect(
+        "t-types-two-lines",
+        texts.len() == 1 && words.contains("Mushroom") && words.contains("house"),
+        "the text holds both lines",
+    );
+
+    j.act("add to the text: click it with T, type an exclamation mark, Esc");
+    j.tap(600.0, 590.0);
+    j.type_text("!");
+    j.key(Key::Escape);
+    j.look("text-edited");
+    let again = kinds(&drawing, "text");
+    let words = again.first().map(|(id, _)| shown_as(&drawing, id)).unwrap_or_default();
+    j.note(format!("texts: {again:?}"));
+    j.expect(
+        "a-click-on-a-text-edits-it",
+        again.len() == 1 && words.contains('!'),
+        "a click on the text with T edits that text, not a new one",
+    );
+
+    j.act("line the rectangle and the circle up: V, a click, a shift click, align left edges");
+    j.key(Key::V);
+    j.tap(350.0, 300.0);
+    j.tap_with(700.0, 265.0, egui::PointerButton::Primary, Modifiers::SHIFT);
+    j.look("two-shapes");
+    let both = j.ed().map_or(0, |ed| ed.group.len());
+    let aligned = j.press_hinted("align left edges");
+    j.look("aligned");
+    let lefts: Vec<f32> = kinds(&drawing, "rect")
+        .iter()
+        .chain(kinds(&drawing, "ellipse").iter())
+        .map(|(_, b)| b[0])
+        .collect();
+    j.note(format!("{both} shapes selected; their left edges are at {lefts:?}"));
+    j.expect(
+        "two-shapes-align",
+        both == 2 && aligned && lefts.len() == 2 && (lefts[0] - lefts[1]).abs() < 1.5,
+        "two selected shapes line up on their left edges",
+    );
+    j.chord(CMD, Key::Z);
+    j.key(Key::Escape);
+
+    j.act("copy the circle: cmd C and cmd V, then cmd D, then Delete");
+    j.tap(700.0, 265.0);
+    j.chord(CMD, Key::C);
+    j.chord(CMD, Key::V);
+    let pasted = kinds(&drawing, "ellipse").len();
+    j.chord(CMD, Key::D);
+    let doubled = kinds(&drawing, "ellipse").len();
+    j.key(Key::Delete);
+    j.look("copies");
+    let left = kinds(&drawing, "ellipse").len();
+    j.note(format!("ellipses: 1, then {pasted}, then {doubled}, then {left}"));
+    j.expect(
+        "shapes-copy-paste-duplicate-and-delete",
+        pasted == 2 && doubled == 3 && left == 2,
+        "cmd C and cmd V, cmd D and Delete work on a shape",
+    );
+
+    j.finish(&[]);
 }

@@ -150,6 +150,14 @@ impl Journey {
         }
     }
 
+    fn ready(&mut self) {
+        let started = Instant::now();
+        while self.ed().is_some_and(|ed| !ed.canvas_current()) && started.elapsed() < Duration::from_secs(3) {
+            self.pass();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     pub(super) fn settle(&mut self) {
         let started = Instant::now();
         let waiting = |ed: &Editor| !ed.canvas_current() || !ed.jobs.is_empty() || ed.preview.is_some();
@@ -317,20 +325,23 @@ impl Journey {
             .collect()
     }
 
-    fn visible(&self, r: egui::Rect) -> bool {
-        let window = self.h.ctx.content_rect();
-        let Some(canvas) = self.ed().map(|ed| ed.canvas_rect) else {
-            return window.contains(r.center());
-        };
-        let at = r.center();
-        if !window.contains(at) {
-            return false;
-        }
-        let hints = crate::theme::hints(&self.h.ctx);
+    fn hint_of(hints: &[(egui::Rect, String)], r: egui::Rect) -> Option<usize> {
         let same = |a: egui::Rect| (a.min - r.min).abs().max_elem() < 0.5 && (a.max - r.max).abs().max_elem() < 0.5;
-        let Some(me) = hints.iter().position(|(rect, _)| same(*rect)) else {
-            return true;
-        };
+        hints.iter().position(|(rect, _)| same(*rect)).or_else(|| {
+            hints
+                .iter()
+                .enumerate()
+                .filter(|(_, (rect, _))| rect.contains(r.center()) && rect.height() < 60.0)
+                .min_by(|a, b| a.1.0.area().total_cmp(&b.1.0.area()))
+                .map(|(i, _)| i)
+        })
+    }
+
+    fn pane_of(&self, r: egui::Rect) -> Option<(f32, f32)> {
+        let canvas = self.ed()?.canvas_rect;
+        let at = r.center();
+        let hints = crate::theme::hints(&self.h.ctx);
+        let me = Self::hint_of(&hints, r)?;
         let title =
             |text: &str| (text.starts_with("fold ") && text.ends_with(" to its title")) || text.starts_with("open ");
         let top = |i: usize| hints[i].0.center().y - crate::layout::TITLE / 2.0;
@@ -349,20 +360,82 @@ impl Journey {
                         _ => true,
                     }
             });
-        if !docked {
-            return at.y < canvas.bottom() || r.bottom() <= window.bottom() - crate::layout::STATUS + 1.0;
-        }
-        if at.y >= canvas.bottom() {
-            return false;
-        }
-        let Some(pane) = titles.iter().rposition(|t| *t <= me) else {
-            return true;
-        };
+        let pane = titles.iter().rposition(|t| *t <= me).filter(|_| docked)?;
         let body = top(titles[pane]) + crate::layout::TITLE;
         let floor = titles
             .get(pane + 1)
             .map_or(canvas.bottom(), |next| top(*next).min(canvas.bottom()));
-        (at.y < body && at.y >= body - crate::layout::TITLE) || (r.top() >= body - 1.0 && r.bottom() <= floor + 1.0)
+        Some((body, floor))
+    }
+
+    fn raised(&self, at: Pos2) -> bool {
+        self.h
+            .ctx
+            .layer_id_at(at)
+            .is_some_and(|layer| layer.order != egui::Order::Background)
+    }
+
+    fn visible(&self, r: egui::Rect) -> bool {
+        let window = self.h.ctx.content_rect();
+        let Some(canvas) = self.ed().map(|ed| ed.canvas_rect) else {
+            return window.contains(r.center());
+        };
+        let at = r.center();
+        if !window.contains(at) {
+            return false;
+        }
+        if self.raised(at) {
+            return true;
+        }
+        if canvas.contains(at) {
+            return false;
+        }
+        let hints = crate::theme::hints(&self.h.ctx);
+        if Self::hint_of(&hints, r).is_none() {
+            return true;
+        }
+        match self.pane_of(r) {
+            Some((body, floor)) => {
+                at.y < canvas.bottom()
+                    && ((at.y < body && at.y >= body - crate::layout::TITLE)
+                        || (r.top() >= body - 1.0 && r.bottom() <= floor + 1.0))
+            }
+            None => at.y < canvas.bottom() || r.bottom() <= window.bottom() - crate::layout::STATUS + 1.0,
+        }
+    }
+
+    pub(super) fn scroll_to(&mut self, label: &str) -> bool {
+        let mut turns = 0;
+        while turns < 24 && !self.in_sight(label) {
+            let Some((r, body, floor)) = self
+                .h
+                .query_all_by_label(label)
+                .map(|n| n.rect())
+                .find_map(|r| self.pane_of(r).map(|(body, floor)| (r, body, floor)))
+            else {
+                break;
+            };
+            let over = egui::pos2(r.center().x, (body + floor) / 2.0);
+            let down = r.bottom() > floor;
+            self.h.event(egui::Event::PointerMoved(over));
+            self.h.run_steps(1);
+            self.h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, if down { -40.0 } else { 40.0 }),
+                modifiers: Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            });
+            self.h.run_steps(3);
+            turns += 1;
+        }
+        let seen = self.in_sight(label);
+        self.note(match (seen, turns) {
+            (true, 0) => format!("\"{label}\" is in sight"),
+            (true, n) => format!("scrolled its panel {n} times to bring \"{label}\" in sight"),
+            (false, _) => format!("looked for \"{label}\": it could not be brought in sight"),
+        });
+        seen
     }
 
     fn hinted(&self, hint: &str) -> Option<(egui::Rect, String, bool)> {
@@ -535,6 +608,22 @@ impl Journey {
         self.h.run_steps(3);
     }
 
+    pub(super) fn hold(&mut self, key: Key, down: bool) {
+        self.note(format!(
+            "{} {}",
+            if down { "held down" } else { "let go of" },
+            key.name()
+        ));
+        self.h.event(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: down,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        });
+        self.h.run_steps(2);
+    }
+
     pub(super) fn chord(&mut self, modifiers: Modifiers, key: Key) {
         self.note(format!(
             "pressed {}{}{}{}",
@@ -579,12 +668,21 @@ impl Journey {
         }
     }
 
+    fn poke(&mut self, at: Pos2) {
+        self.h.hover_at(at);
+        self.h.run_steps(1);
+        self.press(at, egui::PointerButton::Primary, true, Modifiers::NONE);
+        self.press(at, egui::PointerButton::Primary, false, Modifiers::NONE);
+    }
+
     pub(super) fn click(&mut self, label: &str) -> bool {
         let chosen = self.choose(label, |_| true);
-        if let Ok(i) = chosen
-            && let Some(n) = self.h.query_all_by_label(label).nth(i)
-        {
-            n.click();
+        let at = chosen
+            .ok()
+            .and_then(|i| self.h.query_all_by_label(label).nth(i))
+            .map(|n| n.rect().center());
+        if let Some(at) = at {
+            self.poke(at);
         }
         self.note(match chosen {
             Ok(_) => format!("clicked \"{label}\""),
@@ -594,13 +692,80 @@ impl Journey {
         chosen.is_ok()
     }
 
+    pub(super) fn pick_in_list(&mut self, list: &str, item: &str) -> bool {
+        let Some(top) = self.h.query_all_by_label(list).next().map(|n| n.rect()) else {
+            self.note(format!("looked for the list \"{list}\": not on screen"));
+            return false;
+        };
+        self.click(list);
+        self.h.run_steps(12);
+        let below = egui::pos2(top.center().x, top.bottom() + 40.0);
+        let reach = |j: &Self| {
+            j.h.query_all_by_label(item).map(|n| n.rect()).find(|r| {
+                r.center().y > top.bottom()
+                    && (r.center().x - top.center().x).abs() < 200.0
+                    && [-10.0, 0.0, 10.0]
+                        .iter()
+                        .all(|dy| j.raised(r.center() + vec2(0.0, *dy)))
+            })
+        };
+        let mut scrolled = 0;
+        while reach(self).is_none() && scrolled < 40 {
+            let x = top.center().x;
+            let floor = (1..120)
+                .map(|i| top.bottom() + 6.0 + i as f32 * 8.0)
+                .take_while(|y| self.raised(egui::pos2(x, *y)))
+                .last()
+                .unwrap_or(top.bottom() + 40.0);
+            let above = self
+                .h
+                .query_all_by_label(item)
+                .map(|n| n.rect())
+                .any(|r| (r.center().x - x).abs() < 200.0 && r.center().y < (top.bottom() + floor) / 2.0);
+            self.h.event(egui::Event::PointerMoved(below));
+            self.h.run_steps(1);
+            self.h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, if above { 30.0 } else { -30.0 }),
+                modifiers: Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            });
+            self.h.run_steps(10);
+            scrolled += 1;
+        }
+        let found = reach(self);
+        self.note(match (found, scrolled) {
+            (Some(_), 0) => format!("chose \"{item}\" in the list"),
+            (Some(_), n) => format!("scrolled the list {n} times to reach \"{item}\" and chose it"),
+            (None, _) => format!("looked for \"{item}\" in the list: not reached"),
+        });
+        match found {
+            Some(r) => {
+                self.poke(r.center());
+                self.h.run_steps(3);
+                true
+            }
+            None => {
+                self.h.key_press(Key::Escape);
+                self.h.run_steps(2);
+                false
+            }
+        }
+    }
+
     pub(super) fn click_containing(&mut self, label: &str) -> bool {
-        let found = self
+        let at = self
             .h
             .query_all_by_label_contains(label)
-            .find(|n| n.accesskit_node().role() != Role::Window)
-            .map(|n| n.click())
-            .is_some();
+            .filter(|n| n.accesskit_node().role() != Role::Window)
+            .map(|n| n.rect())
+            .find(|r| self.visible(*r))
+            .map(|r| r.center());
+        if let Some(at) = at {
+            self.poke(at);
+        }
+        let found = at.is_some();
         self.note(match found {
             true => format!("clicked the control saying \"{label}\""),
             false => format!("looked for a control saying \"{label}\": not on screen"),
@@ -610,8 +775,9 @@ impl Journey {
     }
 
     pub(super) fn menu(&mut self, menu: &str, sub: &str, item: &str) -> bool {
-        if let Some(n) = self.h.query_all_by_label(menu).next() {
-            n.click();
+        let bar = self.h.query_all_by_label(menu).next().map(|n| n.rect().center());
+        if let Some(at) = bar {
+            self.poke(at);
         }
         self.h.run_steps(2);
         let middle = self
@@ -623,12 +789,15 @@ impl Journey {
             self.h.hover_at(at);
             self.h.run_steps(3);
         }
-        let found = self
+        let at = self
             .h
             .query_all_by_label(item)
             .find(|n| !n.accesskit_node().is_disabled())
-            .map(|n| n.click())
-            .is_some();
+            .map(|n| n.rect().center());
+        if let Some(at) = at {
+            self.poke(at);
+        }
+        let found = at.is_some();
         self.note(match found {
             true => format!("chose {menu} > {sub} > {item}"),
             false => format!("looked for {menu} > {sub} > {item}: not there, or greyed out"),
@@ -652,6 +821,7 @@ impl Journey {
             Err(hidden) => Self::missing(label, hidden, "double click"),
         });
         if let Some(at) = at {
+            self.h.run_steps(15);
             self.h.hover_at(at);
             self.h.run_steps(1);
             (0..2).for_each(|_| {
@@ -687,10 +857,12 @@ impl Journey {
 
     pub(super) fn retype(&mut self, label: &str, text: &str) -> bool {
         let chosen = self.choose(label, |role| matches!(role, Role::TextInput | Role::MultilineTextInput));
-        if let Ok(i) = chosen
-            && let Some(n) = self.h.query_all_by_label(label).nth(i)
-        {
-            n.click();
+        let at = chosen
+            .ok()
+            .and_then(|i| self.h.query_all_by_label(label).nth(i))
+            .map(|n| n.rect().center());
+        if let Some(at) = at {
+            self.poke(at);
         }
         let found = chosen.is_ok();
         self.h.run_steps(2);
@@ -710,12 +882,16 @@ impl Journey {
     }
 
     pub(super) fn click_leftmost(&mut self, label: &str) -> bool {
-        let found = self
+        let at = self
             .h
             .query_all_by_label(label)
-            .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
-            .map(|n| n.click())
-            .is_some();
+            .map(|n| n.rect())
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .map(|r| r.center());
+        if let Some(at) = at {
+            self.poke(at);
+        }
+        let found = at.is_some();
         self.note(match found {
             true => format!("clicked \"{label}\", the one furthest left"),
             false => format!("looked for \"{label}\" to click: not on screen"),
@@ -729,9 +905,13 @@ impl Journey {
             .h
             .query_all_by_label(label)
             .filter(|n| matches!(n.accesskit_node().role(), Role::TextInput | Role::MultilineTextInput))
-            .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
-            .map(|n| n.click())
-            .is_some();
+            .map(|n| n.rect())
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .map(|r| r.center());
+        if let Some(at) = found {
+            self.poke(at);
+        }
+        let found = found.is_some();
         self.h.run_steps(2);
         if found {
             self.h.key_press_modifiers(Modifiers::COMMAND, Key::A);
@@ -818,6 +998,7 @@ impl Journey {
                 " with a modifier held"
             }
         ));
+        self.ready();
         self.h.event(egui::Event::ModifiersChanged(modifiers));
         self.h.hover_at(screen[0]);
         self.h.run_steps(1);
@@ -852,6 +1033,52 @@ impl Journey {
         let at = self.at(x, y);
         self.note(format!("let go at {x:.0},{y:.0}"));
         self.press(at, egui::PointerButton::Primary, false, Modifiers::NONE);
+        self.h.run_steps(3);
+    }
+
+    pub(super) fn pen_stroke(&mut self, points: &[(f32, f32, f32)]) {
+        let screen: Vec<(Pos2, f32)> = points
+            .iter()
+            .map(|(x, y, pressure)| (self.at(*x, *y), *pressure))
+            .collect();
+        let (light, hard) = points
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(lo, hi), p| (lo.min(p.2), hi.max(p.2)));
+        self.note(format!(
+            "drew with a pen from {:.0},{:.0} to {:.0},{:.0} through {} points, pressing {light:.1} to {hard:.1}",
+            points[0].0,
+            points[0].1,
+            points[points.len() - 1].0,
+            points[points.len() - 1].1,
+            points.len()
+        ));
+        self.ready();
+        let touch = |phase, pos, force| egui::Event::Touch {
+            device_id: egui::TouchDeviceId(7),
+            id: egui::TouchId(1),
+            phase,
+            pos,
+            force: Some(force),
+        };
+        let (first, last) = (screen[0], screen[screen.len() - 1]);
+        self.h.hover_at(first.0);
+        self.h.run_steps(1);
+        self.h.event(touch(egui::TouchPhase::Start, first.0, first.1));
+        self.h.run_steps(1);
+        screen.windows(2).for_each(|pair| {
+            (1..=4).for_each(|i| {
+                let t = i as f32 / 4.0;
+                let at = pair[0].0 + (pair[1].0 - pair[0].0) * t;
+                self.h.event(touch(
+                    egui::TouchPhase::Move,
+                    at,
+                    pair[0].1 + (pair[1].1 - pair[0].1) * t,
+                ));
+                self.h.run_steps(1);
+                std::thread::sleep(Duration::from_millis(4));
+            });
+        });
+        self.h.event(touch(egui::TouchPhase::End, last.0, 0.0));
         self.h.run_steps(3);
     }
 
