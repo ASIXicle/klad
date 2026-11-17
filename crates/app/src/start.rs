@@ -335,6 +335,7 @@ impl Start {
                     .labelled_by(label.id);
                 if !self.focused && self.section == Section::New {
                     name.request_focus();
+                    theme::select_all(ui.ctx(), name.id, &self.name);
                 }
                 entered = name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.end_row();

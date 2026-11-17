@@ -56,7 +56,7 @@ impl Editor {
         Self::window(
             ctx,
             "first steps",
-            (format!("{} First steps", icon::INFO), corner),
+            (format!("{} First steps", icon::INFO), super::panels::Spot::At(corner)),
             &mut open,
             |ui| {
                 ui.set_width(340.0);

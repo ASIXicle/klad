@@ -1,4 +1,4 @@
-_Last updated: 2026-11-08 14:50_
+_Last updated: 2026-11-17 09:25_
 
 # Animating frame by frame
 
@@ -22,11 +22,20 @@ Press **,** and **.** to go a frame back and forward. Or hold **Q** and move the
 
 ## Change the timing
 
-Press **=** to hold the drawing under the playhead a frame longer, and **-** to make it a frame shorter. Later drawings move along.
+Click the drawing's cell in the timeline, then press **=** to hold it a frame longer and **-** to take that back. Later drawings move along.
+
+These keys, and **I** to insert a frame, work while the timeline is in use: a blue line around the frames shows that it has the keys. After a stroke on the canvas, click a frame first, or use the **Frame** menu, which works from anywhere.
 
 ## Start a pose from the last one
 
 Right click the drawing's cell in the timeline and pick **duplicate to the next frame**, then change the copy into the next pose.
+
+## Repeat a run of frames
+
+1. Drag over the frames in the timeline. To take every frame, click a frame and press **cmd A**.
+2. Press **cmd D**, or click the duplicate button above the frames.
+
+The frames are repeated right after themselves as copies, and the copies are selected, so **cmd D** again adds another round. While frames are selected, **cmd C** and **cmd V** copy and paste them, and **Delete** removes their drawings.
 
 ## Make clips for a game
 

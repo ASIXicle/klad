@@ -25,6 +25,36 @@ pub fn drawings() -> PathBuf {
     home().map_or_else(|| PathBuf::from("Drawings"), |h| h.join("Drawings"))
 }
 
+pub fn tilde(path: &std::path::Path) -> String {
+    match home().and_then(|h| path.strip_prefix(&h).ok().map(|rest| rest.to_path_buf())) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+pub fn open_outside(target: &str) -> std::io::Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    let (program, before): (&str, &[&str]) = match () {
+        () if cfg!(target_os = "macos") => ("open", &[]),
+        () if cfg!(target_os = "windows") => ("rundll32", &["url.dll,FileProtocolHandler"]),
+        () => ("xdg-open", &[]),
+    };
+    let mut child = std::process::Command::new(program)
+        .args(before)
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -496,8 +496,11 @@ impl Editor {
                     )
                     .hint("the outline's width");
                     ui.label(
-                        RichText::new("drag on a vector layer; shift for a square or circle, alt from the centre")
-                            .color(theme::WEAK),
+                        RichText::new(match self.draws_on_vector() {
+                            true => "drag for a shape; shift for a square or circle, alt from the centre",
+                            false => "drag for a shape: it goes on a new vector layer above this one; shift for a square or circle, alt from the centre",
+                        })
+                        .color(theme::WEAK),
                     );
                 }
                 Tool::Text => self.check(|e| e.text_options(ui)),
@@ -515,19 +518,13 @@ impl Editor {
                             .suffix(" px"),
                     )
                     .hint("the outline's width");
-                    match self
-                        .scene
-                        .active_layer()
-                        .is_some_and(|l| l.kind() == klad_core::doc::Kind::Vector)
-                    {
-                        true => ui.label(
-                            RichText::new(
-                                "click for corners, drag for curves, click the first point to close, Return finishes, Esc drops it",
-                            )
-                            .color(theme::WEAK),
-                        ),
-                        false => ui.colored_label(theme::REFUSED, "pick a vector layer: the pen draws vector paths"),
-                    };
+                    ui.label(
+                        RichText::new(match self.draws_on_vector() {
+                            true => "click for corners, drag for curves, click the first point to close, Return finishes, Esc drops it",
+                            false => "the path goes on a new vector layer above this one: click for corners, drag for curves, click the first point to close, Return finishes, Esc drops it",
+                        })
+                        .color(theme::WEAK),
+                    );
                 }
                 Tool::Note => {
                     ui.label(

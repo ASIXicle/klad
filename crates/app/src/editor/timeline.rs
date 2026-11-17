@@ -1,7 +1,7 @@
 use super::clips::{self, Hit, Strip};
 use super::layers::{self, LayerRow};
 use super::tweens::{self, Span};
-use super::{Editor, ms};
+use super::{Editor, cells, ms};
 use crate::commands::Cmd;
 use crate::composite::CanvasDone;
 use crate::frames::Player;
@@ -861,7 +861,54 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn select_all_frames(&mut self) {
+        let rows = self.timeline_rows();
+        let last = self.scene.bundle.doc.timeline.frames - 1;
+        self.timeline.span = span_of(&rows, (0, last), (0, rows.len().saturating_sub(1)), (0, 0));
+        self.focus = super::Focus::Timeline;
+        if let Some(span) = &self.timeline.span {
+            self.say(
+                Tone::Done,
+                format!(
+                    "selected frames 0 to {last} of {}: cmd C copies them, cmd D repeats them after themselves",
+                    match span.rows.len() {
+                        1 => "one layer".to_string(),
+                        n => format!("{n} layers"),
+                    }
+                ),
+            );
+        }
+    }
+
+    fn duplicate_span(&mut self, span: tweens::Span) -> Result<()> {
+        let ops = cells::repeat_ops(&self.scene.bundle.doc, &span.rows, span.from, span.to);
+        let count = span.to + 1 - span.from;
+        if self.timeline_apply(ops)?.is_some() {
+            self.timeline.span = Some(tweens::Span {
+                from: span.to + 1,
+                to: span.to + count,
+                anchor: (span.to + 1, span.anchor.1),
+                ..span.clone()
+            });
+            self.go_to(span.to + 1)?;
+            self.say(
+                Tone::Done,
+                format!(
+                    "frames {} to {} are repeated after themselves as copies, on frames {} to {}: they are selected, so cmd D repeats them again",
+                    span.from,
+                    span.to,
+                    span.to + 1,
+                    span.to + count
+                ),
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn duplicate_next(&mut self) -> Result<()> {
+        if let Some(span) = self.timeline.span.clone() {
+            return self.duplicate_span(span);
+        }
         let Some((_, Some((cel, end)))) = self.here() else {
             self.say(Tone::Refused, "nothing to duplicate on this frame");
             return Ok(());
@@ -893,8 +940,33 @@ impl Editor {
     }
 
     pub(super) fn delete_here(&mut self) -> Result<()> {
-        if let Some((_, Some((cel, _)))) = self.here() {
-            self.timeline_apply(vec![Op::Remove { ids: vec![cel.id] }])?;
+        let doc = &self.scene.bundle.doc;
+        let ids: Vec<String> = match &self.timeline.span {
+            Some(span) => span
+                .rows
+                .iter()
+                .filter_map(|id| doc.layer(id))
+                .flat_map(|l| l.cels().iter())
+                .filter(|c| c.frame >= span.from && c.frame <= span.to)
+                .map(|c| c.id.clone())
+                .collect(),
+            None => self
+                .here()
+                .and_then(|(_, cel)| cel)
+                .map(|(cel, _)| cel.id)
+                .into_iter()
+                .collect(),
+        };
+        let (count, spanned, frame) = (ids.len(), self.timeline.span.is_some(), self.scene.frame);
+        if !ids.is_empty() && self.timeline_apply(vec![Op::Remove { ids }])?.is_some() {
+            self.say(
+                Tone::Done,
+                match (spanned, count) {
+                    (false, _) => format!("deleted the drawing on frame {frame} (cmd Z brings it back)"),
+                    (true, 1) => "deleted the one drawing in the selected frames (cmd Z brings it back)".to_string(),
+                    (true, n) => format!("deleted the {n} drawings in the selected frames (cmd Z brings them back)"),
+                },
+            );
         }
         Ok(())
     }
@@ -961,7 +1033,46 @@ impl Editor {
             return Ok(());
         }
         let to = (end as i64 + delta as i64).max(cel.frame as i64 + 1) as u32;
-        self.resize(&layer, &cel.id, (cel.frame, end, open), to)
+        if delta >= 0 {
+            return self.resize(&layer, &cel.id, (cel.frame, end, open), to);
+        }
+        let doc = &self.scene.bundle.doc;
+        let shorter = |frames: u32| Op::Timeline {
+            fps: None,
+            frames: Some(frames - 1),
+            origin: None,
+        };
+        let reached_the_end = doc
+            .layer(&layer)
+            .and_then(|l| l.cels().last())
+            .is_some_and(|last| last.hold.is_some_and(|h| last.frame + h == frames));
+        let ops = match open {
+            true if cells::free_at_the_end(doc) => vec![shorter(frames)],
+            true => vec![Op::Set {
+                id: cel.id.clone(),
+                props: Map::from_iter([("hold".to_string(), json!(to - cel.frame))]),
+            }],
+            false => {
+                let remove = Op::Frames(FrameSpec {
+                    insert: false,
+                    at: to,
+                    count: end - to,
+                    layers: Some(vec![layer.clone()]),
+                });
+                let after = klad_core::ops::apply_all(doc, std::slice::from_ref(&remove))
+                    .ok()
+                    .map(|(doc, _)| doc);
+                match after.filter(|d| reached_the_end && cells::free_at_the_end(d)) {
+                    Some(after) => vec![remove, shorter(after.timeline.frames)],
+                    None => vec![remove],
+                }
+            }
+        };
+        let last = frames.saturating_sub(2);
+        if self.timeline_apply(ops)?.is_some() && self.scene.frame >= self.scene.bundle.doc.timeline.frames {
+            self.go_to(last)?;
+        }
+        Ok(())
     }
 
     pub(super) fn add_layer(&mut self, kind: &str) -> Result<()> {
@@ -1416,6 +1527,17 @@ impl Editor {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if self.timeline.drag.is_none() && hover_dot {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if response.drag_started() || response.clicked() || response.secondary_clicked() {
+            self.focus = super::Focus::Timeline;
+        }
+        if self.focus == super::Focus::Timeline {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                0.0,
+                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
         }
         let mut pick: Option<(u32, Option<usize>)> = None;
         let shift = ui.input(|i| i.modifiers.shift);

@@ -70,6 +70,83 @@ pub(super) fn paste_ops(doc: &Document, cells: &[CellCopy], at: u32, links: bool
         .collect()
 }
 
+pub(super) fn free_at_the_end(doc: &Document) -> bool {
+    let frames = doc.timeline.frames;
+    let last = frames.saturating_sub(1);
+    frames > 1
+        && !doc.timeline.clips.iter().any(|c| c.to >= last)
+        && doc.all_layers().iter().all(|l| {
+            let cels = l.cels();
+            cels.iter()
+                .zip(ends(cels))
+                .all(|(c, end)| c.frame < last && (end == OPEN || end <= last))
+        })
+}
+
+pub(super) fn repeat_ops(doc: &Document, rows: &[String], from: u32, to: u32) -> Vec<Op> {
+    let frames = doc.timeline.frames;
+    let (at, count) = (to + 1, to + 1 - from);
+    let layers: Vec<&Layer> = rows
+        .iter()
+        .filter_map(|id| doc.layer(id))
+        .filter(|l| !l.cels().is_empty())
+        .collect();
+    let covering = |layer: &Layer| {
+        exposures(layer, frames)
+            .into_iter()
+            .find(|(_, start, end)| *start <= to && *end > to)
+    };
+    let cel_op = |action: CelAction, frame: u32, hold: Option<u32>| {
+        Op::Cel(CelSpec {
+            action,
+            id: None,
+            frame: Some(frame),
+            hold,
+            insert: false,
+        })
+    };
+    let splits = layers
+        .iter()
+        .filter_map(|l| covering(l).filter(|(_, _, end)| *end > at))
+        .map(|(cel, _, _)| {
+            cel_op(
+                CelAction::Link {
+                    cel: cel.link.clone().unwrap_or(cel.id),
+                },
+                at,
+                None,
+            )
+        });
+    let room = Op::Frames(klad_core::timing::FrameSpec {
+        insert: true,
+        at: to,
+        count,
+        layers: Some(rows.to_vec()),
+    });
+    let copies = layers.iter().flat_map(|l| {
+        let cells = copy_cells(doc, std::slice::from_ref(&l.id), from, to);
+        let lands_at_once = cells.first().is_some_and(|c| c.offset == 0);
+        let restore = covering(l)
+            .filter(|(cel, _, _)| cel.hold.is_some() || !lands_at_once)
+            .map(|(cel, start, _)| Op::Set {
+                id: cel.id,
+                props: serde_json::Map::from_iter([("hold".to_string(), serde_json::json!(at - start))]),
+            });
+        let pastes = cells.into_iter().map(|c| {
+            cel_op(
+                match c.link {
+                    true => CelAction::Link { cel: c.source },
+                    false => CelAction::Dup { cel: c.source },
+                },
+                at + c.offset,
+                Some(c.length),
+            )
+        });
+        restore.into_iter().chain(pastes).collect::<Vec<_>>()
+    });
+    splits.chain(std::iter::once(room)).chain(copies).collect()
+}
+
 impl Editor {
     pub(super) fn copy_selected_cells(&mut self) {
         let (rows, from, to) = match &self.timeline.span {
@@ -290,6 +367,92 @@ mod tests {
         }
         doc.layers.push(layer);
         doc
+    }
+
+    fn shown(doc: &Document, layer: &str) -> Vec<(u32, u32, bool)> {
+        let frames = doc.timeline.frames;
+        exposures(doc.layer(layer).unwrap(), frames)
+            .into_iter()
+            .map(|(c, start, end)| (start, end, c.link.is_some()))
+            .collect()
+    }
+
+    fn held(cels: &[(&str, u32, Option<u32>)], frames: u32) -> Document {
+        let mut doc = Document::new(64, 64);
+        doc.timeline.frames = frames;
+        let mut layer = Layer::paint("l1", "lines", cels[0].0);
+        if let Some(list) = layer.cels_mut() {
+            list.clear();
+            cels.iter().for_each(|(id, frame, hold)| {
+                let mut cel = Cel::at(id, *frame);
+                cel.hold = *hold;
+                list.push(cel);
+            });
+        }
+        doc.layers.push(layer);
+        doc
+    }
+
+    #[test]
+    fn selected_frames_repeat_after_themselves_as_copies_and_what_follows_moves_along() {
+        let twos = held(&[("c1", 0, Some(2)), ("c2", 2, Some(2)), ("c3", 4, Some(2))], 6);
+        let (after, _) = klad_core::ops::apply_all(&twos, &repeat_ops(&twos, &["l1".into()], 0, 5)).unwrap();
+        assert_eq!(
+            shown(&after, "l1"),
+            [
+                (0, 2, false),
+                (2, 4, false),
+                (4, 6, false),
+                (6, 8, false),
+                (8, 10, false),
+                (10, 12, false)
+            ],
+            "three drawings on twos become six, none of them a link"
+        );
+        assert_eq!(after.timeline.frames, 12);
+
+        let open = held(&[("c1", 0, Some(2)), ("c2", 2, None)], 6);
+        let (after, _) = klad_core::ops::apply_all(&open, &repeat_ops(&open, &["l1".into()], 0, 5)).unwrap();
+        assert_eq!(
+            shown(&after, "l1"),
+            [(0, 2, false), (2, 6, false), (6, 8, false), (8, 12, false)],
+            "a last drawing that runs to the end keeps its length"
+        );
+
+        let part = held(&[("c1", 0, Some(4)), ("c2", 4, Some(2))], 6);
+        let (after, _) = klad_core::ops::apply_all(&part, &repeat_ops(&part, &["l1".into()], 0, 1)).unwrap();
+        assert_eq!(
+            shown(&after, "l1"),
+            [(0, 2, false), (2, 4, false), (4, 6, true), (6, 8, false)],
+            "half a hold repeats as a copy, and the other half still shows the same drawing after it"
+        );
+        assert_eq!(after.timeline.frames, 8);
+
+        let late = held(&[("c1", 2, Some(2))], 6);
+        let (after, _) = klad_core::ops::apply_all(&late, &repeat_ops(&late, &["l1".into()], 0, 5)).unwrap();
+        assert_eq!(
+            shown(&after, "l1"),
+            [(2, 4, false), (8, 10, false)],
+            "blank frames in the selection stay blank in the copy"
+        );
+    }
+
+    #[test]
+    fn the_last_frame_is_free_when_only_open_drawings_run_into_it() {
+        let open = held(&[("c1", 0, Some(2)), ("c2", 2, None)], 6);
+        assert!(free_at_the_end(&open));
+        let filled = held(&[("c1", 0, Some(2)), ("c2", 2, Some(4))], 6);
+        assert!(
+            !free_at_the_end(&filled),
+            "a drawing held up to the last frame is content there"
+        );
+        let starts = held(&[("c1", 0, Some(5)), ("c2", 5, None)], 6);
+        assert!(
+            !free_at_the_end(&starts),
+            "a drawing that starts on the last frame is content there"
+        );
+        let single = held(&[("c1", 0, None)], 1);
+        assert!(!free_at_the_end(&single), "one frame cannot go");
     }
 
     #[test]

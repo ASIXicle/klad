@@ -46,6 +46,7 @@ pub(super) struct Rename {
     pub id: String,
     pub text: String,
     pub place: Where,
+    pub fresh: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -330,10 +331,11 @@ impl Editor {
             _ => icon::BRUSH,
         };
         child.label(RichText::new(kind).color(theme::WEAK));
-        let rename = |text: String| Rename {
+        let rename = |text: String, fresh: bool| Rename {
             id: row.id.clone(),
             text,
             place,
+            fresh,
         };
         let renaming = self
             .renaming
@@ -341,12 +343,15 @@ impl Editor {
             .is_some_and(|r| r.id == row.id && r.place == place);
         if renaming {
             let mut text = self.renaming.as_ref().map(|r| r.text.clone()).unwrap_or_default();
-            let label = child.label("rename");
+            let fresh = self.renaming.as_ref().is_some_and(|r| r.fresh);
             let edit = child
-                .add(egui::TextEdit::singleline(&mut text).desired_width(90.0))
-                .labelled_by(label.id)
+                .add(egui::TextEdit::singleline(&mut text).desired_width(120.0))
                 .hint("the new name; Return keeps it, Esc leaves it");
+            edit.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "rename"));
             edit.request_focus();
+            if fresh {
+                theme::select_all(child.ctx(), edit.id, &text);
+            }
             let (enter, escape) = child.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
             match (enter || edit.lost_focus(), escape) {
                 (_, true) => self.renaming = None,
@@ -357,7 +362,7 @@ impl Editor {
                     }
                     self.renaming = None;
                 }
-                _ => self.renaming = Some(rename(text)),
+                _ => self.renaming = Some(rename(text, false)),
             }
         } else {
             let name = child.add(
@@ -366,7 +371,7 @@ impl Editor {
                     .sense(Sense::click()),
             );
             if name.double_clicked() {
-                self.renaming = Some(rename(row.name.clone()));
+                self.renaming = Some(rename(row.name.clone(), true));
             }
             if name.clicked() {
                 self.row_click(ui, row);
@@ -501,7 +506,7 @@ impl Editor {
             self.row_click(ui, row);
         }
         if response.double_clicked() && !row.mask {
-            self.renaming = Some(rename(row.name.clone()));
+            self.renaming = Some(rename(row.name.clone(), true));
         }
         if !ops.is_empty() {
             self.check(|e| e.apply(ops));

@@ -355,7 +355,10 @@ impl Home {
             self.close(&ctx);
         }
         let tour = self.start.as_ref().is_some_and(|s| s.tour);
-        if let Some(path) = chosen.or(from_menu).or_else(crate::opened::take)
+        if let Some(path) = chosen
+            .or(from_menu)
+            .or_else(|| dropped(&ctx))
+            .or_else(crate::opened::take)
             && let Err(e) = self.open(&ctx, &path).inspect(|_| {
                 if let Some(editor) = self.editor.as_mut().filter(|_| tour) {
                     editor.start_first_steps();
@@ -372,7 +375,44 @@ impl Home {
                 (None, None) => {}
             }
         }
+        self.open_links(&ctx);
     }
+
+    fn open_links(&mut self, ctx: &egui::Context) {
+        let links: Vec<String> = ctx.output_mut(|o| {
+            let (links, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut o.commands)
+                .into_iter()
+                .partition(|c| matches!(c, egui::OutputCommand::OpenUrl(_)));
+            o.commands = rest;
+            links
+                .into_iter()
+                .filter_map(|c| match c {
+                    egui::OutputCommand::OpenUrl(open) => Some(open.url),
+                    _ => None,
+                })
+                .collect()
+        });
+        links.into_iter().for_each(|url| {
+            if let Err(e) = crate::places::open_outside(&url) {
+                let message = format!("could not open {url}: {e}");
+                match (self.editor.as_mut(), self.start.as_mut()) {
+                    (Some(editor), _) => editor.error(message),
+                    (None, Some(start)) => start.error = Some(message),
+                    (None, None) => {}
+                }
+            }
+        });
+    }
+}
+
+fn dropped(ctx: &egui::Context) -> Option<PathBuf> {
+    ctx.input(|i| {
+        i.raw
+            .dropped_files
+            .iter()
+            .map(|f| f.path().to_path_buf())
+            .find(|p| start::foreign(p) || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("klad")))
+    })
 }
 
 impl eframe::App for Home {
@@ -426,6 +466,19 @@ mod tests {
         h
     }
 
+    #[derive(Debug)]
+    struct Dropped(PathBuf);
+
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
     fn small() -> Blank {
         Blank {
             width: 320,
@@ -448,6 +501,39 @@ mod tests {
             .bundle
             .root
             .clone()
+    }
+
+    #[test]
+    fn a_drawing_dropped_on_the_window_opens_from_the_start_window_and_over_another_drawing() {
+        let dir = folder("dropped");
+        let (one, two) = (dir.join("one.klad"), dir.join("two.klad"));
+        Bundle::blank(&one, &small(), "cli").unwrap();
+        Bundle::blank(&two, &small(), "cli").unwrap();
+        let mut first = home(&dir, &[]);
+        first.begin(&egui::Context::default(), None);
+        let mut h = harness(first);
+        assert!(h.state().editor.is_none());
+        let drop = |h: &mut Harness<'static, Home>, path: &Path| {
+            h.input_mut()
+                .dropped_files
+                .push(std::sync::Arc::new(Dropped(path.to_path_buf())));
+            h.run_steps(4);
+        };
+        drop(&mut h, &one);
+        assert_eq!(opened(&h), one, "a drawing dropped on the start window opens");
+        drop(&mut h, &two);
+        assert_eq!(opened(&h), two, "and one dropped on an open drawing takes its place");
+        let layers = h.state().editor.as_ref().unwrap().scene.bundle.doc.layers.len();
+        let empty = dir.join("empty.klad");
+        std::fs::create_dir_all(&empty).unwrap();
+        drop(&mut h, &empty);
+        assert_eq!(opened(&h), two, "a folder that is no drawing leaves the open one alone");
+        assert!(
+            h.query_all_by_label_contains("empty.klad").count() > 0,
+            "and says which file it could not open"
+        );
+        assert_eq!(h.state().editor.as_ref().unwrap().scene.bundle.doc.layers.len(), layers);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -84,6 +84,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const HANDLE: f32 = 12.0;
+const DROPPER: f32 = 22.0;
+const TWIST_PAUSE: f64 = 0.3;
+const CHANNEL_TRACK: f32 = 150.0;
 const REFILL_MS: f64 = 8.0;
 const FINISH_WAIT: Duration = Duration::from_secs(2);
 const DRAG_SLOP: f32 = 3.0;
@@ -119,6 +122,59 @@ fn to_local(m: [f32; 6], c: Vec2) -> [f32; 2] {
 fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Focus {
+    Canvas,
+    Timeline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Mixing {
+    model: color::Model,
+    values: [f32; 3],
+    of: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dye {
+    Strokes,
+    Fill,
+    Outline,
+}
+
+impl Dye {
+    fn of(cmd: Cmd) -> Option<Dye> {
+        match cmd {
+            Cmd::Recolour => Some(Dye::Strokes),
+            Cmd::FillShape => Some(Dye::Fill),
+            Cmd::OutlineShape => Some(Dye::Outline),
+            _ => None,
+        }
+    }
+
+    fn what(self) -> &'static str {
+        match self {
+            Dye::Strokes => "the colour of the selected strokes",
+            Dye::Fill => "the shape's fill",
+            Dye::Outline => "the shape's outline",
+        }
+    }
+}
+
+fn solid(paint: &klad_core::doc::Paint) -> Option<String> {
+    match paint {
+        klad_core::doc::Paint::Solid(hex) => Some(hex.clone()),
+        _ => None,
+    }
+}
+
+const ALPHA: color::Channel = color::Channel {
+    name: "A",
+    lo: 0.0,
+    hi: 100.0,
+    about: "alpha: how see-through the colour is, 0 to 100",
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tool {
@@ -590,6 +646,13 @@ impl Tuning {
     }
 }
 
+fn hand_taper(id: &str, def: &BrushDef) -> [f32; 2] {
+    match klad_core::brushes::library(klad_core::brushes::base_of(id)) {
+        Some(stock) if stock.taper == def.taper => [0.0, 0.0],
+        _ => def.taper,
+    }
+}
+
 #[derive(Default)]
 struct Readout {
     pressure: f32,
@@ -651,6 +714,7 @@ pub(crate) struct Editor {
     size: f32,
     color: [f32; 4],
     hsva: Hsva,
+    mixing: Option<Mixing>,
     swatch_name: String,
     fill: FillTool,
     lasso: Option<Lasso>,
@@ -742,6 +806,10 @@ pub(crate) struct Editor {
     bindings: crate::commands::Bindings,
     capturing: Option<Cmd>,
     keys_busy: bool,
+    field_had_focus: bool,
+    focus: Focus,
+    shape_clip: Option<Vec<serde_json::Value>>,
+    twist: Option<(f32, f64)>,
     key_filter: String,
     selection: Option<String>,
     group: Vec<String>,
@@ -800,11 +868,13 @@ impl Editor {
         let scene = Scene::open_lazy(path)?;
         let brushes = BrushSet::for_bundle(&scene.bundle)?;
         let embedded = scene.bundle.brushes()?;
-        let tuning = Tuning::of(
-            brushes
-                .def("ink")
-                .ok_or_else(|| crate::report::bug("the ink brush is missing from the library"))?,
-        );
+        let ink = brushes
+            .def("ink")
+            .ok_or_else(|| crate::report::bug("the ink brush is missing from the library"))?;
+        let tuning = Tuning {
+            taper: hand_taper("ink", ink),
+            ..Tuning::of(ink)
+        };
         let settings_path = settings::default_path();
         let mut settings = settings_path.as_deref().map(Settings::load).unwrap_or_default();
         let offered = settings.offer_real_size(scene.bundle.doc.pixel_art());
@@ -843,6 +913,7 @@ impl Editor {
             size: 12.0,
             color: [0.08, 0.08, 0.1, 1.0],
             hsva: Hsva::from_rgba([0.08, 0.08, 0.1, 1.0], 0.0),
+            mixing: None,
             swatch_name: String::new(),
             fill: FillTool::default(),
             lasso: None,
@@ -933,6 +1004,10 @@ impl Editor {
             bindings: crate::commands::Bindings::default(),
             capturing: None,
             keys_busy: false,
+            field_had_focus: false,
+            focus: Focus::Canvas,
+            shape_clip: None,
+            twist: None,
             key_filter: String::new(),
             selection: None,
             group: Vec::new(),
@@ -2545,17 +2620,6 @@ impl Editor {
     }
 
     fn pen_down(&mut self, view: View, rect: Rect, pos: Pos2, c: Vec2) -> Result<()> {
-        let vector = self
-            .scene
-            .active_layer()
-            .is_some_and(|l| l.kind() == Kind::Vector && !l.locked);
-        if !vector {
-            self.say(
-                Tone::Refused,
-                "the pen draws vector paths: pick a vector layer, or add one with \"vector\" in Layers",
-            );
-            return Ok(());
-        }
         let first = self
             .pen_path
             .as_ref()
@@ -2627,13 +2691,13 @@ impl Editor {
             self.say(Tone::Info, "a path needs two points: click again before Return");
             return Ok(());
         }
-        let Some((layer, name)) = self
-            .scene
-            .active_layer()
-            .filter(|l| l.kind() == Kind::Vector)
-            .map(|l| (l.id.clone(), l.name.clone()))
-        else {
-            return Ok(());
+        let home = self.vector_home("paths");
+        let name = match &home.made {
+            Some(_) => home.said(),
+            None => self
+                .scene
+                .active_layer()
+                .map_or_else(String::new, |l| format!(" to {}", l.name)),
         };
         let d = pathedit::to_d(&[Subpath {
             anchors: path.anchors,
@@ -2648,20 +2712,15 @@ impl Editor {
         if self.pen_stroke || fill.is_none() {
             node["stroke"] = json!({ "paint": outline, "width": self.pen_width, "cap": "round", "join": "round" });
         }
-        let op = Op::AddNode {
-            node,
-            place: klad_core::ops::Place {
-                into: Some(layer),
-                frame: Some(self.scene.frame),
-                ..Default::default()
-            },
-        };
-        self.apply(vec![op])?;
+        let place = home.place(self.scene.frame);
+        let ops = home.ops.iter().cloned().chain([Op::AddNode { node, place }]).collect();
+        self.apply(ops)?;
+        self.move_in(&home)?;
         self.used_colour();
         self.say(
             Tone::Done,
             format!(
-                "{} path added to {name}: V moves it, A edits its points",
+                "{} path added{name}: V moves it, A edits its points",
                 if closed { "closed" } else { "open" }
             ),
         );
@@ -3029,6 +3088,9 @@ impl Editor {
             _ => {}
         }
         let pressing = e.phase == Phase::Down && was_focused && on_canvas && !self.navigating;
+        if pressing {
+            self.focus = Focus::Canvas;
+        }
         if pressing && self.holding_frame_keys() {
             return Ok(());
         }
@@ -3210,7 +3272,10 @@ impl Editor {
     }
 
     fn tuned(&self, id: &str, def: &BrushDef) -> Tuning {
-        let tuning = Tuning::of(def);
+        let tuning = Tuning {
+            taper: hand_taper(id, def),
+            ..Tuning::of(def)
+        };
         match (id, self.settings.eraser_feather, tuning.hardness) {
             ("eraser", Some(feather), Some(_)) => Tuning { feather, ..tuning },
             _ => tuning,
@@ -3641,7 +3706,7 @@ impl Editor {
 
     fn navigate(&mut self, ui: &egui::Ui, response: &egui::Response, rect: Rect) {
         let area = rect.size();
-        let (zoom, scroll, rotation, hover, space, middle, primary, delta, time) = ui.input(|i| {
+        let (zoom, scroll, rotation, hover, space, middle, primary, delta, time, snap) = ui.input(|i| {
             (
                 i.zoom_delta(),
                 i.smooth_scroll_delta,
@@ -3652,6 +3717,7 @@ impl Editor {
                 i.pointer.primary_down(),
                 i.pointer.delta(),
                 i.time,
+                i.modifiers.shift,
             )
         });
         self.navigating = (space && !ui.ctx().egui_wants_keyboard_input()) || middle;
@@ -3674,7 +3740,12 @@ impl Editor {
                 view.pan(scroll);
             }
             if rotation != 0.0 {
-                view.rotate_at(rotation, at, area);
+                let raw = match self.twist {
+                    Some((raw, last)) if time - last < TWIST_PAUSE => raw,
+                    _ => view.angle,
+                } + rotation;
+                self.twist = Some((raw, time));
+                view.rotate_at(crate::view::twisted(raw, snap) - view.angle, at, area);
             }
         }
         if self.navigating && (middle || primary) && self.live.is_none() {
@@ -3719,6 +3790,12 @@ impl Editor {
             .try_for_each(|e| self.on_pen(&ctx, e, rect, was_focused))?;
         if self.tool == Tool::Bone && response.secondary_clicked() {
             self.end_chain();
+        }
+        if response.secondary_clicked() {
+            self.focus = Focus::Canvas;
+        }
+        if !matches!(self.tool, Tool::Bone | Tool::Note) {
+            response.context_menu(|ui| self.canvas_menu(ui));
         }
         if self.tool == Tool::Note
             && response.secondary_clicked()
@@ -3946,6 +4023,10 @@ impl Editor {
         }
     }
 
+    fn ring(&self) -> Option<f32> {
+        (self.tool == Tool::Brush && !self.scene.on_grid()).then_some(self.size)
+    }
+
     fn decorate(&self, ui: &egui::Ui, view: View, rect: Rect) {
         let painter = ui.painter().with_clip_rect(rect);
         let accent = Color32::from_rgb(64, 196, 255);
@@ -4068,10 +4149,29 @@ impl Editor {
             painter.add(egui::Shape::closed_line(line, egui::Stroke::new(1.5, tint)));
         }
         let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
-        if let Some(hover) = hover.filter(|_| self.modifiers.alt && matches!(self.tool, Tool::Brush | Tool::Fill)) {
-            painter.circle_stroke(hover, 9.0, egui::Stroke::new(3.0, Color32::from_black_alpha(160)));
-            painter.circle_stroke(hover, 9.0, egui::Stroke::new(1.5, Color32::WHITE));
-            painter.circle_filled(hover, 5.0, color::color32(self.color));
+        let dropper = self.modifiers.alt && !self.modifiers.command && matches!(self.tool, Tool::Brush | Tool::Fill);
+        if let Some(hover) = hover.filter(|_| dropper) {
+            let font = egui::FontId::proportional(DROPPER);
+            let tip = hover + vec2(-DROPPER * 0.12, DROPPER * 0.2);
+            [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0)]
+                .iter()
+                .for_each(|d| {
+                    painter.text(
+                        tip + *d,
+                        egui::Align2::LEFT_BOTTOM,
+                        crate::theme::icon::EYEDROPPER,
+                        font.clone(),
+                        Color32::from_black_alpha(220),
+                    );
+                });
+            painter.text(
+                tip,
+                egui::Align2::LEFT_BOTTOM,
+                crate::theme::icon::EYEDROPPER,
+                font,
+                Color32::WHITE,
+            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             return;
         }
         if self.tool == Tool::Fill
@@ -4098,10 +4198,8 @@ impl Editor {
             );
             return;
         }
-        if self.tool == Tool::Brush
-            && let Some(hover) = hover
-        {
-            let radius = (self.size * 0.5 * view.zoom).max(1.5);
+        if let (Some(size), Some(hover)) = (self.ring(), hover) {
+            let radius = (size * 0.5 * view.zoom).max(1.5);
             painter.circle_stroke(hover, radius, egui::Stroke::new(1.0, Color32::from_gray(30)));
             painter.circle_stroke(hover, radius + 1.0, egui::Stroke::new(1.0, Color32::from_gray(235)));
         }
@@ -4304,10 +4402,14 @@ impl Editor {
     }
 
     fn recolour_shape(&mut self, outline: bool) -> Result<()> {
+        self.recolour_shape_to(outline, self.color)
+    }
+
+    fn recolour_shape_to(&mut self, outline: bool, rgba: [f32; 4]) -> Result<()> {
         let Some(id) = self.recolourable() else {
             return Ok(());
         };
-        let hex = color::hex(self.color);
+        let hex = color::hex(rgba);
         let has_outline = matches!(
             self.scene.bundle.doc.item(&id),
             Some(Item::Node(_, _, node)) if node.stroke.is_some()
@@ -4358,7 +4460,96 @@ impl Editor {
     }
 
     fn recolour_picked(&mut self) -> Result<()> {
-        let target = self.color;
+        self.recolour_picked_to(self.color)
+    }
+
+    fn dyed(&self, dye: Dye) -> Option<[f32; 4]> {
+        let of_node = |pick: &dyn Fn(&klad_core::doc::Node) -> Option<String>| {
+            let id = self.recolourable()?;
+            match self.scene.bundle.doc.item(&id) {
+                Some(Item::Node(_, _, node)) => pick(node).and_then(|hex| color::rgba_of(&hex)),
+                _ => None,
+            }
+        };
+        match dye {
+            Dye::Strokes => self
+                .chosen_marks()
+                .and_then(|(_, chosen)| chosen.first().map(|(_, m)| m.color())),
+            Dye::Fill => of_node(&|node| node.fill.as_ref().and_then(solid)),
+            Dye::Outline => of_node(&|node| node.stroke.as_ref().and_then(|s| solid(&s.paint))),
+        }
+    }
+
+    fn dye(&mut self, dye: Dye, rgba: [f32; 4]) -> Result<()> {
+        match dye {
+            Dye::Strokes => self.recolour_picked_to(rgba)?,
+            Dye::Fill => self.recolour_shape_to(false, rgba)?,
+            Dye::Outline => self.recolour_shape_to(true, rgba)?,
+        }
+        if self.settings.used(&color::hex(rgba)) {
+            self.settings_dirty = true;
+        }
+        Ok(())
+    }
+
+    fn dye_button(&mut self, ui: &mut egui::Ui, cmd: Cmd, dye: Dye) {
+        let spec = cmd.spec();
+        let refused = self.can_run(cmd);
+        let now = self.dyed(dye);
+        let hint = match (&refused, now) {
+            (Some(why), _) => format!("{}\n\nnot now: {why}", dye.what()),
+            (None, Some(rgba)) => format!(
+                "{}, {}: click to choose another, from the wheel, the palette or the colour you paint with",
+                dye.what(),
+                color::hex(rgba)
+            ),
+            (None, None) => format!(
+                "{}: click to choose one, from the wheel, the palette or the colour you paint with",
+                dye.what()
+            ),
+        };
+        let button = egui::Button::new(egui::RichText::new(spec.icon).size(crate::theme::ICON))
+            .min_size(vec2(crate::theme::TARGET, crate::theme::TARGET));
+        let enabled = refused.is_none();
+        let response = ui.add_enabled(enabled, button).hint(hint);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, dye.what()));
+        ui.painter().rect_filled(
+            Rect::from_min_size(response.rect.right_bottom() - vec2(9.0, 9.0), vec2(7.0, 7.0)),
+            1.0,
+            color::color32(now.unwrap_or(self.color)),
+        );
+        if !enabled {
+            return;
+        }
+        let named = |hex: &str, name: &str| match name.is_empty() {
+            true => hex.to_string(),
+            false => format!("{name}  {hex}"),
+        };
+        let palette = self
+            .scene
+            .bundle
+            .doc
+            .palette
+            .iter()
+            .filter_map(|s| color::rgba_of(&s.color).map(|rgba| (rgba, named(&s.color, &s.name))))
+            .collect();
+        let recent = self
+            .settings
+            .recent
+            .iter()
+            .filter_map(|hex| color::rgba_of(hex).map(|rgba| (rgba, format!("{hex}, used lately"))))
+            .collect();
+        let picked = color::Square::new(ui, ("dye", dye.what()), now.unwrap_or(self.color), dye.what())
+            .current(self.color)
+            .colours("palette", palette)
+            .colours("recent", recent)
+            .under(ui, &response);
+        if let Some(rgba) = picked.and_then(color::Pick::chosen) {
+            self.check(|e| e.dye(dye, rgba));
+        }
+    }
+
+    fn recolour_picked_to(&mut self, target: [f32; 4]) -> Result<()> {
         let sets = self.chosen_marks().map_or(Vec::new(), |(_, chosen)| {
             let colours: Vec<_> = chosen.iter().map(|(_, m)| m.color()).collect();
             klad_core::color::recolour(&colours, target)
@@ -5226,15 +5417,15 @@ impl Editor {
         }
         let mut picked: Option<[f32; 4]> = None;
         let mut hsva = self.hsva;
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             if color::picker(ui, &mut hsva, 150.0).changed() {
                 self.color = hsva.rgba();
                 self.hsva = hsva;
             }
             ui.vertical(|ui| {
-                color::swatch(ui, self.color, false, 44.0).hint("the current colour");
-                ui.add_space(4.0);
+                ui.spacing_mut().item_spacing.y = 1.0;
                 ui.horizontal(|ui| {
+                    color::swatch(ui, self.color, false, 28.0).hint("the current colour");
                     if let Some(text) = self.text(
                         ui,
                         "colour.hex",
@@ -5251,15 +5442,7 @@ impl Editor {
                         }
                     }
                 });
-                let mut alpha = self.color[3];
-                if ui
-                    .add(egui::Slider::new(&mut alpha, 0.0..=1.0).text("alpha"))
-                    .hint("how see-through the colour is")
-                    .changed()
-                {
-                    let [r, g, b, _] = self.color;
-                    self.set_colour([r, g, b, alpha]);
-                }
+                self.colour_channels(ui);
             });
         });
         ui.label("palette");
@@ -5337,6 +5520,94 @@ impl Editor {
             Some(edit) => self.apply(vec![Op::Palette(edit)]),
             None => Ok(()),
         }
+    }
+
+    fn colour_channels(&mut self, ui: &mut egui::Ui) {
+        let mut model = self.settings.colour_model;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().button_padding.x = 4.0;
+            color::Model::ALL.into_iter().for_each(|m| {
+                if ui.selectable_label(model == m, m.name()).hint(m.about()).clicked() {
+                    model = m;
+                }
+            });
+        });
+        if model != self.settings.colour_model {
+            self.settings.colour_model = model;
+            self.settings_dirty = true;
+        }
+        let mut mixing = match self.mixing {
+            Some(m) if m.model == model && m.of == self.color => m,
+            kept => {
+                let keep = match kept {
+                    Some(m) if m.model == model => m.values,
+                    _ => [self.hsva.h * 360.0, self.hsva.s * 100.0, self.hsva.v * 100.0],
+                };
+                Mixing {
+                    model,
+                    values: model.values(self.color, keep),
+                    of: self.color,
+                }
+            }
+        };
+        let mut alpha = self.color[3] * 100.0;
+        let [r, g, b, _] = self.color;
+        let row = |ui: &mut egui::Ui, channel: &color::Channel, value: &mut f32, ramp: &dyn Fn(f32) -> [f32; 3]| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.add_sized(
+                    [10.0, crate::theme::TARGET],
+                    egui::Label::new(egui::RichText::new(channel.name).color(crate::theme::WEAK)),
+                );
+                let width = (ui.available_width() - 48.0).max(CHANNEL_TRACK);
+                let slid = color::channel_slider(ui, channel, value, width, ramp).changed();
+                let typed = ui
+                    .add(
+                        egui::DragValue::new(value)
+                            .range(channel.lo..=channel.hi)
+                            .speed((channel.hi - channel.lo) / 200.0)
+                            .fixed_decimals(0),
+                    )
+                    .hint(channel.about)
+                    .changed();
+                slid || typed
+            })
+            .inner
+        };
+        let values = mixing.values;
+        let rows: Vec<bool> = model
+            .channels()
+            .iter()
+            .enumerate()
+            .map(|(i, channel)| {
+                let ramp = |v: f32| {
+                    let mut at = values;
+                    at[i] = v;
+                    model.rgb(at)
+                };
+                row(ui, channel, &mut mixing.values[i], &ramp)
+            })
+            .collect();
+        let mixed = rows.contains(&true);
+        let faded = row(ui, &ALPHA, &mut alpha, &|v| {
+            let t = v / 100.0;
+            [r, g, b].map(|c| 0.5 + (c - 0.5) * t)
+        });
+        if mixed {
+            let [r, g, b] = model.rgb(mixing.values).map(|c| c.clamp(0.0, 1.0));
+            self.set_colour([r, g, b, self.color[3]]);
+            if matches!(model, color::Model::Hsv | color::Model::Hsl) {
+                self.hsva.h = (mixing.values[0] / 360.0).rem_euclid(1.0);
+            }
+            mixing.of = self.color;
+        }
+        if faded {
+            let [r, g, b, _] = self.color;
+            self.set_colour([r, g, b, alpha / 100.0]);
+            mixing.of = self.color;
+        }
+        self.mixing = Some(mixing);
     }
 
     fn fill_panel(&mut self, ui: &mut egui::Ui) {
@@ -5583,6 +5854,26 @@ mod tests {
             ..picked.clone()
         };
         assert!(cut.key().starts_with("c4:3,12:cut"));
+    }
+
+    #[test]
+    fn a_library_brush_starts_without_its_taper_by_hand_and_a_brush_of_the_drawing_keeps_its_own() {
+        let set = BrushSet::presets();
+        let ink = set.def("ink").unwrap();
+        assert!(ink.taper[0] > 0.0, "the ink brush tapers strokes drawn from a path");
+        assert_eq!(hand_taper("ink", ink), [0.0, 0.0]);
+        assert_eq!(hand_taper("ink-1a2b3c", ink), [0.0, 0.0], "a variant of it too");
+        let own = BrushDef {
+            taper: [30.0, 5.0],
+            ..ink.clone()
+        };
+        assert_eq!(hand_taper("ink-1a2b3c", &own), [30.0, 5.0]);
+        assert_eq!(hand_taper("quill", &own), [30.0, 5.0]);
+        assert_eq!(
+            hand_taper("quill", ink),
+            ink.taper,
+            "a brush of the drawing keeps what it was saved with"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-_Last updated: 2026-11-08 14:50_
+_Last updated: 2026-11-17 09:25_
 
 # Layers, masks and clipping
 
@@ -6,7 +6,9 @@ Keep lines, colour and shading on their own layers, and decide where each one sh
 
 ## Add a layer
 
-At the top of the Layers pane, click **paint** for brush strokes or **vector** for [shapes and text](shapes-and-text.md). Drag a row to move the layer, and double click its name to rename it.
+At the top of the Layers pane, click **paint** for brush strokes or **vector** for [shapes and text](shapes-and-text.md). Drag a row to move the layer. Double click its name and type to rename it.
+
+To put part of a drawing on a layer of its own, [select it](selecting.md#split-part-of-a-drawing-onto-its-own-layer), right click the canvas and select **Move to new layer**.
 
 ## Shade inside flat colour
 
@@ -32,4 +34,4 @@ Alt click its eye in the Layers pane. Alt click it again to bring the others bac
 
 ## Trace over a picture
 
-Drop a PNG or JPEG on the window and tick **reference** in its layer settings. You keep seeing it while you draw, and exports leave it out.
+Drop a PNG or JPEG on the window and tick **reference** in its layer settings. (A `.klad` drawing dropped on the window opens instead.) You keep seeing it while you draw, and exports leave it out.

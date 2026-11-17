@@ -1,4 +1,4 @@
-_Last updated: 2026-11-12 23:55_
+_Last updated: 2026-11-17 09:25_
 
 # Exporting
 
@@ -6,23 +6,26 @@ Export a picture, numbered frames or a sprite sheet, or send your animation stra
 
 ## Export a picture or frames
 
-1. Press **cmd E**.
-2. Pick **image** for the frame you're on, **frames** for one PNG per frame, **sprite sheet**, or **GIF** for an animated picture.
-3. Click **export**. Without a path, the files go next to the drawing.
+1. Select **File > Export** and pick what to write: **Image…** (**cmd E**) for the frame you're on, **Frames…** for one PNG per frame, **Sprite sheet…**, **GIF…** for an animated picture or **Aseprite file…**.
+2. To say where it goes, click **Choose…** next to **folder** and type a name under **save as**. Left empty, the file goes next to the drawing, named after it. The line above **Export** shows where it will go.
+3. Click **Export**.
 
-Pictures are transparent unless you tick **keep the background colour**. A sprite sheet comes with a JSON file in Aseprite's layout, with a tag per clip.
+A message says where the file is, and **Show the folder** in the window opens that folder.
+
+Each window shows only what that export uses. Pictures are transparent unless you tick **keep the background colour**. A sprite sheet comes with a JSON file in Aseprite's layout, with a tag per clip.
 
 ## Export palette variants
 
-If the drawing has [palette variants](pixel-art.md), select **every variant** under **palette variant** before you click **export**. You get one file for each, with the variant's name in the file name.
+If the drawing has [palette variants](pixel-art.md), select **every variant** under **palette variant** before you click **Export**. You get one file for each, with the variant's name in the file name.
 
 ## Export into a Godot project
 
-1. In the timeline, click a clip's bar.
-2. Type the folder in your Godot project under **Godot folder**.
-3. Click **export to Godot**.
+1. Select **File > Export > Godot…**.
+2. Next to **Godot folder**, click **Choose…** and pick a folder in your Godot project.
+3. Pick what to write: **an animated sprite**, **a parallax scene**, **a rig** or **a tile set**.
+4. Click **Export**.
 
-You get the sheet, a SpriteFrames resource with one animation per clip and a scene to drop in. klad remembers the folder, and exporting again keeps Godot's ids, so scenes that use the files keep working.
+An animated sprite gives you the sheet, a SpriteFrames resource with one animation per clip and a scene to drop in. klad remembers the folder, and exporting again keeps Godot's ids, so scenes that use the files keep working. To export the sprite again without the window, select **File > Export > Godot sprite, same folder**.
 
 ## Export from a script
 

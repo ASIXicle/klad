@@ -98,7 +98,12 @@ impl Editor {
     pub(super) fn draft(&self) -> Result<BrushDef> {
         match &self.custom {
             Some(def) => Ok(def.clone()),
-            None => Ok(self.shaped()?.1),
+            None => Ok(BrushDef {
+                taper: self.tuning.taper,
+                stabilizer: self.tuning.stabilizer,
+                smoothing: self.tuning.smoothing,
+                ..self.shaped()?.1
+            }),
         }
     }
 

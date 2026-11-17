@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The brush no longer tapers a stroke you draw by hand unless you ask for it: a click paints a dot at once and a line ends where you lift the pen or the mouse. For tapered ends set **taper in px** and **taper out px** under **more** in the brush bar. Brushes saved in a drawing and strokes painted from the command line keep their taper.
+- Keys follow what you are working in. Click a frame in the timeline and **cmd C**, **cmd V**, **cmd D**, **Delete** and **cmd A** copy, paste, repeat, delete and select frames (a blue line around the frames shows the timeline has the keys); press on the canvas and they act on strokes and shapes again. The keys that change timing (**=**, **-**, **I**, **shift I**, **alt left**, **alt right**) run only while the timeline has the keys and say so otherwise; the **Frame** menu runs them from anywhere.
+- Repeating frames. With frames selected in the timeline, **cmd D** and the duplicate button repeat all of them after themselves as copies; before, only the drawing under the playhead was copied. **-** now takes back exactly what **=** did, also on a drawing that runs to the end of the timeline.
+- **File > Export** is a menu with an entry for each kind of export (image, frames, sprite sheet, GIF, Aseprite file, Godot), and each window shows only what that export uses. Pick the folder with **Choose…**, type a name under **save as**, and the window says where the file will go. When it is written the message says where it is, and **Show the folder** opens it.
+- Windows open in the middle of the window, each time they open.
+- A right click on the canvas opens a menu: copy, paste, duplicate, delete, select all, and **Move to new layer**, which puts the selected strokes or shapes on a layer of their own right above.
+- Shapes copy and paste: **cmd C** and **cmd V** work on vector shapes as on strokes. With nothing to copy or paste, the keys say what to do instead of doing nothing.
+- The pen and the shape tool work on any layer: on a paint layer the path or shape goes on a new vector layer above it. On a pixel layer **U** still draws pixels.
+- The colour button in the bar at a selection opens a colour picker with the drawing's palette and the colours used lately, for strokes and for a shape's fill and outline. **use the current colour** in it gives the colour you paint with, as the button did before.
+- The Colour panel mixes with sliders in **HSV**, **HSL**, **RGB** or **Lab** next to the wheel, and remembers which.
+- A turned view shows its angle on the canvas with an **upright** button (**alt R**). Hold **shift** while twisting two fingers to turn in steps of 15 degrees; **R** and **shift R** go to the next step.
+- Double click a layer's name and type: the name is selected, so typing replaces it. Return in a text field no longer starts playback.
+- While **alt** is held over the canvas the pointer is an eyedropper. On a pixel layer the pointer is the pixel's outline alone, without the brush's ring.
+- **cmd S** says the drawing is saved as you go, and where it is. A `.klad` drawing dropped on the window opens.
+- Fixed links that did nothing: **Help > Guides**, **What's new**, the links in **About klad** and in the start window, and the report and support emails now open with the system.
 - Fixed opening a drawing on the Mac: **Choose a .klad file...** in the start window (it said folder) and **File > Open…** could not pick a `.klad` drawing, which Finder shows as one file. The open panel now takes a `.klad` drawing; other files are greyed out.
 - Fixed shade and rim on posed layers. The shade and rim fills that `klad light` makes keep the part of the shape outside a cut, and a pose turned the fill with its bone but left that cut where it was in the rest drawing, so in posed frames and their in-betweens the rim grew into a wide crescent and the shade slid away. Posing now moves the cut with the fill, in `klad apply` poses, in-betweens and the editor alike; a frame posed before this comes right when you pose it again.
 - Fixed cuts in in-betweens. A fill or stroke cut by a lasso kept its cut where it was in the first key when an in-between moved it: flood fills between keys, and marks that ride a line (marks drawn by hand between keys and marks found in one key only). The cut now moves with the mark.

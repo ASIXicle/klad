@@ -5,7 +5,7 @@ use crate::messages::Tone;
 use crate::pen::PenEvent;
 use crate::theme;
 use anyhow::Result;
-use egui::{Id, RichText, vec2};
+use egui::{Id, RichText};
 use klad_core::doc::Item;
 use klad_core::markedit::{LassoAction, MarkTransform};
 use klad_core::ops::{Op, Place};
@@ -45,7 +45,7 @@ pub(super) enum Selected {
     Points,
 }
 
-fn strip_ids(value: &mut Value) {
+pub(super) fn strip_ids(value: &mut Value) {
     if let Value::Object(map) = value {
         map.remove("id");
         map.values_mut().for_each(strip_ids);
@@ -99,7 +99,7 @@ impl Editor {
         }
     }
 
-    fn group_nodes(&self) -> Vec<(String, klad_core::doc::Node)> {
+    pub(super) fn group_nodes(&self) -> Vec<(String, klad_core::doc::Node)> {
         self.shapes()
             .into_iter()
             .filter_map(|id| match self.scene.bundle.doc.item(&id) {
@@ -301,7 +301,10 @@ impl Editor {
                             [(id, _)] => id.clone(),
                             many => format!("{} shapes", many.len()),
                         };
-                        self.say(Tone::Done, format!("duplicated {what} in place"));
+                        self.say(
+                            Tone::Done,
+                            format!("duplicated {what} in place: the copy is selected and sits on the original, drag to move it"),
+                        );
                         Ok(())
                     }
                     Err(e) => {
@@ -413,7 +416,12 @@ impl Editor {
             _ => 0,
         };
         let writing = self.writing();
-        egui::Area::new(Id::unique("selection bar"))
+        let bar = Id::unique("selection bar");
+        let pressed = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
+        if pressed.is_some_and(|p| ctx.memory(|m| m.area_rect(bar)).is_some_and(|r| r.contains(p))) {
+            self.focus = super::Focus::Canvas;
+        }
+        egui::Area::new(bar)
             .order(egui::Order::Foreground)
             .pivot(egui::Align2::CENTER_TOP)
             .fixed_pos(at)
@@ -426,16 +434,11 @@ impl Editor {
                                 self.command_button(ui, Cmd::AttachedOnly, Some(&format!("{attached} attached")));
                                 self.command_button(ui, Cmd::Detach, None);
                             }
-                            if *cmd == Cmd::Recolour {
-                                let swatch = crate::color::color32(self.color);
-                                let r = self.command_button(ui, *cmd, None);
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(r.rect.right_bottom() - vec2(9.0, 9.0), vec2(7.0, 7.0)),
-                                    1.0,
-                                    swatch,
-                                );
-                            } else {
-                                self.command_button(ui, *cmd, None);
+                            match super::Dye::of(*cmd) {
+                                Some(dye) => self.dye_button(ui, *cmd, dye),
+                                None => {
+                                    self.command_button(ui, *cmd, None);
+                                }
                             }
                         });
                         if let Some((_, chosen)) = self.chosen_marks().filter(|_| self.on_marks()) {

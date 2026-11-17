@@ -51,6 +51,184 @@ impl Hsva {
     }
 }
 
+pub fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let v = l + s * l.min(1.0 - l);
+    let sv = match v <= 1e-6 {
+        true => 0.0,
+        false => 2.0 * (1.0 - l / v),
+    };
+    hsv_to_rgb(h, sv, v)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Model {
+    #[default]
+    Hsv,
+    Hsl,
+    Rgb,
+    Lab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Channel {
+    pub name: &'static str,
+    pub lo: f32,
+    pub hi: f32,
+    pub about: &'static str,
+}
+
+const fn channel(name: &'static str, lo: f32, hi: f32, about: &'static str) -> Channel {
+    Channel { name, lo, hi, about }
+}
+
+impl Model {
+    pub const ALL: [Model; 4] = [Model::Hsv, Model::Hsl, Model::Rgb, Model::Lab];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Model::Hsv => "HSV",
+            Model::Hsl => "HSL",
+            Model::Rgb => "RGB",
+            Model::Lab => "Lab",
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            Model::Hsv => "hue, saturation and value: the wheel's own numbers",
+            Model::Hsl => "hue, saturation and lightness: lightness runs from black through the pure colour to white",
+            Model::Rgb => "red, green and blue, 0 to 255, as in a hex colour",
+            Model::Lab => {
+                "lightness as the eye sees it, with green to red (a) and blue to yellow (b): change L alone for a shadow or a light of the same colour"
+            }
+        }
+    }
+
+    pub fn channels(self) -> [Channel; 3] {
+        match self {
+            Model::Hsv => [
+                channel("H", 0.0, 360.0, "hue, in degrees around the wheel"),
+                channel("S", 0.0, 100.0, "saturation: grey to the pure colour"),
+                channel("V", 0.0, 100.0, "value: black to the full colour"),
+            ],
+            Model::Hsl => [
+                channel("H", 0.0, 360.0, "hue, in degrees around the wheel"),
+                channel("S", 0.0, 100.0, "saturation: grey to the pure colour"),
+                channel("L", 0.0, 100.0, "lightness: black, the pure colour at 50, white"),
+            ],
+            Model::Rgb => [
+                channel("R", 0.0, 255.0, "red"),
+                channel("G", 0.0, 255.0, "green"),
+                channel("B", 0.0, 255.0, "blue"),
+            ],
+            Model::Lab => [
+                channel("L", 0.0, 100.0, "lightness as the eye sees it"),
+                channel("a", -128.0, 127.0, "green to red"),
+                channel("b", -128.0, 127.0, "blue to yellow"),
+            ],
+        }
+    }
+
+    pub fn values(self, rgba: [f32; 4], keep: [f32; 3]) -> [f32; 3] {
+        let [r, g, b, _] = rgba;
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let d = max - min;
+        let hue = Hsva::from_rgba(rgba, keep[0] / 360.0).h * 360.0;
+        match self {
+            Model::Hsv => [
+                hue,
+                match max <= 1e-6 {
+                    true => keep[1],
+                    false => d / max * 100.0,
+                },
+                max * 100.0,
+            ],
+            Model::Hsl => {
+                let l = (max + min) / 2.0;
+                let room = 1.0 - (2.0 * l - 1.0).abs();
+                [
+                    hue,
+                    match room <= 1e-6 {
+                        true => keep[1],
+                        false => (d / room).min(1.0) * 100.0,
+                    },
+                    l * 100.0,
+                ]
+            }
+            Model::Rgb => [r * 255.0, g * 255.0, b * 255.0],
+            Model::Lab => klad_core::color::to_lab(rgba),
+        }
+    }
+
+    pub fn rgb(self, [x, y, z]: [f32; 3]) -> [f32; 3] {
+        match self {
+            Model::Hsv => hsv_to_rgb(x / 360.0, y / 100.0, z / 100.0),
+            Model::Hsl => hsl_to_rgb(x / 360.0, y / 100.0, z / 100.0),
+            Model::Rgb => [x / 255.0, y / 255.0, z / 255.0],
+            Model::Lab => {
+                let [r, g, b, _] = klad_core::color::from_lab([x, y, z], 1.0);
+                [r, g, b]
+            }
+        }
+    }
+}
+
+pub fn channel_slider(
+    ui: &mut egui::Ui,
+    channel: &Channel,
+    value: &mut f32,
+    width: f32,
+    ramp: impl Fn(f32) -> [f32; 3],
+) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(vec2(width, theme::TARGET), Sense::click_and_drag());
+    let shown = *value;
+    response.widget_info(|| egui::WidgetInfo::slider(true, shown as f64, channel.name));
+    let span = channel.hi - channel.lo;
+    if let Some(pos) = response.interact_pointer_pos() {
+        let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let wanted = channel.lo + t * span;
+        if wanted != *value {
+            *value = wanted;
+            response.mark_changed();
+        }
+    }
+    let painter = ui.painter_at(rect.expand(2.0));
+    let track = rect.shrink2(vec2(0.0, 6.0));
+    let steps = 32;
+    let mut mesh = Mesh::default();
+    (0..=steps).for_each(|i| {
+        let t = i as f32 / steps as f32;
+        let [r, g, b] = ramp(channel.lo + t * span);
+        let c = color32([r, g, b, 1.0]);
+        let x = track.left() + track.width() * t;
+        mesh.colored_vertex(pos2(x, track.top()), c);
+        mesh.colored_vertex(pos2(x, track.bottom()), c);
+        if i > 0 {
+            let k = (i as u32) * 2;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k + 1, k);
+        }
+    });
+    painter.add(Shape::mesh(mesh));
+    painter.rect_stroke(
+        track,
+        2.0,
+        Stroke::new(1.0, Color32::from_black_alpha(160)),
+        egui::StrokeKind::Outside,
+    );
+    let at = track.left() + track.width() * ((*value - channel.lo) / span).clamp(0.0, 1.0);
+    let handle = Rect::from_center_size(pos2(at, rect.center().y), vec2(6.0, rect.height() - 6.0));
+    painter.rect_stroke(
+        handle,
+        2.0,
+        Stroke::new(2.5, Color32::from_black_alpha(200)),
+        egui::StrokeKind::Outside,
+    );
+    painter.rect_stroke(handle, 2.0, Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Inside);
+    response.hint(channel.about)
+}
+
 pub fn color32([r, g, b, a]: [f32; 4]) -> Color32 {
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgba_unmultiplied(byte(r), byte(g), byte(b), byte(a))
@@ -251,6 +429,12 @@ pub struct Square {
     current: Option<[f32; 4]>,
     alpha: bool,
     removable: bool,
+    palette: Vec<Shelf>,
+}
+
+struct Shelf {
+    title: String,
+    colours: Vec<([f32; 4], String)>,
 }
 
 impl Square {
@@ -262,7 +446,18 @@ impl Square {
             current: None,
             alpha: false,
             removable: false,
+            palette: Vec::new(),
         }
+    }
+
+    pub fn colours(mut self, title: &str, colours: Vec<([f32; 4], String)>) -> Self {
+        if !colours.is_empty() {
+            self.palette.push(Shelf {
+                title: title.to_string(),
+                colours,
+            });
+        }
+        self
     }
 
     pub fn current(mut self, rgba: [f32; 4]) -> Self {
@@ -284,24 +479,39 @@ impl Square {
         self.show(ui).and_then(Pick::chosen)
     }
 
-    pub fn show(self, ui: &mut egui::Ui) -> Option<Pick> {
+    fn live(&self, ui: &egui::Ui) -> (Hsva, bool) {
         let live_id = self.id.with("live");
-        let text_id = self.id.with("hex");
         let open = Popup::is_id_open(ui.ctx(), self.id);
         let stored = ui.data(|d| d.get_temp::<(Hsva, [f32; 4])>(live_id));
-        let mut live = match stored {
+        let live = match stored {
             Some((hsva, base)) if open && hex(base) == hex(self.rgba) => hsva,
             _ => Hsva::from_rgba(self.rgba, stored.map_or(0.0, |(hsva, _)| hsva.h)),
         };
         if !open && stored.is_some() {
             ui.data_mut(|d| d.remove::<(Hsva, [f32; 4])>(live_id));
         }
+        (live, open)
+    }
+
+    pub fn show(self, ui: &mut egui::Ui) -> Option<Pick> {
+        let (live, open) = self.live(ui);
         let shown = if open { live.rgba() } else { self.rgba };
         let response = swatch(ui, shown, open, theme::TARGET);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &self.what));
         let response = response.hint(format!("{}, {}; click to pick a colour", self.what, hex(self.rgba)));
+        self.popup(ui, &response, live)
+    }
+
+    pub fn under(self, ui: &mut egui::Ui, button: &egui::Response) -> Option<Pick> {
+        let (live, _) = self.live(ui);
+        self.popup(ui, button, live)
+    }
+
+    fn popup(self, ui: &mut egui::Ui, response: &egui::Response, mut live: Hsva) -> Option<Pick> {
+        let live_id = self.id.with("live");
+        let text_id = self.id.with("hex");
         let mut out = None;
-        Popup::from_toggle_button_response(&response)
+        Popup::from_toggle_button_response(response)
             .id(self.id)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
@@ -348,6 +558,27 @@ impl Square {
                         live = Hsva::from_rgba(rgba, live.h);
                         out = Some(Pick::Chosen(rgba));
                     }
+                });
+                self.palette.iter().for_each(|Shelf { title, colours }| {
+                    ui.label(egui::RichText::new(title).color(theme::WEAK));
+                    ui.scope(|ui| {
+                        ui.set_max_width(8.0 * (theme::TARGET + 3.0));
+                        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                        ui.horizontal_wrapped(|ui| {
+                            colours.iter().for_each(|(rgba, name)| {
+                                let same = hex(*rgba) == hex(live.rgba());
+                                if swatch(ui, *rgba, same, theme::TARGET).hint(name.clone()).clicked() {
+                                    let rgba = if self.alpha {
+                                        *rgba
+                                    } else {
+                                        [rgba[0], rgba[1], rgba[2], live.a]
+                                    };
+                                    live = Hsva::from_rgba(rgba, live.h);
+                                    out = Some(Pick::Chosen(rgba));
+                                }
+                            });
+                        });
+                    });
                 });
                 ui.horizontal(|ui| {
                     if let Some(current) = self.current {
@@ -409,6 +640,61 @@ mod tests {
             );
         });
         assert_eq!(Hsva::from_rgba([0.5, 0.5, 0.5, 1.0], 0.3).h, 0.3);
+    }
+
+    #[test]
+    fn every_colour_model_round_trips_and_keeps_what_a_grey_cannot_say() {
+        let colours = [
+            [1.0, 0.0, 0.0, 1.0],
+            [0.2, 0.6, 0.4, 1.0],
+            [0.95, 0.9, 0.1, 1.0],
+            [0.1, 0.2, 0.9, 1.0],
+            [0.03, 0.03, 0.03, 1.0],
+        ];
+        Model::ALL.into_iter().for_each(|model| {
+            colours.iter().for_each(|rgba| {
+                let values = model.values(*rgba, [0.0; 3]);
+                let back = model.rgb(values);
+                assert!(
+                    back.iter().zip(rgba).all(|(a, b)| (a - b).abs() < 2e-3),
+                    "{} {rgba:?} {values:?} {back:?}",
+                    model.name()
+                );
+                assert!(
+                    model
+                        .channels()
+                        .iter()
+                        .zip(values)
+                        .all(|(c, v)| v >= c.lo - 0.01 && v <= c.hi + 0.01),
+                    "{} {values:?} stays inside its sliders",
+                    model.name()
+                );
+            });
+        });
+        assert_eq!(Model::Hsl.values([1.0, 0.0, 0.0, 1.0], [0.0; 3]), [0.0, 100.0, 50.0]);
+        assert_eq!(Model::Rgb.values([1.0, 0.5, 0.0, 1.0], [0.0; 3]), [255.0, 127.5, 0.0]);
+        assert_eq!(
+            Model::Hsl.values([0.0, 0.0, 0.0, 1.0], [210.0, 40.0, 0.0]),
+            [210.0, 40.0, 0.0],
+            "black keeps the hue and saturation the sliders had"
+        );
+        assert_eq!(
+            Model::Hsv.values([0.5, 0.5, 0.5, 1.0], [120.0, 80.0, 0.0])[0],
+            120.0,
+            "a grey keeps the hue"
+        );
+        assert_eq!(
+            hex({
+                let [r, g, b] = Model::Hsl.rgb([210.0, 50.0, 25.0]);
+                [r, g, b, 1.0]
+            }),
+            "#204060"
+        );
+        assert_eq!(
+            serde_json::to_string(&Model::Lab).unwrap(),
+            "\"lab\"",
+            "the settings file keeps the model by its name"
+        );
         assert_eq!(hex([1.0, 0.5, 0.0, 1.0]), "#ff8000");
         assert_eq!(hex([0.0, 0.0, 0.0, 0.5]), "#00000080");
         assert_eq!(rgba_of("ff8000"), Some([1.0, 128.0 / 255.0, 0.0, 1.0]));

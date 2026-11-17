@@ -97,6 +97,8 @@ pub struct Settings {
     pub real_size_shown: bool,
     #[serde(default = "one_u32", rename = "realSizeScale")]
     pub real_size_scale: u32,
+    #[serde(default, rename = "colourModel")]
+    pub colour_model: crate::color::Model,
 }
 
 fn one_u32() -> u32 {
@@ -129,6 +131,7 @@ impl Default for Settings {
             pixel_grid: true,
             real_size_shown: false,
             real_size_scale: 1,
+            colour_model: crate::color::Model::default(),
         }
     }
 }

@@ -520,7 +520,7 @@ pub fn legacy_m1(id: &str) -> Option<BrushDef> {
     parse_set(M1, id)
 }
 
-fn base_of(id: &str) -> &str {
+pub fn base_of(id: &str) -> &str {
     match id.rsplit_once('-') {
         Some((base, tail)) if tail.len() == 6 && tail.chars().all(|c| c.is_ascii_hexdigit()) => base,
         _ => id,

@@ -1,7 +1,7 @@
 use super::testkit::Journey;
 use super::{Editor, Tool};
 use egui::{Key, Modifiers, vec2};
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 const WINDOW: egui::Vec2 = vec2(1440.0, 900.0);
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -251,13 +251,11 @@ fn the_first_ten_minutes_of_someone_who_draws() {
     );
 
     j.act("right click on the canvas");
-    let before = j.h.query_all_by_role(egui::accesskit::Role::MenuItem).count();
     j.tap_with(1000.0, 1000.0, egui::PointerButton::Secondary, Modifiers::NONE);
     j.look("right-click");
-    let after = j.h.query_all_by_role(egui::accesskit::Role::MenuItem).count();
     j.expect(
         "right-click-menu",
-        after > before,
+        j.shown("Move to new layer") && j.shown("Select all"),
         "a right click on the canvas opens a menu",
     );
     j.key(Key::Escape);
@@ -299,11 +297,10 @@ fn the_first_ten_minutes_of_someone_who_draws() {
         "the Layers panel shows both paint layers in a 1440 by 900 window",
     );
 
-    j.act("export a PNG from File > Export");
-    j.click("File");
-    j.click_containing("Export");
+    j.act("export a PNG from File > Export > Image");
+    j.menu("File", "Export", "Image… cmd E");
     j.look("export-window");
-    j.click("export");
+    j.click("Export");
     j.look("exported");
     let written: Vec<String> = pngs(&j.folder)
         .iter()
@@ -377,19 +374,12 @@ fn the_first_ten_minutes_of_someone_who_draws() {
     );
 
     j.finish(&[
-        "name-typed-replaces",
         "cmd-x-cuts",
         "cmd-y-redoes",
         "cmd-plus-zooms",
         "cmd-minus-zooms",
         "cmd-zero-fits",
-        "right-click-menu",
-        "cmd-s-answers",
         "layers-panel-shows-layers",
-        "export-says-it-plainly",
-        "plain-plus-leaves-the-drawing",
-        "minus-takes-plus-back",
-        "return-in-a-field-stays-there",
     ]);
 }
 
@@ -606,11 +596,7 @@ fn the_first_ten_minutes_of_someone_who_edits_what_an_agent_painted() {
         "five undos and five redos end where they began",
     );
 
-    j.finish(&[
-        "first-click-leaves-the-drawing",
-        "colour-applies-to-selection",
-        "return-in-a-field-stays-there",
-    ]);
+    j.finish(&["first-click-leaves-the-drawing", "colour-applies-to-selection"]);
 }
 
 #[test]
@@ -644,15 +630,15 @@ fn the_first_ten_minutes_of_someone_who_makes_pixel_art() {
     j.drag(&[(cx, cy - 6.0), (cx, cy + 6.0)]);
     j.look("pixels");
     j.expect("pixels-land", marks(&j) >= 1, "dragging draws pixels");
-    let ring = j.ed().map_or(0.0, |ed| ed.size);
+    let ring = j.ed().and_then(|ed| ed.ring());
     let pencil = j.ed().map_or(0, |ed| ed.pixel_size);
     j.note(format!(
-        "the pencil is {pencil} px wide; the ring around the pointer is drawn {ring} px wide"
+        "the pencil is {pencil} px wide; the brush ring around the pointer: {ring:?}"
     ));
     j.expect(
-        "pixel-ring-shows-pencil-size",
-        (ring - pencil as f32).abs() < 0.5,
-        "the ring around the pointer is as wide as the pencil",
+        "pixel-pointer-is-the-pencil",
+        ring.is_none(),
+        "on a pixel layer the pointer outlines the pencil's pixels, with no brush ring",
     );
 
     j.act("pick a green by its hex and draw with it");
@@ -742,12 +728,10 @@ fn the_first_ten_minutes_of_someone_who_makes_pixel_art() {
     j.expect("return-plays", playing, "Return plays the animation");
     j.key(Key::Enter);
 
-    j.act("export a GIF from File > Export");
-    j.click("File");
-    j.click_containing("Export");
-    j.click("GIF");
+    j.act("export a GIF from File > Export > GIF");
+    j.menu("File", "Export", "GIF…");
     j.look("export-gif");
-    j.click("export");
+    j.click("Export");
     j.look("exported-gif");
     let gifs: Vec<(String, u16, u16)> = std::fs::read_dir(&j.folder)
         .map(|entries| {
@@ -769,5 +753,261 @@ fn the_first_ten_minutes_of_someone_who_makes_pixel_art() {
         "export writes one GIF next to the drawing",
     );
 
-    j.finish(&["pixel-ring-shows-pencil-size", "space-plays"]);
+    j.finish(&["space-plays"]);
+}
+
+#[test]
+fn what_a_cold_first_session_tripped_on() {
+    let mut j = Journey::begin("cold-session", WINDOW, None);
+
+    j.act("klad starts; make a drawing");
+    j.type_into("Name", "house");
+    j.click("Create");
+    j.look("new-drawing");
+    if j.ed().is_none() {
+        return j.finish(&[]);
+    }
+
+    j.act("click once on the canvas with the brush, without dragging");
+    j.tap(600.0, 600.0);
+    j.look("dot");
+    let dot = j
+        .ed()
+        .and_then(|ed| ed.scene.active_marks().last().and_then(|m| m.bounds()));
+    j.note(format!("the click left a mark with the box {dot:?}"));
+    j.expect(
+        "a-click-paints-a-dot",
+        dot.is_some_and(|b| b[2] - b[0] > 2.0),
+        "one click with the brush leaves a dot as wide as the brush",
+    );
+
+    j.act("hold alt over the paint, as someone who wants to pick its colour");
+    j.hover_with(600.0, 600.0, Modifiers::ALT);
+    j.look("alt-held");
+    j.let_go();
+
+    j.act("double click the layer's name and type a new one");
+    j.double_click("paint 1");
+    j.look("rename-started");
+    j.type_text("roof");
+    j.key(Key::Enter);
+    j.look("renamed");
+    let name = j
+        .ed()
+        .and_then(|ed| ed.scene.active_layer().map(|l| l.name.clone()))
+        .unwrap_or_default();
+    j.note(format!("the layer is now called \"{name}\""));
+    j.expect(
+        "double-click-renames-by-typing",
+        name == "roof",
+        "a double click on a layer's name selects it, so typing replaces it",
+    );
+
+    j.act("look for other ways to mix a colour for a shadow");
+    j.click("Lab");
+    j.look("colour-lab");
+    let lab =
+        j.h.query_all_by_role_and_label(egui::accesskit::Role::Slider, "L")
+            .count()
+            == 1
+            && j.h
+                .query_all_by_role_and_label(egui::accesskit::Role::Slider, "b")
+                .count()
+                == 1;
+    j.expect(
+        "colour-models",
+        lab,
+        "the Colour panel mixes in HSL, RGB and Lab as well as on the wheel",
+    );
+    j.click("HSV");
+
+    j.act("draw a roof, select its strokes and right click to split them off");
+    j.drag(&[(300.0, 500.0), (800.0, 200.0)]);
+    j.drag(&[(800.0, 200.0), (1300.0, 500.0)]);
+    let layers = j.ed().map_or(0, |ed| ed.scene.bundle.doc.all_layers().len());
+    j.key(Key::S);
+    j.chord(CMD, Key::A);
+    j.tap_with(1500.0, 1500.0, egui::PointerButton::Secondary, Modifiers::NONE);
+    j.look("right-click-with-a-selection");
+    j.click("Move to new layer");
+    j.look("moved-to-new-layer");
+    let split = j.ed().is_some_and(|ed| {
+        ed.scene.bundle.doc.all_layers().len() == layers + 1
+            && ed.scene.active_layer().is_some_and(|l| l.name == "roof part")
+            && ed.scene.active_marks().len() == 3
+    });
+    j.expect(
+        "right-click-moves-to-new-layer",
+        split,
+        "right click > Move to new layer puts the selected strokes on a layer of their own",
+    );
+
+    j.act("recolour them with the button at the selection");
+    let was = j.ed().and_then(|ed| ed.scene.active_marks().first().map(|m| m.color()));
+    j.click("the colour of the selected strokes");
+    j.look("recolour-picker");
+    let picker = j.h.query_all_by_label("colour wheel").count() == 2;
+    j.expect(
+        "recolour-opens-a-picker",
+        picker && j.ed().and_then(|ed| ed.scene.active_marks().first().map(|m| m.color())) == was,
+        "the recolour button opens a colour picker at the selection and changes nothing before a choice",
+    );
+    j.key(Key::Escape);
+
+    j.act("draw a rectangle with U while the paint layer is the active one");
+    j.key(Key::U);
+    j.drag(&[(400.0, 700.0), (1200.0, 1500.0)]);
+    j.look("shape-on-a-paint-layer");
+    let shape = j.ed().is_some_and(|ed| {
+        ed.scene
+            .active_layer()
+            .is_some_and(|l| l.kind() == klad_core::doc::Kind::Vector && l.cels()[0].nodes.len() == 1)
+    });
+    j.expect(
+        "shape-makes-its-vector-layer",
+        shape,
+        "a shape drawn while a paint layer is active lands on a new vector layer",
+    );
+
+    j.act("copy the rectangle with cmd C and paste it with cmd V");
+    j.key(Key::V);
+    j.tap(800.0, 1100.0);
+    j.chord(CMD, Key::C);
+    j.chord(CMD, Key::V);
+    j.look("shape-pasted");
+    let pasted = j
+        .ed()
+        .is_some_and(|ed| ed.scene.active_layer().is_some_and(|l| l.cels()[0].nodes.len() == 2));
+    j.expect("shape-copy-paste", pasted, "cmd C and cmd V copy a vector shape");
+    j.key(Key::Escape);
+
+    j.act("turn the view with two fingers, then put it back");
+    j.twist(1000.0, 1000.0, 23.0, Modifiers::NONE);
+    j.twist(1000.0, 1000.0, 4.0, Modifiers::SHIFT);
+    j.look("turned");
+    let angle = |j: &Journey| j.ed().and_then(|ed| ed.view).map_or(0.0, |v| v.angle.to_degrees());
+    j.expect(
+        "shift-snaps-the-twist",
+        (angle(&j) - 30.0).abs() < 0.01,
+        "holding shift while twisting snaps the view to 15 degree steps",
+    );
+    j.click_containing("upright");
+    j.look("upright");
+    j.expect(
+        "turned-view-goes-back",
+        angle(&j).abs() < 0.01,
+        "a button on the canvas puts a turned view upright again",
+    );
+
+    j.act("press I on the canvas, as someone reaching for an eyedropper");
+    let cels = |j: &Journey| {
+        j.ed()
+            .map_or(0, |ed| ed.scene.active_layer().map_or(0, |l| l.cels().len()))
+    };
+    let frames = |j: &Journey| j.ed().map_or(0, |ed| ed.scene.bundle.doc.timeline.frames);
+    let (was_cels, was_frames) = (cels(&j), frames(&j));
+    j.key(Key::I);
+    j.look("i-on-the-canvas");
+    j.expect(
+        "frame-keys-wait-for-the-timeline",
+        (cels(&j), frames(&j)) == (was_cels, was_frames) && j.heard().contains("timeline key"),
+        "I changes no timing while the canvas is in use, and says where it works",
+    );
+
+    j.act("make three drawings, select every frame in the timeline and press cmd D");
+    j.click("roof");
+    j.key(Key::B);
+    j.chord(Modifiers::SHIFT, Key::K);
+    j.drag(&[(300.0, 300.0), (500.0, 300.0)]);
+    j.chord(Modifiers::SHIFT, Key::K);
+    j.drag(&[(300.0, 400.0), (500.0, 400.0)]);
+    j.look("three-drawings");
+    let length = frames(&j);
+    let drawings = cels(&j);
+    j.drag_frames("roof", 1, 1);
+    j.chord(CMD, Key::A);
+    j.look("frames-selected");
+    j.chord(CMD, Key::D);
+    j.look("frames-repeated");
+    j.note(format!(
+        "{drawings} drawings on {length} frames became {} drawings on {} frames",
+        cels(&j),
+        frames(&j)
+    ));
+    j.expect(
+        "cmd-d-repeats-selected-frames",
+        cels(&j) == drawings * 2 && frames(&j) == length * 2,
+        "cmd D with frames selected in the timeline repeats all of them after themselves",
+    );
+
+    j.act("press + and then - on a frame in the timeline");
+    j.drag_frames("roof", 1, 1);
+    let holds = |j: &Journey| -> Vec<(u32, Option<u32>)> {
+        j.ed().map_or(Vec::new(), |ed| {
+            ed.scene
+                .bundle
+                .doc
+                .all_layers()
+                .iter()
+                .flat_map(|l| l.cels().iter().map(|c| (c.frame, c.hold)))
+                .collect()
+        })
+    };
+    let (was_holds, was_frames) = (holds(&j), frames(&j));
+    j.key(Key::Equals);
+    j.look("plus-on-a-frame");
+    let longer = frames(&j);
+    j.key(Key::Minus);
+    j.look("minus-on-a-frame");
+    j.note(format!(
+        "the timeline went from {was_frames} frames to {longer} and back to {}",
+        frames(&j)
+    ));
+    j.expect(
+        "plus-and-minus-undo-each-other",
+        longer == was_frames + 1 && frames(&j) == was_frames && holds(&j) == was_holds,
+        "on a frame in the timeline + makes the drawing one frame longer and - takes exactly that back",
+    );
+
+    j.act("save with cmd S");
+    j.chord(CMD, Key::S);
+    j.look("saved");
+    j.expect(
+        "cmd-s-says-it-is-saved",
+        j.heard().contains("nothing to save") && j.heard().contains("house.klad"),
+        "cmd S says the drawing is saved as you go, and where it is",
+    );
+
+    j.act("export the picture from File > Export > Image, with a name");
+    j.menu("File", "Export", "Image… cmd E");
+    j.type_into("save as", "roof-shot");
+    j.look("export-image");
+    let middle =
+        j.h.query_all_by_label_contains("Export image")
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Window)
+            .map(|n| n.rect().center());
+    j.expect(
+        "export-opens-in-the-middle",
+        middle.is_some_and(|c| (c - egui::pos2(WINDOW.x / 2.0, WINDOW.y / 2.0)).length() < 4.0),
+        "the export window opens in the middle of the window",
+    );
+    j.click("Export");
+    j.look("exported");
+    let written = pngs(&j.folder)
+        .iter()
+        .any(|p| p.file_name().is_some_and(|n| n == "roof-shot.png"));
+    j.expect(
+        "export-takes-a-name-and-says-where",
+        written && j.heard().starts_with("exported to ") && j.heard().ends_with("roof-shot.png"),
+        "the export is written under the name typed and the message says where it is",
+    );
+    j.menu("File", "Export", "Godot…");
+    j.look("export-godot");
+    j.expect(
+        "godot-has-its-own-window",
+        j.shown("Godot folder") && !j.shown("16 bits per channel"),
+        "what Godot needs is in its own export window",
+    );
+
+    j.finish(&[]);
 }

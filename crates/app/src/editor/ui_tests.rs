@@ -1034,6 +1034,59 @@ fn each_tool_shows_its_options_and_the_strip_shows_the_eraser() {
 }
 
 #[test]
+fn a_click_paints_a_dot_at_once_and_a_stroke_has_no_taper_unless_asked() {
+    let path = sample("dot");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "notes");
+    assert_eq!(h.state().brush, "ink");
+    assert_eq!(
+        h.state().tuning.taper,
+        [0.0, 0.0],
+        "the brush in hand starts without a taper"
+    );
+    let at = canvas_at(&h, 200.0, 150.0);
+    h.hover_at(at);
+    h.run_steps(1);
+    h.drag_at(at);
+    h.run_steps(1);
+    let touched = h.state().buffer.touched().len();
+    assert!(touched > 0, "the press alone lays paint, before any drag");
+    h.drop_at(at);
+    h.run_steps(3);
+    let marks = h.state().scene.active_marks().to_vec();
+    assert_eq!(marks.len(), 1, "a click leaves one mark");
+    let dot = marks[0].as_stroke().unwrap();
+    assert_eq!(dot.taper, [0.0, 0.0]);
+    let (a, b) = (canvas_at(&h, 60.0, 300.0), canvas_at(&h, 260.0, 300.0));
+    pen_line(&mut h, a, b);
+    let line = h
+        .state()
+        .scene
+        .active_marks()
+        .last()
+        .and_then(|m| m.as_stroke().cloned())
+        .unwrap();
+    assert_eq!(line.taper, [0.0, 0.0]);
+    let bounds = klad_core::stroke::Mark::Stroke(line).bounds().unwrap();
+    assert!(
+        bounds[0] <= 60.0 && bounds[2] >= 260.0,
+        "the line covers from where the press began to where it was let go: {bounds:?}"
+    );
+    h.state_mut().tuning.taper = [12.0, 12.0];
+    let (a, b) = (canvas_at(&h, 60.0, 340.0), canvas_at(&h, 260.0, 340.0));
+    pen_line(&mut h, a, b);
+    let asked = h
+        .state()
+        .scene
+        .active_marks()
+        .last()
+        .and_then(|m| m.as_stroke().cloned())
+        .unwrap();
+    assert_eq!(asked.taper, [12.0, 12.0], "a taper set in the more menu is used");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn a_stroke_in_a_flipped_view_lands_under_the_pen() {
     let path = sample("flip");
     let mut h = harness(editor(&path), vec2(1440.0, 900.0));
@@ -2677,11 +2730,22 @@ fn layer_rows_drag_rename_duplicate_group_and_delete() {
     activate(&mut h, "rim");
     h.state_mut().invoke(Cmd::RenameLayer).unwrap();
     h.run_steps(2);
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    assert!(
+        h.query_all(By::new().role(Role::Label).label("rename"))
+            .next()
+            .is_none(),
+        "the row shows the name to type over, not the word rename"
+    );
+    h.event(egui::Event::Text("rim light".into()));
     h.run_steps(1);
-    h.get_by_role_and_label(Role::TextInput, "rename")
-        .type_text("rim light");
-    h.run_steps(1);
+    assert_eq!(
+        h.get_by_role_and_label(Role::TextInput, "rename")
+            .accesskit_node()
+            .value()
+            .as_deref(),
+        Some("rim light"),
+        "the name was selected, so typing replaces it"
+    );
     h.key_press(egui::Key::Enter);
     h.run_steps(2);
     assert_eq!(top_down(&h)[0], "rim light");
@@ -2772,6 +2836,657 @@ fn timeline_cells_select_by_dragging_copy_paste_move_and_open_the_clip() {
     h.state_mut().invoke(Cmd::ClipSettings).unwrap();
     h.run_steps(2);
     assert!(h.query_all(By::new().label_contains("Clip walk")).count() > 0);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+fn said(h: &Harness<'static, Editor>) -> String {
+    h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default()
+}
+
+fn marks_on(h: &Harness<'static, Editor>, layer: &Layer) -> usize {
+    layer
+        .cels()
+        .iter()
+        .map(|c| {
+            h.state()
+                .scene
+                .bundle
+                .read_marks(&layer.id, &c.id)
+                .map_or(0, |m| m.len())
+        })
+        .sum()
+}
+
+fn right_click(h: &mut Harness<'static, Editor>, at: egui::Pos2) {
+    h.hover_at(at);
+    h.run_steps(1);
+    [true, false].into_iter().for_each(|pressed| {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.run_steps(1);
+    });
+    h.run_steps(2);
+}
+
+#[test]
+fn frame_keys_wait_for_the_timeline_and_cmd_d_repeats_the_selected_frames() {
+    use super::Focus;
+    let path = sample("frame-keys");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let frames = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.timeline.frames;
+    let shown = |h: &Harness<'static, Editor>, name: &str| -> Vec<(u32, Option<u32>)> {
+        layer_named(h, name).cels().iter().map(|c| (c.frame, c.hold)).collect()
+    };
+    assert_eq!(h.state().focus, Focus::Canvas);
+    h.key_press(Key::Equals);
+    h.run_steps(2);
+    assert_eq!(frames(&h), 24, "+ changes nothing while the canvas has the keys");
+    assert!(
+        said(&h).contains("timeline key") && said(&h).contains("Frame > Hold longer"),
+        "and says where it works: {}",
+        said(&h)
+    );
+    h.key_press(Key::I);
+    h.run_steps(2);
+    assert_eq!(shown(&h, "lines"), [(0, None)]);
+    assert!(said(&h).contains("Frame > Insert frame"), "{}", said(&h));
+    h.state_mut().invoke(Cmd::HoldLonger).unwrap();
+    h.run_steps(2);
+    assert_eq!(frames(&h), 25, "the menu still runs it from anywhere");
+    h.state_mut().invoke(Cmd::HoldShorter).unwrap();
+    h.run_steps(2);
+    assert_eq!(frames(&h), 24);
+
+    let geom = h.state().timeline.geom.unwrap();
+    click_with(&mut h, geom.cell_centre(0, 0), Modifiers::NONE);
+    assert_eq!(
+        h.state().focus,
+        Focus::Timeline,
+        "a click on a frame gives the timeline the keys"
+    );
+    let before: Vec<_> = LAYERS.iter().map(|name| shown(&h, name)).collect();
+    h.key_press(Key::Equals);
+    h.run_steps(2);
+    assert_eq!(
+        frames(&h),
+        25,
+        "+ makes a drawing that runs to the end one frame longer"
+    );
+    h.key_press(Key::Minus);
+    h.run_steps(2);
+    assert_eq!(frames(&h), 24, "and - takes exactly that back");
+    assert_eq!(
+        LAYERS.iter().map(|name| shown(&h, name)).collect::<Vec<_>>(),
+        before,
+        "on every layer"
+    );
+
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(2);
+    let span = h.state().timeline.span.clone().expect("cmd A selects the frames");
+    assert_eq!((span.from, span.to), (0, 23));
+    assert!(span.rows.len() >= LAYERS.len(), "{:?}", span.rows);
+    let lines = layer_named(&h, "lines").id.clone();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(3);
+    assert_eq!(
+        frames(&h),
+        48,
+        "cmd D repeats the selected frames after themselves: {}",
+        said(&h)
+    );
+    assert_eq!(shown(&h, "lines"), [(0, None), (24, Some(24))]);
+    let copy = layer_named(&h, "lines").cels()[1].clone();
+    assert!(copy.link.is_none(), "as a copy, not a link");
+    assert_eq!(h.state().scene.bundle.read_marks(&lines, &copy.id).unwrap().len(), 2);
+    let span = h.state().timeline.span.clone().unwrap();
+    assert_eq!(
+        (span.from, span.to, h.state().scene.frame),
+        (24, 47, 24),
+        "the copies are selected"
+    );
+    assert!(said(&h).contains("frames 0 to 23"), "{}", said(&h));
+
+    h.key_press(Key::Delete);
+    h.run_steps(3);
+    assert_eq!(shown(&h, "lines"), [(0, None)], "Delete takes the selected drawings");
+    assert!(
+        said(&h).contains("drawings in the selected frames (cmd Z brings them back)"),
+        "and says so: {}",
+        said(&h)
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    h.state_mut().timeline.span = None;
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(3);
+    assert_eq!(
+        shown(&h, "lines").len(),
+        3,
+        "with no frames selected cmd D copies the drawing under the playhead: {:?}",
+        shown(&h, "lines")
+    );
+
+    h.key_press(Key::B);
+    h.run_steps(2);
+    let spot = canvas_at(&h, 450.0, 350.0);
+    click_with(&mut h, spot, Modifiers::NONE);
+    assert_eq!(
+        h.state().focus,
+        Focus::Canvas,
+        "a press on the canvas gives the keys back"
+    );
+    let cels = shown(&h, "lines");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(2);
+    assert_eq!(shown(&h, "lines"), cels, "cmd D on the canvas leaves the frames alone");
+    assert!(
+        said(&h).contains("select strokes (S) or a shape (V) first"),
+        "{}",
+        said(&h)
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_bar_at_a_selection_acts_on_the_canvas_even_after_a_click_in_the_timeline() {
+    use super::Focus;
+    let path = sample("bar-focus");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(3);
+    let geom = h.state().timeline.geom.unwrap();
+    click_with(&mut h, geom.cell_centre(0, 0), Modifiers::NONE);
+    assert_eq!(h.state().focus, Focus::Timeline);
+    assert!(h.state().picked.is_some(), "the strokes stay selected");
+    let bin = crate::theme::hints(&h.ctx)
+        .into_iter()
+        .find(|(_, text)| text.starts_with("delete the selection"))
+        .map(|(rect, _)| rect)
+        .expect("the bar at the selection has a delete button");
+    click_with(&mut h, bin.center(), Modifiers::NONE);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().focus,
+        Focus::Canvas,
+        "a press on the bar gives the canvas the keys"
+    );
+    assert_eq!(
+        (
+            layer_named(&h, "lines").cels().len(),
+            marks_on(&h, layer_named(&h, "lines"))
+        ),
+        (1, 0),
+        "its delete takes the selected strokes and leaves the drawing in the timeline"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_right_click_on_the_canvas_moves_what_is_selected_to_a_new_layer() {
+    let path = sample("to-new-layer");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let layers = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.all_layers().len();
+    let before = layers(&h);
+    let spot = canvas_at(&h, 450.0, 350.0);
+    right_click(&mut h, spot);
+    let item = h
+        .query_all_by_label("Move to new layer")
+        .next()
+        .expect("a right click on the canvas opens a menu");
+    assert!(
+        item.accesskit_node().is_disabled(),
+        "greyed out while nothing is selected"
+    );
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(2);
+    right_click(&mut h, spot);
+    h.get_by_label("Move to new layer").click();
+    h.run_steps(3);
+    assert_eq!(layers(&h), before + 1, "{}", said(&h));
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        (made.name.as_str(), made.kind(), marks_on(&h, &made)),
+        ("lines part", klad_core::doc::Kind::Paint, 2),
+        "both strokes are on the new layer, which is the active one"
+    );
+    assert_eq!(marks_on(&h, layer_named(&h, "lines")), 0, "and gone from the old one");
+    let order: Vec<String> = top_down(&h);
+    let place = |name: &str| order.iter().position(|n| n == name).unwrap();
+    assert_eq!(place("lines part") + 1, place("lines"), "right above it: {order:?}");
+    assert_eq!(
+        h.state().picked.as_ref().map(|p| p.ids.len()),
+        Some(2),
+        "they stay selected"
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        (layers(&h), marks_on(&h, layer_named(&h, "lines"))),
+        (before, 2),
+        "one undo puts them back"
+    );
+
+    activate(&mut h, "shapes");
+    let id = layer_named(&h, "shapes").cels()[0].nodes[0].id.clone();
+    h.state_mut().tool = Tool::Select;
+    h.state_mut().picked = None;
+    h.state_mut().selection = Some(id.clone());
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::MoveToNewLayer).unwrap();
+    h.run_steps(3);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        (made.name.as_str(), made.kind()),
+        ("shapes part", klad_core::doc::Kind::Vector)
+    );
+    assert_eq!(
+        made.cels()[0].nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+        std::slice::from_ref(&id),
+        "a shape moves as it is, with its id"
+    );
+    assert!(layer_named(&h, "shapes").cels()[0].nodes.is_empty());
+    assert_eq!(h.state().selection, Some(id));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn shapes_copy_and_paste_and_the_keys_say_why_when_they_cannot() {
+    let path = sample("shape-copy");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "shapes");
+    let shapes = layer_named(&h, "shapes").id.clone();
+    let nodes = |h: &Harness<'static, Editor>| {
+        h.state().scene.bundle.doc.layer(&shapes).unwrap().cels()[0]
+            .nodes
+            .clone()
+    };
+    let id = nodes(&h)[0].id.clone();
+    h.state_mut().tool = Tool::Select;
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::C);
+    h.run_steps(2);
+    assert!(
+        said(&h).contains("select strokes (S) or a shape (V) first"),
+        "cmd C with nothing selected says what to do: {}",
+        said(&h)
+    );
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+    h.run_steps(2);
+    assert!(said(&h).contains("nothing is copied yet"), "{}", said(&h));
+    h.state_mut().selection = Some(id.clone());
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::C);
+    h.run_steps(2);
+    assert!(said(&h).contains("copied one shape"), "{}", said(&h));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+    h.run_steps(3);
+    let now = nodes(&h);
+    assert_eq!(now.len(), 2, "cmd V pastes the shape: {}", said(&h));
+    assert_eq!(now[1].shape, now[0].shape, "in place");
+    assert_ne!(now[1].id, id);
+    assert_eq!(
+        h.state().selection,
+        Some(now[1].id.clone()),
+        "the copy is the selection"
+    );
+    assert!(said(&h).contains("pasted one shape"), "{}", said(&h));
+
+    activate(&mut h, "lines");
+    let before = h.state().scene.bundle.doc.all_layers().len();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+    h.run_steps(3);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(h.state().scene.bundle.doc.all_layers().len(), before + 1);
+    assert_eq!(
+        (made.kind(), made.cels()[0].nodes.len(), made.id != shapes),
+        (klad_core::doc::Kind::Vector, 1, true),
+        "pasted while a paint layer is active, the shape gets a vector layer of its own above it"
+    );
+    assert!(said(&h).contains("on a new vector layer above lines"), "{}", said(&h));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_shape_drawn_on_a_paint_layer_gets_a_vector_layer_of_its_own() {
+    let path = sample("auto-vector");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "colour");
+    let before = h.state().scene.bundle.doc.all_layers().len();
+    h.key_press(Key::U);
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("it goes on a new vector layer above this one")
+            .count()
+            > 0,
+        "the options bar says where the shape will go"
+    );
+    let (from, to) = (canvas_at(&h, 200.0, 120.0), canvas_at(&h, 320.0, 220.0));
+    drag(&mut h, from, to);
+    h.run_steps(3);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        before + 1,
+        "{}",
+        said(&h)
+    );
+    assert_eq!(
+        (made.kind(), made.name.as_str(), made.cels()[0].nodes.len()),
+        (klad_core::doc::Kind::Vector, "shapes", 1)
+    );
+    assert!(
+        said(&h).contains("rectangle added on a new vector layer above colour"),
+        "{}",
+        said(&h)
+    );
+    let (from, to) = (canvas_at(&h, 60.0, 260.0), canvas_at(&h, 160.0, 330.0));
+    drag(&mut h, from, to);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        before + 1,
+        "the next shape lands on that layer"
+    );
+    assert_eq!(h.state().scene.active_layer().unwrap().cels()[0].nodes.len(), 2);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_colour_panel_mixes_in_hsl_rgb_and_lab_and_keeps_the_choice() {
+    let path = sample("colour-models");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut().set_colour([0.2, 0.4, 0.6, 1.0]);
+    h.run_steps(2);
+    assert!(
+        h.query_by_role_and_label(Role::Slider, "V").is_some(),
+        "the wheel's own numbers show first"
+    );
+    let slide = |h: &mut Harness<'static, Editor>, name: &str, across: f32| {
+        let rect = h.get_by_role_and_label(Role::Slider, name).rect();
+        let at = egui::pos2(rect.left() + rect.width() * across, rect.center().y);
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(2);
+    };
+    h.get_by_label("RGB").click();
+    h.run_steps(2);
+    assert_eq!(
+        h.state().settings.colour_model,
+        crate::color::Model::Rgb,
+        "the choice goes into the settings"
+    );
+    slide(&mut h, "R", 1.0);
+    assert_eq!(crate::color::hex(h.state().color), "#ff6699", "R all the way up");
+    slide(&mut h, "B", 0.0);
+    assert_eq!(crate::color::hex(h.state().color), "#ff6600");
+
+    h.get_by_label("HSL").click();
+    h.run_steps(2);
+    slide(&mut h, "L", 0.0);
+    assert_eq!(crate::color::hex(h.state().color), "#000000", "lightness 0 is black");
+    slide(&mut h, "L", 0.5);
+    assert_eq!(
+        crate::color::hex(h.state().color),
+        "#ff6600",
+        "and the hue and saturation are still there when the lightness comes back"
+    );
+
+    h.get_by_label("Lab").click();
+    h.state_mut().set_colour([0.6, 0.45, 0.35, 1.0]);
+    h.run_steps(2);
+    let lab = klad_core::color::to_lab(h.state().color);
+    slide(&mut h, "L", 0.25);
+    let darker = klad_core::color::to_lab(h.state().color);
+    assert!(
+        (darker[0] - 25.0).abs() < 1.5 && (darker[1] - lab[1]).abs() < 3.0 && (darker[2] - lab[2]).abs() < 3.0,
+        "L alone makes a darker shade of the same colour: {lab:?} {darker:?}"
+    );
+    slide(&mut h, "A", 0.5);
+    assert!((h.state().color[3] - 0.5).abs() < 0.02, "A sets how see-through it is");
+    audit(&h, "the colour panel in Lab");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_recolour_button_opens_a_picker_with_the_palette() {
+    let path = sample("recolour-picker");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut()
+        .apply(parse_lines(r##"{"op":"palette","add":"#3060c0","name":"sea"}"##).unwrap())
+        .unwrap();
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.state_mut().pick_new_colour([1.0, 0.5, 0.0, 1.0]);
+    h.run_steps(3);
+    let lines = layer_named(&h, "lines").clone();
+    let colours = |h: &Harness<'static, Editor>| -> Vec<String> {
+        h.state()
+            .scene
+            .bundle
+            .read_marks(&lines.id, &lines.cels()[0].id)
+            .unwrap()
+            .iter()
+            .map(|m| klad_core::color::to_hex(m.color()))
+            .collect()
+    };
+    let before = colours(&h);
+    h.get_by_role_and_label(Role::Button, "the colour of the selected strokes")
+        .click();
+    h.run_steps(3);
+    let wheels = |h: &Harness<'static, Editor>| h.query_all_by_label("colour wheel").count();
+    assert_eq!(colours(&h), before, "the button opens a picker and changes nothing yet");
+    assert_eq!(wheels(&h), 2, "a wheel of its own beside the Colour panel's");
+    assert_eq!(
+        h.query_all_by_label("palette").count(),
+        2,
+        "with the drawing's palette in it"
+    );
+    audit(&h, "the recolour picker");
+    h.query_all(By::new().role(Role::Button).label("#3060c0"))
+        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .expect("the palette colour in the picker over the canvas")
+        .click();
+    h.run_steps(3);
+    assert_eq!(
+        colours(&h),
+        ["#3060c0", "#3060c0"],
+        "a palette colour recolours the selection"
+    );
+    assert_eq!(
+        crate::color::hex(h.state().color),
+        "#ff8000",
+        "and leaves the colour you paint with alone"
+    );
+    assert_eq!(wheels(&h), 2, "the picker stays open for another try");
+    h.get_by_label("use the current colour").click();
+    h.run_steps(3);
+    let close = |hex: &String, to: &str| {
+        let (a, b) = (
+            crate::color::to_srgb(crate::color::rgba_of(hex).unwrap()),
+            crate::color::to_srgb(crate::color::rgba_of(to).unwrap()),
+        );
+        a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 1)
+    };
+    assert!(
+        colours(&h).iter().all(|c| close(c, "#ff8000")),
+        "the colour in hand is one click away: {:?}",
+        colours(&h)
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert_eq!(colours(&h), ["#3060c0", "#3060c0"], "each choice is one undo step");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn windows_open_in_the_middle_and_stay_where_they_are_put() {
+    let path = sample("middle");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let middle = egui::pos2(720.0, 500.0);
+    let window = |h: &Harness<'static, Editor>, title: &str| {
+        h.query_all_by_label_contains(title)
+            .find(|n| n.accesskit_node().role() == Role::Window)
+            .map(|n| n.rect())
+            .unwrap_or_else(|| panic!("no window {title}"))
+    };
+    [
+        (Cmd::Export, "Export image"),
+        (Cmd::ExportGif, "Export GIF"),
+        (Cmd::OnionSettings, "Onion skin"),
+        (Cmd::AddFont, "Add a font"),
+        (Cmd::ClipSettings, "Clip walk"),
+    ]
+    .into_iter()
+    .for_each(|(cmd, title)| {
+        h.state_mut().invoke(cmd).unwrap();
+        h.run_steps(6);
+        let rect = window(&h, title);
+        assert!(
+            (rect.center() - middle).length() < 4.0,
+            "{title} opens in the middle of the window: {rect:?}"
+        );
+        h.state_mut().invoke(cmd).unwrap();
+        h.run_steps(2);
+    });
+    h.state_mut().invoke(Cmd::Export).unwrap();
+    h.run_steps(6);
+    h.state_mut().invoke(Cmd::ExportGodotWindow).unwrap();
+    h.run_steps(6);
+    let rect = window(&h, "Export for Godot");
+    assert!(
+        (rect.center() - middle).length() < 4.0,
+        "choosing another export while one is open shows that one in the middle too: {rect:?}"
+    );
+    let grab = egui::pos2(rect.center().x, rect.top() + 14.0);
+    drag(&mut h, grab, grab + vec2(-200.0, -120.0));
+    h.run_steps(3);
+    let moved = window(&h, "Export for Godot");
+    assert!(
+        (moved.center() - rect.center() - vec2(-200.0, -120.0)).length() < 4.0,
+        "a window stays where it is dragged: {moved:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn each_export_shows_only_what_it_uses_and_says_where_the_file_went() {
+    use super::export::What;
+    use crate::jobs::Tag;
+    let path = sample("export-kinds");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let has = |h: &Harness<'static, Editor>, label: &str| h.query_all_by_label(label).count() > 0;
+    h.state_mut().invoke(Cmd::Export).unwrap();
+    h.run_steps(4);
+    assert!(has(&h, "folder") && has(&h, "save as") && has(&h, "16 bits per channel"));
+    assert!(
+        !has(&h, "frames") && !has(&h, "Godot folder") && !has(&h, "padding px"),
+        "one image has no frames to name and nothing of Godot's or the sheet's"
+    );
+    audit(&h, "the export window for an image");
+    h.state_mut().invoke(Cmd::ExportSheet).unwrap();
+    h.run_steps(4);
+    assert!(h.state().exporting(What::Sheet) && has(&h, "frames") && has(&h, "padding px"));
+    h.state_mut().invoke(Cmd::ExportGodotWindow).unwrap();
+    h.run_steps(4);
+    assert!(has(&h, "Godot folder") && has(&h, "an animated sprite") && has(&h, "cast shadows"));
+    assert!(!has(&h, "folder") && !has(&h, "16 bits per channel") && !has(&h, "frames"));
+    audit(&h, "the export window for Godot");
+
+    h.state_mut().invoke(Cmd::Export).unwrap();
+    h.run_steps(3);
+    let out = path
+        .parent()
+        .unwrap()
+        .join(format!("export-kinds-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    {
+        let form = &mut h.state_mut().export;
+        form.folder = out.display().to_string();
+        form.name = "hero".into();
+    }
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("hero.png").count() > 0,
+        "the window says where the file will go before it is written"
+    );
+    hush(&mut h);
+    h.get_by_role_and_label(Role::Button, "Export").click();
+    h.run_steps(2);
+    settle(&mut h, |ed| !ed.jobs.busy(Tag::Export));
+    h.run_steps(3);
+    assert!(
+        out.join("hero.png").is_file(),
+        "the folder is made and the file has the name typed"
+    );
+    assert!(
+        said(&h).starts_with("exported to ") && said(&h).ends_with("hero.png"),
+        "the message is where the file is, in plain words: {}",
+        said(&h)
+    );
+    assert!(has(&h, "Show the folder"), "and the window offers to open that folder");
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_turned_view_snaps_with_shift_and_goes_back_upright_from_the_canvas_or_a_key() {
+    let path = sample("twist");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let angle = |h: &Harness<'static, Editor>| h.state().view.unwrap().angle.to_degrees();
+    let twist = |h: &mut Harness<'static, Editor>, degrees: f32, modifiers: Modifiers| {
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        h.hover_at(canvas_at(h, 256.0, 192.0));
+        h.event(egui::Event::Rotate(degrees.to_radians()));
+        h.run_steps(2);
+        h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(1);
+    };
+    assert!(h.query_all_by_label_contains("upright").count() == 0);
+    twist(&mut h, 23.0, Modifiers::NONE);
+    assert!(
+        (angle(&h) - 23.0).abs() < 0.01,
+        "a twist turns the view freely: {}",
+        angle(&h)
+    );
+    assert!(
+        h.query_all_by_label_contains("view turned 23").count() > 0,
+        "and a note on the canvas says it is turned"
+    );
+    twist(&mut h, 4.0, Modifiers::SHIFT);
+    assert!(
+        (angle(&h) - 30.0).abs() < 0.01,
+        "with shift it snaps to 15 degree steps: {}",
+        angle(&h)
+    );
+    h.key_press(Key::R);
+    h.run_steps(2);
+    assert!((angle(&h) - 45.0).abs() < 0.01);
+    h.get_by_label_contains("upright").click();
+    h.run_steps(3);
+    assert!(angle(&h).abs() < 0.01, "the button on the canvas puts it back");
+    assert!(h.query_all_by_label_contains("upright").count() == 0, "and goes away");
+    twist(&mut h, -40.0, Modifiers::NONE);
+    h.key_press_modifiers(Modifiers::ALT, Key::R);
+    h.run_steps(2);
+    assert!(angle(&h).abs() < 0.01, "alt R does the same");
+    twist(&mut h, 1.5, Modifiers::NONE);
+    assert!(
+        angle(&h).abs() < 0.01,
+        "a twist that ends close to upright rests upright"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -3538,9 +4253,42 @@ fn the_pen_draws_closed_and_open_paths_on_a_vector_layer() {
         h.drop_at(p);
         h.run_steps(1);
     };
+    let layers = h.state().scene.bundle.doc.all_layers().len();
     click(&mut h, at(300.0, 100.0));
-    let refused = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
-    assert!(refused.contains("vector layer"), "{refused}");
+    click(&mut h, at(380.0, 140.0));
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        (made.kind(), made.name.as_str(), made.cels()[0].nodes.len()),
+        (klad_core::doc::Kind::Vector, "paths", 1),
+        "a path drawn on a paint layer goes on a new vector layer, which becomes the active one"
+    );
+    assert_eq!(h.state().scene.bundle.doc.all_layers().len(), layers + 1);
+    let order: Vec<String> = h
+        .state()
+        .scene
+        .bundle
+        .doc
+        .layers
+        .iter()
+        .map(|l| l.name.clone())
+        .collect();
+    let place = |name: &str| order.iter().position(|n| n == name).unwrap();
+    assert_eq!(
+        place("paths").abs_diff(place("lines")),
+        1,
+        "right next to the layer in hand: {order:?}"
+    );
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert!(said.contains("on a new vector layer above lines"), "{said}");
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        layers,
+        "one undo takes the path and its layer back"
+    );
     activate(&mut h, "shapes");
     let nodes = |h: &Harness<'static, Editor>| layer_named(h, "shapes").cels()[0].nodes.clone();
     let before = nodes(&h).len();
@@ -3624,7 +4372,7 @@ fn the_brush_window_edits_a_brush_shows_it_and_saves_it_in_the_drawing() {
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
     activate(&mut h, "lines");
     h.key_press(Key::F5);
-    h.run_steps(3);
+    h.run_steps(10);
     assert!(h.state().windows.brush);
     let shown = |h: &Harness<'static, Editor>| h.state().brush_window_preview_key();
     let before = shown(&h);
@@ -3662,7 +4410,7 @@ fn the_brush_window_edits_a_brush_shows_it_and_saves_it_in_the_drawing() {
         "drawn with the edited brush as a variant: {drawn}"
     );
     h.key_press(Key::F5);
-    h.run_steps(2);
+    h.run_steps(10);
     h.state_mut().brush_window.name = "Wet Dry".into();
     h.get_by_role_and_label(Role::Button, "save in this drawing").click();
     h.run_steps(3);
@@ -4628,10 +5376,11 @@ fn the_cli_only_features_run_from_the_editor_and_give_what_the_cli_gives() {
     assert_eq!(h.state().fonts(), ["Phosphor.ttf"]);
 
     h.state_mut().invoke(Cmd::Export).unwrap();
-    h.state_mut().export.out = base.join("ours.png").to_string_lossy().to_string();
+    h.state_mut().export.folder = base.to_string_lossy().to_string();
+    h.state_mut().export.name = "ours".into();
     h.run_steps(2);
     hush(&mut h);
-    h.get_by_role_and_label(Role::Button, "export").click();
+    h.get_by_role_and_label(Role::Button, "Export").click();
     h.run_steps(2);
     settle(&mut h, idle(Tag::Export));
     run(&[
@@ -4667,7 +5416,7 @@ fn the_brush_window_feathers_and_frays_a_round_brush() {
     activate(&mut h, "lines");
     h.state_mut().pick("ink");
     h.key_press(Key::F5);
-    h.run_steps(3);
+    h.run_steps(10);
     assert!(h.state().windows.brush);
     ["feather", "fringe"].iter().for_each(|label| {
         let track = h.get_by_role_and_label(Role::Slider, label).rect();
@@ -4720,7 +5469,7 @@ fn paint_with_body_from_the_brush_window_lit_by_a_relief_turned_with_its_dial() 
     activate(&mut h, "lines");
     h.state_mut().pick("oil");
     h.key_press(Key::F5);
-    h.run_steps(3);
+    h.run_steps(10);
     assert!(h.state().windows.brush);
     let track = h.get_by_role_and_label(Role::Slider, "body").rect();
     let at = egui::pos2(track.left() + track.width() * 0.9, track.center().y);
@@ -5035,9 +5784,20 @@ fn the_menu_bar_reaches_commands_shows_their_state_and_greys_what_cannot_run() {
     h.get_by_label("File").click();
     h.run_steps(2);
     assert!(h.query_by_label("Close cmd W").is_some(), "items carry their keys");
-    h.get_by_label("Export… cmd E").click();
+    h.hover_at(item(&h, "Export").center());
     h.run_steps(3);
-    assert!(h.state().windows.export, "File > Export… opens the export window");
+    h.get_by_label("Image… cmd E").click();
+    h.run_steps(3);
+    assert!(
+        h.state().exporting(super::export::What::Image),
+        "File > Export > Image… opens the export window on a single image"
+    );
+    assert!(
+        h.query_all_by_label_contains("Export image").count() > 0 && h.query_by_label("Godot folder").is_none(),
+        "the window is named after what it writes and shows nothing of the other kinds"
+    );
+    h.state_mut().windows.export = false;
+    h.run_steps(2);
     assert!(h.state().settings.layout.timeline);
     h.get_by_label("Window").click();
     h.run_steps(2);
@@ -6437,8 +7197,16 @@ fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_expor
     h.state_mut().windows.export = true;
     h.run_steps(3);
     h.get_by_role_and_label(Role::CheckBox, "normal").click();
-    h.get_by_role_and_label(Role::CheckBox, "shadows").click();
     h.run_steps(2);
+    assert!(
+        h.query_by_label("cast shadows").is_none(),
+        "what only Godot uses is not in the sheet's window"
+    );
+    h.state_mut().export.what = super::export::What::Godot;
+    h.run_steps(6);
+    h.get_by_role_and_label(Role::CheckBox, "cast shadows").click();
+    h.run_steps(2);
+    h.state_mut().export.what = super::export::What::Sheet;
     let form = h.state().export.clone();
     assert_eq!(form.maps, vec![klad_render::maps::Map::Normal]);
     assert!(form.occluders);

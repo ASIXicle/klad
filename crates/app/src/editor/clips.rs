@@ -184,14 +184,6 @@ impl Strip {
     }
 }
 
-fn summary(stderr: &str) -> String {
-    let keep: Vec<&str> = stderr
-        .lines()
-        .filter(|l| l.starts_with("animations:") || l.starts_with("kept ") || l.contains(" in all"))
-        .collect();
-    keep.join("; ")
-}
-
 fn failure(stderr: &str) -> String {
     let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(3)..].join(" ")
@@ -354,7 +346,7 @@ impl Editor {
             args,
             env: Vec::new(),
             reruns: 3,
-            summary: |out, _| out.lines().last().unwrap_or_default().to_string(),
+            summary: super::export::godot_written,
             failure: |_, err| failure(err),
         });
     }
@@ -378,7 +370,7 @@ impl Editor {
             args,
             env: Vec::new(),
             reruns: 3,
-            summary: |_, err| summary(err),
+            summary: super::export::godot_written,
             failure: |_, err| failure(err),
         });
     }

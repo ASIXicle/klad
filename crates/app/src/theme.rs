@@ -117,6 +117,8 @@ pub mod icon {
     pub const FILE: &str = "\u{E230}";
     pub const FILE_PLUS: &str = "\u{E236}";
     pub const FOLDER_OPEN: &str = "\u{E256}";
+    pub const SAVE: &str = "\u{E248}";
+    pub const STACK_PLUS: &str = "\u{EDF6}";
 }
 
 pub fn install(ctx: &egui::Context) {
@@ -245,6 +247,14 @@ pub fn hinted(ctx: &egui::Context) -> Vec<Rect> {
 #[cfg(test)]
 pub fn hints(ctx: &egui::Context) -> Vec<(Rect, String)> {
     ctx.data(|d| d.get_temp::<Vec<(Rect, String)>>(hint_texts_id()).unwrap_or_default())
+}
+
+pub fn select_all(ctx: &egui::Context, field: Id, text: &str) {
+    let mut state = egui::text_edit::TextEditState::load(ctx, field).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::select_all_str(text)));
+    state.store(ctx, field);
 }
 
 pub trait Hint {

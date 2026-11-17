@@ -1,8 +1,8 @@
-_Last updated: 2026-11-10 21:45_
+_Last updated: 2026-11-17 09:25_
 
 # Shapes, paths and text
 
-Draw shapes and text that stay sharp at any size and keep their points editable. They go on a vector layer: click **vector** in the Layers pane first.
+Draw shapes and text that stay sharp at any size and keep their points editable. They go on a vector layer. Click **vector** in the Layers pane to add one, or just draw: while a paint layer is active, klad puts the shape on a new vector layer above it.
 
 ## Draw a rectangle or an ellipse
 

@@ -1,6 +1,6 @@
 use super::selection::Selected;
 use super::tweens::{self, SpanAction};
-use super::{Editor, Tool};
+use super::{Editor, Focus, Tool};
 use crate::commands::{Cmd, Repeat};
 use crate::jobs::{Spec, Tag};
 use crate::layout::Pane;
@@ -21,6 +21,14 @@ use serde_json::{Map, json};
 use std::collections::BTreeSet;
 
 const RECENT: usize = 12;
+const TIMELINE_KEYS: [Cmd; 6] = [
+    Cmd::InsertFrame,
+    Cmd::InsertFrameAll,
+    Cmd::HoldLonger,
+    Cmd::HoldShorter,
+    Cmd::MoveEarlier,
+    Cmd::MoveLater,
+];
 
 impl Editor {
     fn drawing_here(&self) -> Option<(klad_core::doc::Cel, u32)> {
@@ -44,7 +52,47 @@ impl Editor {
         None
     }
 
+    pub(super) fn on_timeline(&self) -> bool {
+        let layout = &self.settings.layout;
+        self.focus == Focus::Timeline && layout.shows_timeline() && !layout.timeline_folded
+    }
+
+    pub(super) fn for_focus(&self, cmd: Cmd) -> Cmd {
+        match (self.on_timeline(), cmd) {
+            (true, Cmd::Copy) => Cmd::CopyCells,
+            (true, Cmd::Paste) => Cmd::PasteCells,
+            (true, Cmd::DuplicateInPlace) => Cmd::Duplicate,
+            (true, Cmd::Delete) => Cmd::DeleteDrawing,
+            (true, Cmd::SelectAll) => Cmd::SelectAllFrames,
+            _ => cmd,
+        }
+    }
+
+    fn timeline_key(&self, cmd: Cmd) -> Option<String> {
+        (!self.on_timeline() && TIMELINE_KEYS.contains(&cmd)).then(|| {
+            let first = match self.settings.layout.shows_timeline() && !self.settings.layout.timeline_folded {
+                true => "click a frame in the timeline first",
+                false => "open the timeline (Window > Timeline) and click a frame first",
+            };
+            format!(
+                "{} is a timeline key ({}): {first}, or use Frame > {}",
+                self.bindings.label(cmd),
+                cmd.spec().name,
+                cmd.menu()
+            )
+        })
+    }
+
+    pub(super) fn say_saved(&mut self) {
+        let at = crate::places::tilde(&self.scene.bundle.root);
+        self.say(
+            Tone::Done,
+            format!("nothing to save: klad writes every change into the drawing as you make it. This drawing is {at}"),
+        );
+    }
+
     pub(super) fn can_run(&self, cmd: Cmd) -> Option<String> {
+        let cmd = self.for_focus(cmd);
         let spec = cmd.spec();
         if spec.is_hold() {
             return Some(format!("{}: {}", spec.name, self.bindings.label(cmd)));
@@ -93,12 +141,17 @@ impl Editor {
                     .then(|| "select a shape or strokes with V first".to_string()),
             }
             .or(editing),
-            Cmd::Copy => need_strokes(),
-            Cmd::Paste => match (&self.clipboard, self.drag.is_some()) {
-                (None, _) => Some("copy strokes first: S, select them, cmd C".into()),
+            Cmd::Copy | Cmd::MoveToNewLayer => match self.selected() {
+                Some(Selected::Strokes | Selected::Shape(_)) => editing,
+                _ => Some("select strokes (S) or a shape (V) first".to_string()),
+            },
+            Cmd::Paste => match (self.clipboard.is_some() || self.shape_clip.is_some(), self.drag.is_some()) {
+                (false, _) => Some("nothing is copied yet: select strokes or a shape and press cmd C".into()),
                 (_, true) => Some("finish the drag first".into()),
                 _ => None,
             },
+            Cmd::Save => None,
+            Cmd::SelectAllFrames => self.timeline_edit(),
             Cmd::TransformLayer => self
                 .scene
                 .active_layer()
@@ -276,8 +329,7 @@ impl Editor {
                 })
             }
             Cmd::Duplicate | Cmd::DeleteDrawing => self.timeline_edit().or_else(|| {
-                self.drawing_here()
-                    .is_none()
+                (span.is_none() && self.drawing_here().is_none())
                     .then(|| "no drawing on this frame of the active layer".to_string())
             }),
             Cmd::Unlink => self.timeline_edit().or_else(|| {
@@ -300,7 +352,7 @@ impl Editor {
             Cmd::HoldShorter => self.timeline_edit().or_else(|| match self.drawing_here() {
                 None => Some("no drawing on this frame".into()),
                 Some((cel, end)) if end != OPEN && end - cel.frame <= 1 => {
-                    Some(format!("{} already shows for one frame", cel.id))
+                    Some("this drawing already shows for one frame; delete it instead".to_string())
                 }
                 _ => None,
             }),
@@ -435,7 +487,7 @@ impl Editor {
                 } else {
                     self.godot_folder()
                         .is_empty()
-                        .then(|| "type the Godot folder in the clip row first".to_string())
+                        .then(|| "choose the Godot folder first: File > Export > Godot…".to_string())
                 }
             }
             Cmd::Play => self.busy().then(|| "finish the stroke or drag first".to_string()),
@@ -526,7 +578,12 @@ impl Editor {
             Cmd::Settings => self.windows.settings,
             Cmd::About => self.windows.about,
             Cmd::ReportProblem => self.windows.report,
-            Cmd::Export => self.windows.export,
+            Cmd::Export => self.exporting(super::export::What::Image),
+            Cmd::ExportFrames => self.exporting(super::export::What::Frames),
+            Cmd::ExportSheet => self.exporting(super::export::What::Sheet),
+            Cmd::ExportGif => self.exporting(super::export::What::Gif),
+            Cmd::ExportAseprite => self.exporting(super::export::What::Aseprite),
+            Cmd::ExportGodotWindow => self.exporting(super::export::What::Godot),
             Cmd::Pixelize => self.windows.pixels,
             Cmd::TileSize => self.windows.tiles,
             Cmd::AddFont => self.windows.font,
@@ -587,6 +644,7 @@ impl Editor {
     }
 
     pub(super) fn invoke(&mut self, cmd: Cmd) -> Result<()> {
+        let cmd = self.for_focus(cmd);
         if let Some(reason) = self.can_run(cmd) {
             self.say(Tone::Refused, reason);
             return Ok(());
@@ -753,9 +811,9 @@ impl Editor {
                 }
             }
             Cmd::TurnRight | Cmd::TurnLeft => {
-                let step = if cmd == Cmd::TurnLeft { -15.0f32 } else { 15.0 };
                 if let Some(view) = self.view.as_mut() {
-                    view.rotate_at(step.to_radians(), area / 2.0, area);
+                    let to = crate::view::next_turn(view.angle, cmd == Cmd::TurnRight);
+                    view.rotate_at(to - view.angle, area / 2.0, area);
                 }
             }
             Cmd::Undo => self.step(Stack::Undo)?,
@@ -800,6 +858,14 @@ impl Editor {
                 self.copy_picked(&ctx);
             }
             Cmd::Paste => self.paste()?,
+            Cmd::MoveToNewLayer => self.move_to_new_layer()?,
+            Cmd::Save => self.say_saved(),
+            Cmd::SelectAllFrames => self.select_all_frames(),
+            Cmd::ExportFrames => self.open_export(super::export::What::Frames),
+            Cmd::ExportSheet => self.open_export(super::export::What::Sheet),
+            Cmd::ExportGif => self.open_export(super::export::What::Gif),
+            Cmd::ExportAseprite => self.open_export(super::export::What::Aseprite),
+            Cmd::ExportGodotWindow => self.open_export(super::export::What::Godot),
             Cmd::SelectAll => self.select_all_strokes(),
             Cmd::SelectSameColour => self.select_same_colour(),
             Cmd::TransformLayer => self.start_shift()?,
@@ -914,6 +980,7 @@ impl Editor {
                         id: l.id.clone(),
                         text: l.name.clone(),
                         place,
+                        fresh: true,
                     });
                 }
             }
@@ -930,7 +997,7 @@ impl Editor {
             Cmd::OpenDocument => self.wants = Some(super::Want::Open),
             Cmd::OpenRecent => self.wants = Some(super::Want::Recent),
             Cmd::About => self.windows.about = !self.windows.about,
-            Cmd::Export => self.windows.export = !self.windows.export,
+            Cmd::Export => self.open_export(super::export::What::Image),
             Cmd::AddFont => self.windows.font = !self.windows.font,
             Cmd::PaintOver => self.windows.paintover = !self.windows.paintover,
             Cmd::CompareReference => self.compare_reference()?,
@@ -1151,7 +1218,7 @@ impl Editor {
     }
 
     pub(super) fn command_keys(&mut self, ui: &egui::Ui) -> Result<()> {
-        if ui.ctx().egui_wants_keyboard_input() {
+        if ui.ctx().egui_wants_keyboard_input() || self.field_had_focus {
             return Ok(());
         }
         if self.capturing.is_some() {
@@ -1195,10 +1262,12 @@ impl Editor {
                 if skip || (once && !done.insert(cmd)) {
                     return Ok(());
                 }
-                match cmd {
-                    Cmd::Copy if !self.on_marks() => Ok(()),
-                    Cmd::Paste if self.clipboard.is_none() => Ok(()),
-                    _ => self.invoke(cmd),
+                match self.timeline_key(cmd) {
+                    Some(why) => {
+                        self.say(Tone::Refused, why);
+                        Ok(())
+                    }
+                    None => self.invoke(cmd),
                 }
             })
     }

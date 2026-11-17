@@ -337,6 +337,30 @@ impl Journey {
         found
     }
 
+    pub(super) fn double_click(&mut self, label: &str) -> bool {
+        let at = self.h.query_all_by_label(label).next().map(|n| n.rect().center());
+        self.note(match at {
+            Some(_) => format!("double clicked \"{label}\""),
+            None => format!("looked for \"{label}\" to double click: not on screen"),
+        });
+        if let Some(at) = at {
+            self.h.hover_at(at);
+            self.h.run_steps(1);
+            (0..2).for_each(|_| {
+                self.press(at, egui::PointerButton::Primary, true, Modifiers::NONE);
+                self.press(at, egui::PointerButton::Primary, false, Modifiers::NONE);
+            });
+            self.h.run_steps(3);
+        }
+        at.is_some()
+    }
+
+    pub(super) fn type_text(&mut self, text: &str) {
+        self.note(format!("typed \"{text}\""));
+        self.h.event(egui::Event::Text(text.to_string()));
+        self.h.run_steps(2);
+    }
+
     pub(super) fn type_into(&mut self, label: &str, text: &str) -> bool {
         let found = self
             .h
@@ -469,8 +493,80 @@ impl Journey {
         self.h.run_steps(3);
     }
 
+    pub(super) fn hover_with(&mut self, x: f32, y: f32, modifiers: Modifiers) {
+        let at = self.at(x, y);
+        self.note(format!(
+            "moved the pointer to {x:.0},{y:.0}{}",
+            if modifiers.is_none() {
+                ""
+            } else {
+                " with a modifier held"
+            }
+        ));
+        self.h.event(egui::Event::ModifiersChanged(modifiers));
+        self.h.hover_at(at);
+        self.h.run_steps(2);
+    }
+
+    pub(super) fn let_go(&mut self) {
+        self.h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        self.h.run_steps(2);
+    }
+
     pub(super) fn tap(&mut self, x: f32, y: f32) {
         self.tap_with(x, y, egui::PointerButton::Primary, Modifiers::NONE);
+    }
+
+    fn cell(&self, layer: &str, frame: u32) -> Option<Pos2> {
+        let ed = self.ed()?;
+        let row = ed
+            .layer_rows(super::layers::Where::Timeline)
+            .iter()
+            .position(|r| r.name == layer)?;
+        ed.timeline.geom.map(|g| g.cell_centre(frame, row))
+    }
+
+    pub(super) fn drag_frames(&mut self, layer: &str, from: u32, to: u32) -> bool {
+        let (Some(a), Some(b)) = (self.cell(layer, from), self.cell(layer, to)) else {
+            self.note(format!(
+                "looked for frames {from} to {to} of {layer} in the timeline: not in sight"
+            ));
+            return false;
+        };
+        self.note(match from == to {
+            true => format!("clicked frame {from} of {layer} in the timeline"),
+            false => format!("dragged over frames {from} to {to} of {layer} in the timeline"),
+        });
+        self.h.hover_at(a);
+        self.h.run_steps(1);
+        self.press(a, egui::PointerButton::Primary, true, Modifiers::NONE);
+        (1..=6).for_each(|i| {
+            self.h.hover_at(a + (b - a) * (i as f32 / 6.0));
+            self.h.run_steps(1);
+        });
+        self.press(b, egui::PointerButton::Primary, false, Modifiers::NONE);
+        self.h.run_steps(3);
+        true
+    }
+
+    pub(super) fn twist(&mut self, x: f32, y: f32, degrees: f32, modifiers: Modifiers) {
+        let at = self.at(x, y);
+        self.note(format!(
+            "twisted two fingers {degrees:.0} degrees over the canvas{}",
+            if modifiers.is_none() { "" } else { " with shift held" }
+        ));
+        self.h.event(egui::Event::ModifiersChanged(modifiers));
+        self.h.hover_at(at);
+        self.h.event(egui::Event::Rotate(degrees.to_radians()));
+        self.h.run_steps(2);
+        self.h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        self.h.run_steps(2);
+    }
+
+    pub(super) fn heard(&self) -> String {
+        self.ed()
+            .and_then(|ed| ed.messages.latest().map(|m| m.text.clone()))
+            .unwrap_or_default()
     }
 
     pub(super) fn wheel(&mut self, x: f32, y: f32, delta: Vec2, modifiers: Modifiers) {

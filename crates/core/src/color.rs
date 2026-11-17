@@ -77,6 +77,50 @@ pub fn from_oklab(lab: [f32; 3], alpha: f32) -> Rgba {
     ]
 }
 
+const WHITE_D50: [f32; 3] = [0.964_22, 1.0, 0.825_21];
+const LAB_EPSILON: f32 = 216.0 / 24389.0;
+const LAB_KAPPA: f32 = 24389.0 / 27.0;
+
+pub fn to_lab(c: Rgba) -> [f32; 3] {
+    let [r, g, b] = to_linear(c);
+    let xyz = [
+        0.436_074_7 * r + 0.385_064_9 * g + 0.143_080_4 * b,
+        0.222_504_5 * r + 0.716_878_6 * g + 0.060_616_9 * b,
+        0.013_932_2 * r + 0.097_104_5 * g + 0.714_173_3 * b,
+    ];
+    let [fx, fy, fz] = [0, 1, 2].map(|i| {
+        let t = xyz[i] / WHITE_D50[i];
+        match t > LAB_EPSILON {
+            true => libm::cbrtf(t),
+            false => (LAB_KAPPA * t + 16.0) / 116.0,
+        }
+    });
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+pub fn from_lab(lab: [f32; 3], alpha: f32) -> Rgba {
+    let [l, a, b] = lab;
+    let fy = (l + 16.0) / 116.0;
+    let (fx, fz) = (a / 500.0 + fy, fy - b / 200.0);
+    let cube = |f: f32| match f * f * f > LAB_EPSILON {
+        true => f * f * f,
+        false => (116.0 * f - 16.0) / LAB_KAPPA,
+    };
+    let y = match l > LAB_KAPPA * LAB_EPSILON {
+        true => fy * fy * fy,
+        false => l / LAB_KAPPA,
+    };
+    let [x, y, z] = [cube(fx) * WHITE_D50[0], y * WHITE_D50[1], cube(fz) * WHITE_D50[2]];
+    from_linear(
+        [
+            3.133_856 * x - 1.616_866_7 * y - 0.490_614_6 * z,
+            -0.978_768_4 * x + 1.916_141_5 * y + 0.033_454 * z,
+            0.071_945_3 * x - 0.228_991_4 * y + 1.405_242_7 * z,
+        ],
+        alpha,
+    )
+}
+
 pub fn value_step(c: Rgba, by: f32) -> Rgba {
     let [l, a, b] = to_oklab(c);
     from_oklab([(l + by).clamp(0.0, 1.0), a + by * 0.03, b + by * 0.15], c[3])
@@ -130,6 +174,30 @@ mod tests {
             to_hex(recolour(&greens[..1], amber)[0]),
             "#e3962f",
             "one mark takes the colour as it is"
+        );
+    }
+
+    #[test]
+    fn lab_matches_the_published_values_and_round_trips() {
+        let near = |got: [f32; 3], want: [f32; 3]| (0..3).all(|i| (got[i] - want[i]).abs() < 0.15);
+        assert!(near(to_lab([1.0, 1.0, 1.0, 1.0]), [100.0, 0.0, 0.0]));
+        assert!(near(to_lab([0.0, 0.0, 0.0, 1.0]), [0.0, 0.0, 0.0]));
+        assert!(
+            near(to_lab([1.0, 0.0, 0.0, 1.0]), [54.29, 80.81, 69.89]),
+            "sRGB red in Lab with a D50 white, as other paint programs show it: {:?}",
+            to_lab([1.0, 0.0, 0.0, 1.0])
+        );
+        assert!(near(to_lab([0.0, 0.0, 1.0, 1.0]), [29.57, 68.3, -112.03]));
+        ["#6a8f5c", "#102030", "#f0e8d0", "#ff00ff", "#010101"]
+            .iter()
+            .for_each(|hex| {
+                let c = parse_hex(hex).unwrap();
+                assert_eq!(to_hex(from_lab(to_lab(c), 1.0)), *hex);
+            });
+        assert_eq!(
+            to_hex(from_lab([50.0, 127.0, -128.0], 1.0)).len(),
+            7,
+            "a Lab colour outside sRGB is clipped into it"
         );
     }
 

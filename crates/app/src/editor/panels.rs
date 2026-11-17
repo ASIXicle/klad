@@ -10,6 +10,23 @@ use anyhow::Result;
 use egui::{Align, Color32, Id, Key, Layout as Flow, Margin, Modifiers, RichText, Sense, UiBuilder, vec2};
 use std::time::{Duration, Instant};
 
+const SETTLE: u8 = 12;
+
+#[derive(Clone, Copy, Default)]
+struct Placing {
+    opened: u32,
+    seen: u64,
+    frames: u8,
+    settled: bool,
+    size: Option<egui::Vec2>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Spot {
+    Middle,
+    At(egui::Pos2),
+}
+
 fn colour_of(tone: Tone) -> Color32 {
     match tone {
         Tone::Info => theme::TEXT,
@@ -73,10 +90,9 @@ impl Editor {
             lock(&self.stats).frame_ms.push(dt * 1000.0);
         }
         self.pointer = ui.input(|i| i.pointer.latest_pos()).or(self.pointer);
-        self.keys_busy = ctx.egui_wants_keyboard_input()
-            || self.palette.is_some()
-            || self.windows.settings
-            || self.capturing.is_some();
+        self.field_had_focus = ctx.egui_wants_keyboard_input();
+        self.keys_busy =
+            self.field_had_focus || self.palette.is_some() || self.windows.settings || self.capturing.is_some();
         self.check(|e| e.sync());
         self.tend_jobs();
         self.follow_pixel_check();
@@ -229,7 +245,13 @@ impl Editor {
                         format!(": {text}")
                     };
                     self.measure("last job", format!("{} in {took:.1} s{detail}", e.name));
-                    self.say_job(Tone::Done, format!("{} done in {took:.1} s{detail}", e.name));
+                    if e.tag == Tag::Export {
+                        self.exported(&e.stdout, &e.output);
+                    }
+                    match e.tag == Tag::Export && !text.is_empty() {
+                        true => self.say_job(Tone::Done, text),
+                        false => self.say_job(Tone::Done, format!("{} done in {took:.1} s{detail}", e.name)),
+                    }
                 }
                 Outcome::Failed(text) => {
                     if e.tag == Tag::Inbetween {
@@ -388,7 +410,7 @@ impl Editor {
         });
     }
 
-    fn menu_entry(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
+    pub(super) fn menu_entry(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
         let label = commands::menu_label(cmd);
         let can = self.can_run(cmd).is_none();
         let keys = self.bindings.menu_key(cmd);
@@ -837,36 +859,59 @@ impl Editor {
     pub(super) fn window(
         ctx: &egui::Context,
         id: &str,
-        (title, at): (String, egui::Pos2),
+        (title, spot): (String, Spot),
         open: &mut bool,
         add: impl FnOnce(&mut egui::Ui),
     ) {
-        egui::Window::new(&title)
-            .id(Id::unique(id))
-            .default_pos(at)
+        let key = Id::unique(id);
+        let frame = ctx.cumulative_frame_nr();
+        let mut place = ctx.data(|d| d.get_temp::<Placing>(key)).unwrap_or_default();
+        if place.seen + 1 < frame && matches!(spot, Spot::Middle) {
+            place = Placing {
+                opened: place.opened + 1,
+                ..Placing::default()
+            };
+        }
+        let area = key.with(place.opened);
+        let window = egui::Window::new(&title)
+            .id(area)
             .title_bar(false)
             .resizable(true)
-            .default_width(360.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&title).strong());
-                    ui.with_layout(Flow::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(icon::CLOSE).size(theme::ICON))
-                                    .frame(false)
-                                    .min_size(vec2(theme::TARGET, theme::TARGET)),
-                            )
-                            .hint(format!("close {title}"))
-                            .clicked()
-                        {
-                            *open = false;
-                        }
-                    });
+            .default_width(360.0);
+        let middle = ctx.content_rect().center();
+        let size = ctx.memory(|m| m.area_rect(area)).map(|r| r.size());
+        let window = match (spot, size) {
+            (Spot::At(at), _) => window.default_pos(at),
+            (Spot::Middle, Some(size)) if !place.settled => {
+                place.frames += 1;
+                place.settled = place.frames >= SETTLE || place.size.is_some_and(|was| (was - size).length() < 0.5);
+                place.size = Some(size);
+                window.current_pos(middle - size / 2.0)
+            }
+            (Spot::Middle, _) => window.default_pos(middle - vec2(180.0, 160.0)),
+        };
+        place.seen = frame;
+        ctx.data_mut(|d| d.insert_temp(key, place));
+        window.show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&title).strong());
+                ui.with_layout(Flow::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(icon::CLOSE).size(theme::ICON))
+                                .frame(false)
+                                .min_size(vec2(theme::TARGET, theme::TARGET)),
+                        )
+                        .hint(format!("close {title}"))
+                        .clicked()
+                    {
+                        *open = false;
+                    }
                 });
-                ui.separator();
-                add(ui);
             });
+            ui.separator();
+            add(ui);
+        });
     }
 
     fn windows(&mut self, ctx: &egui::Context) {
@@ -883,12 +928,14 @@ impl Editor {
             0.0
         };
         let above = screen.bottom() - layout::STATUS - timeline;
-        let numbers_at = egui::pos2(screen.right() - dock - 380.0, screen.top() + 16.0);
-        let settings_at = egui::pos2(screen.center().x - 180.0, screen.top() + 60.0);
-        let log_at = egui::pos2(screen.left() + strip + 16.0, (above - 380.0).max(screen.top() + 16.0));
-        let near_timeline = egui::pos2(screen.left() + strip + 16.0, (above - 300.0).max(screen.top() + 16.0));
+        let numbers_at = Spot::At(egui::pos2(screen.right() - dock - 380.0, screen.top() + 16.0));
+        let log_at = Spot::At(egui::pos2(
+            screen.left() + strip + 16.0,
+            (above - 380.0).max(screen.top() + 16.0),
+        ));
         self.palette_window(ctx);
         self.toasts(ctx);
+        self.upright_chip(ctx);
         if self.settings.layout.numbers && self.settings.developer {
             let mut open = true;
             Self::window(
@@ -909,7 +956,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "brush",
-                (format!("{} Brush", icon::BRUSH), settings_at),
+                (format!("{} Brush", icon::BRUSH), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.brush_window_ui(ui)),
             );
@@ -920,7 +967,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "report",
-                (format!("{} Report a problem", icon::LOG), settings_at),
+                (format!("{} Report a problem", icon::LOG), Spot::Middle),
                 &mut open,
                 |ui| self.report_panel(ui),
             );
@@ -931,7 +978,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "about",
-                (format!("{} About klad", icon::INFO), settings_at),
+                (format!("{} About klad", icon::INFO), Spot::Middle),
                 &mut open,
                 |ui| self.about_panel(ui),
             );
@@ -953,7 +1000,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "onion",
-                (format!("{} Onion skin", icon::ONION), near_timeline),
+                (format!("{} Onion skin", icon::ONION), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.onion_settings(ui)),
             );
@@ -978,7 +1025,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "link",
-                (format!("{} Show a drawing here", icon::LINK), near_timeline),
+                (format!("{} Show a drawing here", icon::LINK), Spot::Middle),
                 &mut open,
                 |ui| {
                     ui.label(format!("frame {frame} will show the drawing you pick, as a link"));
@@ -1016,8 +1063,8 @@ impl Editor {
             let mut open = true;
             Self::window(
                 ctx,
-                "export",
-                (format!("{} Export", icon::EXPORT), near_timeline),
+                self.export.what.title(),
+                (format!("{} {}", icon::EXPORT, self.export.what.title()), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.export_window(ui)),
             );
@@ -1028,7 +1075,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "pixels",
-                (format!("{} Pixels of a picture", icon::PIXELS), near_timeline),
+                (format!("{} Pixels of a picture", icon::PIXELS), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.pixels_window(ui)),
             );
@@ -1039,7 +1086,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "tiles",
-                (format!("{} Tileset", icon::PIXELS), near_timeline),
+                (format!("{} Tileset", icon::PIXELS), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.tiles_window(ui)),
             );
@@ -1050,7 +1097,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "paintover",
-                (format!("{} Paint over", icon::BRUSH), settings_at),
+                (format!("{} Paint over", icon::BRUSH), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.paintover_window(ui)),
             );
@@ -1061,7 +1108,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "compare",
-                (format!("{} Compared with the reference", icon::INFO), settings_at),
+                (format!("{} Compared with the reference", icon::INFO), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.compare_window(ui)),
             );
@@ -1072,7 +1119,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "font",
-                (format!("{} Add a font", icon::PLUS), near_timeline),
+                (format!("{} Add a font", icon::PLUS), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.font_window(ui)),
             );
@@ -1083,7 +1130,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "between",
-                (format!("{} In-betweens", icon::INBETWEEN), near_timeline),
+                (format!("{} In-betweens", icon::INBETWEEN), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.between_window(ui)),
             );
@@ -1097,12 +1144,31 @@ impl Editor {
             Self::window(
                 ctx,
                 "clip",
-                (format!("{} {title}", icon::CLIP_BAR), near_timeline),
+                (format!("{} {title}", icon::CLIP_BAR), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.clip_window(ui)),
             );
             self.windows.clip &= open;
         }
+    }
+
+    fn upright_chip(&mut self, ctx: &egui::Context) {
+        let Some(degrees) = self.view.and_then(|v| v.turned()) else {
+            return;
+        };
+        let rect = self.canvas_rect;
+        egui::Area::new(Id::unique("upright"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(egui::pos2(rect.center().x, rect.top() + 8.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("view turned {degrees:.0}\u{b0}")).color(theme::WEAK));
+                        self.command_button(ui, Cmd::ResetRotation, Some("upright"));
+                    });
+                });
+            });
     }
 
     fn numbers_panel(&mut self, ui: &mut egui::Ui) {

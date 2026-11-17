@@ -1,10 +1,13 @@
+use super::selection::{Selected, strip_ids};
 use super::{Editor, Part, Picked, Tool, ms};
+use crate::commands::Cmd;
 use crate::messages::Tone;
 use anyhow::Result;
-use klad_core::doc::Kind;
-use klad_core::markedit::{self, MarkChange, Side, address};
-use klad_core::ops::{CopySpec, CopyTarget, Op};
+use klad_core::doc::{Item, Kind, Loc};
+use klad_core::markedit::{self, LassoAction, MarkChange, Side, address};
+use klad_core::ops::{Applied, CopySpec, CopyTarget, Op, Place};
 use klad_core::stroke::Mark;
+use serde_json::{Value, json};
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,6 +80,26 @@ pub(super) fn paste_ops(piece: &Piece, to: &CopyTarget) -> Vec<Op> {
     around.into_iter().chain(whole).collect()
 }
 
+fn counted(n: usize, one: &str) -> String {
+    match n {
+        1 => format!("one {one}"),
+        n => format!("{n} {one}s"),
+    }
+}
+
+fn made_by(applied: &Applied) -> Vec<(String, String, u32)> {
+    applied
+        .marks
+        .iter()
+        .flat_map(|p| {
+            p.changes.iter().flat_map(move |c| match c {
+                MarkChange::Paste { made, .. } => made.iter().map(|m| (p.layer.clone(), p.cel.clone(), m.to)).collect(),
+                _ => Vec::new(),
+            })
+        })
+        .collect()
+}
+
 impl Editor {
     pub(super) fn copied(&self) -> Option<Copied> {
         let picked = self.picked.as_ref()?;
@@ -102,11 +125,42 @@ impl Editor {
         (!pieces.is_empty()).then_some(Copied { pieces })
     }
 
+    fn copied_shapes(&self) -> Vec<Value> {
+        match self.selected() {
+            Some(Selected::Shape(_)) => self
+                .group_nodes()
+                .into_iter()
+                .filter_map(|(_, node)| serde_json::to_value(node).ok())
+                .map(|mut value| {
+                    strip_ids(&mut value);
+                    value
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(super) fn copy_picked(&mut self, ctx: &egui::Context) {
+        let shapes = self.copied_shapes();
+        if !shapes.is_empty() {
+            let what = counted(shapes.len(), "shape");
+            ctx.copy_text(format!("klad: {what}"));
+            self.say(
+                Tone::Done,
+                format!("copied {what}: cmd V puts a copy on this or another frame, in place"),
+            );
+            self.shape_clip = Some(shapes);
+            self.clipboard = None;
+            return;
+        }
         let Some(copied) = self.copied() else {
-            self.say(Tone::Refused, "select strokes with S first; cmd C copies them");
+            self.say(
+                Tone::Refused,
+                "select strokes (S) or a shape (V) first; cmd C copies them",
+            );
             return;
         };
+        self.shape_clip = None;
         ctx.copy_text(format!("klad: {} marks of {}", copied.count(), copied.whence()));
         self.say(
             Tone::Done,
@@ -120,10 +174,189 @@ impl Editor {
     }
 
     pub(super) fn paste(&mut self) -> Result<()> {
+        if let Some(shapes) = self.shape_clip.clone() {
+            return self.paste_shapes(shapes);
+        }
         match self.clipboard.clone() {
             Some(copied) => self.paste_copied(copied, "pasted"),
             None => Ok(()),
         }
+    }
+
+    fn paste_shapes(&mut self, shapes: Vec<Value>) -> Result<()> {
+        let frame = self.scene.frame;
+        let home = self.vector_home("shapes");
+        let ops: Vec<Op> = home
+            .ops
+            .iter()
+            .cloned()
+            .chain(shapes.into_iter().map(|node| Op::AddNode {
+                node,
+                place: home.place(frame),
+            }))
+            .collect();
+        let (dirty, applied) = match self.scene.apply_with(&ops, &self.brushes) {
+            Ok(done) => done,
+            Err(e) => {
+                self.say(Tone::Refused, format!("could not paste here: {e:#}"));
+                return Ok(());
+            }
+        };
+        self.dirty.extend(dirty);
+        self.move_in(&home)?;
+        let doc = &self.scene.bundle.doc;
+        let nodes: Vec<String> = applied
+            .added
+            .iter()
+            .filter(|id| matches!(doc.item(id), Some(Item::Node(..))))
+            .cloned()
+            .collect();
+        let what = counted(nodes.len(), "shape");
+        self.tool = Tool::Select;
+        self.picked = None;
+        self.select_shapes(nodes);
+        self.say(
+            Tone::Done,
+            format!(
+                "pasted {what}{} on frame {frame}, in place and selected: drag to move it (one cmd Z takes it off)",
+                home.said()
+            ),
+        );
+        Ok(())
+    }
+
+    fn pick_made(&mut self, made: &[(String, String, u32)]) {
+        let Some(cel) = self.scene.active_cel().filter(|_| !made.is_empty()) else {
+            return;
+        };
+        if self.tool != Tool::Select {
+            self.tool = Tool::Strokes;
+        }
+        self.selection = None;
+        let ids = made
+            .iter()
+            .filter(|(_, c, _)| *c == cel)
+            .map(|(_, _, id)| *id)
+            .collect();
+        let more = made
+            .iter()
+            .filter(|(_, c, _)| *c != cel)
+            .fold(Vec::<Part>::new(), |mut parts, (layer, c, id)| {
+                match parts.iter_mut().find(|p| p.cel == *c) {
+                    Some(p) => p.ids.push(*id),
+                    None => parts.push(Part {
+                        layer: layer.clone(),
+                        cel: c.clone(),
+                        ids: vec![*id],
+                    }),
+                }
+                parts
+            });
+        self.picked = Some(Picked {
+            more,
+            ..Picked::whole(cel, ids)
+        });
+    }
+
+    pub(super) fn move_to_new_layer(&mut self) -> Result<()> {
+        let frame = self.scene.frame;
+        let taken = self.scene.bundle.doc.ids();
+        let layer = (1..)
+            .map(|n| format!("l{n}"))
+            .find(|id| !taken.contains(id))
+            .unwrap_or_default();
+        let (above, name) = self.scene.active_layer().map_or((None, "part".to_string()), |l| {
+            (Some(l.id.clone()), format!("{} part", l.name))
+        });
+        let add = |kind: &str| Op::AddLayer {
+            layer: json!({"id": layer, "kind": kind, "name": name, "cels": [{"frame": frame}]}),
+            place: Place {
+                above: above.clone(),
+                ..Place::default()
+            },
+        };
+        let (ops, what) = match self.selected() {
+            Some(Selected::Shape(_)) => {
+                let shapes = self.shapes();
+                let moves = shapes.iter().map(|id| Op::Move {
+                    id: id.clone(),
+                    place: Place {
+                        into: Some(layer.clone()),
+                        frame: Some(frame),
+                        ..Place::default()
+                    },
+                });
+                (
+                    std::iter::once(add("vector")).chain(moves).collect::<Vec<Op>>(),
+                    counted(shapes.len(), "shape"),
+                )
+            }
+            Some(Selected::Strokes) => {
+                let (Some(copied), Some((removal, _))) = (self.copied(), self.picked_ops(LassoAction::Remove)) else {
+                    self.say(Tone::Refused, "the selection is not ready yet: try again in a moment");
+                    return Ok(());
+                };
+                let to = CopyTarget::Frame {
+                    frame,
+                    layer: Some(layer.clone()),
+                };
+                let kind = match self.scene.on_grid() {
+                    true => "pixel",
+                    false => "paint",
+                };
+                (
+                    std::iter::once(add(kind))
+                        .chain(copied.pieces.iter().flat_map(|p| paste_ops(p, &to)))
+                        .chain(removal)
+                        .collect(),
+                    counted(copied.count(), "mark"),
+                )
+            }
+            _ => return Ok(()),
+        };
+        let shapes = self.shapes();
+        let (dirty, applied) = match self.scene.apply_with(&ops, &self.brushes) {
+            Ok(done) => done,
+            Err(e) => {
+                self.say(Tone::Refused, format!("could not move it to a new layer: {e:#}"));
+                return Ok(());
+            }
+        };
+        self.dirty.extend(dirty);
+        self.picked = None;
+        self.selection = None;
+        if let Some(Loc::Layer(path)) = self.scene.bundle.doc.locate(&layer) {
+            self.activate(path)?;
+        }
+        match made_by(&applied) {
+            made if made.is_empty() => {
+                self.tool = Tool::Select;
+                self.select_shapes(shapes);
+            }
+            made => self.pick_made(&made),
+        }
+        self.forget_missing_selection();
+        self.say(
+            Tone::Done,
+            format!("moved {what} to the new layer {name}, right above; they stay selected (one cmd Z puts them back)"),
+        );
+        Ok(())
+    }
+
+    pub(super) fn canvas_menu(&mut self, ui: &mut egui::Ui) {
+        [
+            Cmd::Copy,
+            Cmd::Paste,
+            Cmd::DuplicateInPlace,
+            Cmd::Delete,
+            Cmd::MoveToNewLayer,
+        ]
+        .into_iter()
+        .for_each(|cmd| self.menu_entry(ui, cmd));
+        ui.separator();
+        [Cmd::SelectAll, Cmd::Deselect]
+            .into_iter()
+            .for_each(|cmd| self.menu_entry(ui, cmd));
     }
 
     fn target(&self, layer: &klad_core::doc::Layer) -> CopyTarget {
@@ -180,54 +413,15 @@ impl Editor {
             }
         };
         self.dirty.extend(dirty);
-        let made: Vec<(String, String, u32)> = applied
-            .marks
-            .iter()
-            .flat_map(|p| {
-                p.changes.iter().flat_map(move |c| match c {
-                    MarkChange::Paste { made, .. } => {
-                        made.iter().map(|m| (p.layer.clone(), p.cel.clone(), m.to)).collect()
-                    }
-                    _ => Vec::new(),
-                })
-            })
-            .collect();
-        let active = self.scene.active_cel();
-        if let Some(cel) = active.clone().filter(|_| !made.is_empty()) {
-            if self.tool != Tool::Select {
-                self.tool = Tool::Strokes;
-            }
-            self.selection = None;
-            let ids = made
-                .iter()
-                .filter(|(_, c, _)| *c == cel)
-                .map(|(_, _, id)| *id)
-                .collect();
-            let more =
-                made.iter()
-                    .filter(|(_, c, _)| *c != cel)
-                    .fold(Vec::<Part>::new(), |mut parts, (layer, c, id)| {
-                        match parts.iter_mut().find(|p| p.cel == *c) {
-                            Some(p) => p.ids.push(*id),
-                            None => parts.push(Part {
-                                layer: layer.clone(),
-                                cel: c.clone(),
-                                ids: vec![*id],
-                            }),
-                        }
-                        parts
-                    });
-            self.picked = Some(Picked {
-                more,
-                ..Picked::whole(cel.clone(), ids)
-            });
+        let made = made_by(&applied);
+        if self.scene.active_cel().is_some() && !made.is_empty() {
+            self.pick_made(&made);
+            self.measure("paste", format!("{word} {} marks in {:.0} ms", made.len(), ms(start)));
             self.say(
                 Tone::Done,
                 format!(
-                    "{word} {} marks into {} on frame {frame} in {:.0} ms (one cmd Z takes them off)",
-                    made.len(),
-                    copied.whence(),
-                    ms(start)
+                    "{word} {} on frame {frame}, in place and selected: drag to move them (one cmd Z takes them off)",
+                    counted(made.len(), "mark")
                 ),
             );
         }

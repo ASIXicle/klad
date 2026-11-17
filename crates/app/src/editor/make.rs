@@ -73,7 +73,70 @@ fn on_vector(editor: &Editor) -> Option<String> {
         .map(|l| l.id.clone())
 }
 
+pub(super) struct Home {
+    pub ops: Vec<Op>,
+    pub layer: String,
+    pub made: Option<String>,
+}
+
+impl Home {
+    pub(super) fn place(&self, frame: u32) -> Place {
+        Place {
+            into: Some(self.layer.clone()),
+            frame: Some(frame),
+            ..Place::default()
+        }
+    }
+
+    pub(super) fn said(&self) -> String {
+        match &self.made {
+            Some(over) => format!(" on a new vector layer {over}"),
+            None => String::new(),
+        }
+    }
+}
+
 impl Editor {
+    pub(super) fn draws_on_vector(&self) -> bool {
+        on_vector(self).is_some()
+    }
+
+    pub(super) fn vector_home(&self, name: &str) -> Home {
+        if let Some(layer) = on_vector(self) {
+            return Home {
+                ops: Vec::new(),
+                layer,
+                made: None,
+            };
+        }
+        let taken = self.scene.bundle.doc.ids();
+        let layer = (1..)
+            .map(|n| format!("l{n}"))
+            .find(|id| !taken.contains(id))
+            .unwrap_or_default();
+        let active = self.scene.active_layer();
+        Home {
+            ops: vec![Op::AddLayer {
+                layer: json!({"id": layer, "kind": "vector", "name": name, "cels": [{"frame": self.scene.frame}]}),
+                place: Place {
+                    above: active.map(|l| l.id.clone()),
+                    ..Place::default()
+                },
+            }],
+            layer,
+            made: Some(active.map_or("on top".to_string(), |l| format!("above {}", l.name))),
+        }
+    }
+
+    pub(super) fn move_in(&mut self, home: &Home) -> Result<()> {
+        if home.made.is_some()
+            && let Some(Loc::Layer(path)) = self.scene.bundle.doc.locate(&home.layer)
+        {
+            self.activate(path)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn shape_now(&self) -> Option<[f32; 4]> {
         self.shapes
             .drag
@@ -85,13 +148,6 @@ impl Editor {
             if self.scene.can_paint() {
                 self.shapes.drag = Some((c, c));
             }
-            return;
-        }
-        if on_vector(self).is_none() {
-            self.say(
-                Tone::Refused,
-                "U draws rectangles and ellipses on a vector layer: add one with the layers panel's vector button",
-            );
             return;
         }
         self.shapes.drag = Some((c, c));
@@ -114,12 +170,13 @@ impl Editor {
         }
         let made = self.shape_now();
         self.shapes.drag = None;
-        let (Some([x, y, w, h]), Some(layer)) = (made, on_vector(self)) else {
+        let Some([x, y, w, h]) = made else {
             return Ok(());
         };
         if w < 2.0 || h < 2.0 {
             return Ok(());
         }
+        let home = self.vector_home("shapes");
         let (colour, outline) = (color::hex(self.color), color::hex(self.second));
         let (mut node, what) = match self.shapes.kind {
             ShapeKind::Rect => (
@@ -138,17 +195,15 @@ impl Editor {
         if self.pen_stroke || !self.pen_fill {
             node["stroke"] = json!({ "paint": outline, "width": self.pen_width });
         }
-        let frame = self.scene.frame;
-        self.apply(vec![Op::AddNode {
-            node,
-            place: Place {
-                into: Some(layer),
-                frame: Some(frame),
-                ..Place::default()
-            },
-        }])?;
+        let place = home.place(self.scene.frame);
+        let ops = home.ops.iter().cloned().chain([Op::AddNode { node, place }]).collect();
+        self.apply(ops)?;
+        self.move_in(&home)?;
         self.used_colour();
-        self.say(Tone::Done, format!("{what} added: V moves it, A edits its points"));
+        self.say(
+            Tone::Done,
+            format!("{what} added{}: V moves it, A edits its points", home.said()),
+        );
         Ok(())
     }
 

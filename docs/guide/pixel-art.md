@@ -1,4 +1,4 @@
-_Last updated: 2026-11-12 13:05_
+_Last updated: 2026-11-17 09:25_
 
 # Drawing pixel art
 
@@ -49,7 +49,7 @@ To export one file for each, see [palette variants](exporting.md#export-palette-
 
 1. Right click the drawing's cell in the timeline and pick **duplicate to the next frame**.
 2. Press **O** for onion skin, and change the pixels that move.
-3. Press **=** to hold a drawing a frame longer.
+3. Click a drawing's cell in the timeline and press **=** to hold it a frame longer.
 4. Press **Return** to play, and again to stop.
 
 Every frame is a drawing of its own: in-betweens and bones don't work on pixel layers. For clips and timing, see [Animating frame by frame](animating.md).
@@ -74,10 +74,9 @@ Select **Layer > Check the pixels**. klad puts a box around what stands out: a s
 
 ## Export it sharp
 
-1. Press **cmd E**.
-2. Pick **image**, **GIF**, **sprite sheet** or **Aseprite**.
-3. Set **times real size** to a whole number, such as 8, and click **export**.
+1. Select **File > Export** and pick **Image…**, **GIF…**, **Sprite sheet…** or **Aseprite file…**.
+2. Set **times real size** to a whole number, such as 8, and click **Export**.
 
-A tileset goes to Godot with **as a tile set** in the same window.
+A tileset goes to Godot with **a tile set** under **File > Export > Godot…**.
 
 Working with an agent? Give it `klad skill` and `klad skill pixel`: [With an agent](with-an-agent.md).
