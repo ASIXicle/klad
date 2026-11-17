@@ -799,30 +799,24 @@ fn windows(out: &mut Vec<String>) {
         shot(out, name, how, false, &FLOATING, |h| run(h, cmd));
     });
     [
-        (What::Image, "this frame"),
-        (What::Frames, "numbered frames"),
-        (What::Sheet, "a sprite sheet"),
-        (What::Gif, "a GIF"),
-        (What::Aseprite, "an Aseprite file"),
+        (What::Image, "this frame", "File > Export > Image… (cmd E)."),
+        (What::Frames, "numbered frames", "File > Export > Frames…"),
+        (What::Sheet, "a sprite sheet", "File > Export > Sprite sheet…"),
+        (What::Gif, "a GIF", "File > Export > GIF…"),
+        (What::Aseprite, "an Aseprite file", "File > Export > Aseprite file…"),
+        (What::Godot, "Godot", "File > Export > Godot…"),
     ]
     .into_iter()
-    .for_each(|(what, name)| {
-        shot(
-            out,
-            &format!("window: export, {name}"),
-            "cmd E, then the kind of export.",
-            false,
-            &FLOATING,
-            |h| {
-                h.state_mut().windows.export = true;
-                h.state_mut().export.what = what;
-            },
-        );
+    .for_each(|(what, name, how)| {
+        shot(out, &format!("window: export, {name}"), how, false, &FLOATING, |h| {
+            h.state_mut().windows.export = true;
+            h.state_mut().export.what = what;
+        });
     });
     shot(
         out,
         "window: export, in a pixel drawing",
-        "cmd E in a pixel drawing.",
+        "File > Export > Image… (cmd E) in a pixel drawing.",
         true,
         &FLOATING,
         |h| h.state_mut().windows.export = true,

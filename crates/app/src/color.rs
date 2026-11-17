@@ -182,8 +182,8 @@ pub fn channel_slider(
     ramp: impl Fn(f32) -> [f32; 3],
 ) -> egui::Response {
     let (rect, mut response) = ui.allocate_exact_size(vec2(width, theme::TARGET), Sense::click_and_drag());
-    let shown = *value;
-    response.widget_info(|| egui::WidgetInfo::slider(true, shown as f64, channel.name));
+    let shown = value.round() as f64;
+    response.widget_info(|| egui::WidgetInfo::slider(true, shown, channel.name));
     let span = channel.hi - channel.lo;
     if let Some(pos) = response.interact_pointer_pos() {
         let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
