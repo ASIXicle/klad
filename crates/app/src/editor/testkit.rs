@@ -38,6 +38,23 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap()
 }
 
+pub(super) const FNV: u64 = 0xcbf2_9ce4_8422_2325;
+
+pub(super) fn mix(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(0x0100_0000_01b3)
+}
+
+pub(super) fn picture(ed: &Editor) -> u64 {
+    let outbox = crate::stats::lock(&ed.outbox);
+    ed.scene
+        .all_tiles()
+        .iter()
+        .filter_map(|i| outbox.tile(*i))
+        .fold(FNV, |hash, tile| {
+            tile.iter().fold(hash, |hash, v| mix(hash, u64::from(v.to_bits())))
+        })
+}
+
 pub(super) fn written(node: &egui_kittest::kittest::AccessKitNode<'_>) -> Option<String> {
     match node.role() {
         Role::Label => node.value(),
@@ -53,6 +70,12 @@ fn tone(tone: Tone) -> &'static str {
         Tone::Refused => "refused",
         Tone::Error => "error",
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Rows {
+    Panel,
+    Timeline,
 }
 
 pub(super) struct Journey {
@@ -227,6 +250,246 @@ impl Journey {
             .collect()
     }
 
+    pub(super) fn picture(&mut self) -> u64 {
+        self.settle();
+        self.ed().map_or(0, |ed| {
+            ed.scene
+                .compose(&ed.scene.all_tiles(), None)
+                .map(|tiles| {
+                    tiles.iter().fold(FNV, |hash, (_, tile)| {
+                        tile.iter().fold(hash, |hash, v| mix(hash, u64::from(v.to_bits())))
+                    })
+                })
+                .unwrap_or(0)
+        })
+    }
+
+    pub(super) fn wait(&mut self, what: &str, until: impl Fn(&Editor) -> bool) -> bool {
+        let started = Instant::now();
+        let there = |j: &Self| j.ed().is_some_and(&until);
+        while !there(self) && started.elapsed() < Duration::from_secs(8) {
+            self.pass();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ok = there(self);
+        self.note(match ok {
+            true => format!("{what}: there after {:.1} s", started.elapsed().as_secs_f32()),
+            false => format!("{what}: not there after 8 s"),
+        });
+        ok
+    }
+
+    pub(super) fn agent(&mut self, args: &[&str]) -> (bool, String) {
+        let klad = crate::start::draw_binary().expect("build the klad binary first (just test does)");
+        let home = format!("{}/", self.folder.display());
+        let said = args.iter().map(|a| a.replace(&home, "")).collect::<Vec<_>>().join(" ");
+        let out = std::process::Command::new(klad)
+            .args(args)
+            .output()
+            .expect("the klad command runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .replace(&home, "");
+        self.note(format!(
+            "the agent ran: klad {said}{}",
+            if out.status.success() { "" } else { " (it failed)" }
+        ));
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(8)
+            .for_each(|line| self.lines.push(format!("  - it read: {line}")));
+        (out.status.success(), text)
+    }
+
+    pub(super) fn copied(&self) -> Vec<String> {
+        self.h
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn visible(&self, r: egui::Rect) -> bool {
+        let window = self.h.ctx.content_rect();
+        let Some(canvas) = self.ed().map(|ed| ed.canvas_rect) else {
+            return window.contains(r.center());
+        };
+        let at = r.center();
+        if !window.contains(at) {
+            return false;
+        }
+        let hints = crate::theme::hints(&self.h.ctx);
+        let same = |a: egui::Rect| (a.min - r.min).abs().max_elem() < 0.5 && (a.max - r.max).abs().max_elem() < 0.5;
+        let Some(me) = hints.iter().position(|(rect, _)| same(*rect)) else {
+            return true;
+        };
+        let title =
+            |text: &str| (text.starts_with("fold ") && text.ends_with(" to its title")) || text.starts_with("open ");
+        let top = |i: usize| hints[i].0.center().y - crate::layout::TITLE / 2.0;
+        let titles: Vec<usize> = hints
+            .iter()
+            .enumerate()
+            .filter(|(_, (rect, text))| rect.center().x > canvas.right() && title(text))
+            .map(|(i, _)| i)
+            .collect();
+        let play = hints.iter().position(|(_, text)| text.starts_with("play or stop"));
+        let docked = at.x > canvas.right()
+            && titles.first().is_some_and(|first| {
+                me >= *first
+                    && match play {
+                        Some(play) if play > *first => me < play,
+                        _ => true,
+                    }
+            });
+        if !docked {
+            return at.y < canvas.bottom() || r.bottom() <= window.bottom() - crate::layout::STATUS + 1.0;
+        }
+        if at.y >= canvas.bottom() {
+            return false;
+        }
+        let Some(pane) = titles.iter().rposition(|t| *t <= me) else {
+            return true;
+        };
+        let body = top(titles[pane]) + crate::layout::TITLE;
+        let floor = titles
+            .get(pane + 1)
+            .map_or(canvas.bottom(), |next| top(*next).min(canvas.bottom()));
+        (at.y < body && at.y >= body - crate::layout::TITLE) || (r.top() >= body - 1.0 && r.bottom() <= floor + 1.0)
+    }
+
+    fn hinted(&self, hint: &str) -> Option<(egui::Rect, String, bool)> {
+        let found: Vec<(egui::Rect, String)> = crate::theme::hints(&self.h.ctx)
+            .into_iter()
+            .filter(|(_, text)| text.starts_with(hint))
+            .collect();
+        found
+            .iter()
+            .find(|(rect, _)| self.visible(*rect))
+            .map(|(rect, text)| (*rect, text.clone(), true))
+            .or(found.first().map(|(rect, text)| (*rect, text.clone(), false)))
+    }
+
+    pub(super) fn press_hinted(&mut self, hint: &str) -> bool {
+        let found = self.hinted(hint);
+        self.note(match &found {
+            Some((_, _, false)) => format!("looked for the button \"{hint}\": it is out of sight"),
+            Some((_, text, true)) => match text.split_once("not now: ") {
+                Some((_, why)) => format!("clicked the button \"{hint}\", which is greyed out: {}", why.trim()),
+                None => format!("clicked the button \"{hint}\""),
+            },
+            None => format!("looked for the button \"{hint}\": not on screen"),
+        });
+        let Some((rect, _, true)) = found else {
+            return false;
+        };
+        let at = rect.center();
+        self.h.hover_at(at);
+        self.h.run_steps(1);
+        self.press(at, egui::PointerButton::Primary, true, Modifiers::NONE);
+        self.press(at, egui::PointerButton::Primary, false, Modifiers::NONE);
+        self.h.run_steps(3);
+        true
+    }
+
+    fn row(&self, layer: &str, rows: Rows) -> Option<egui::Rect> {
+        let canvas = self.ed()?.canvas_rect;
+        self.h
+            .query_all_by_label(layer)
+            .filter(|n| n.accesskit_node().role() == Role::Button)
+            .map(|n| n.rect())
+            .find(|r| {
+                self.visible(*r)
+                    && match rows {
+                        Rows::Panel => r.center().x > canvas.right() && r.center().y < canvas.bottom(),
+                        Rows::Timeline => r.center().y > canvas.bottom(),
+                    }
+            })
+    }
+
+    pub(super) fn rows_in_sight(&self, layers: &[String], rows: Rows) -> Vec<String> {
+        layers
+            .iter()
+            .filter(|layer| self.row(layer, rows).is_some())
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn drag_row(&mut self, layer: &str, onto: &str, part: f32, rows: Rows) -> bool {
+        self.drag_row_from(layer, onto, part, rows, false)
+    }
+
+    pub(super) fn drag_row_from(&mut self, layer: &str, onto: &str, part: f32, rows: Rows, by_name: bool) -> bool {
+        let place = match rows {
+            Rows::Panel => "the Layers panel",
+            Rows::Timeline => "the timeline",
+        };
+        let (Some(from), Some(to)) = (self.row(layer, rows), self.row(onto, rows)) else {
+            self.note(format!(
+                "looked for the rows of {layer} and {onto} in {place}: not both in sight"
+            ));
+            return false;
+        };
+        let name = self
+            .h
+            .query_all_by_label(layer)
+            .filter(|n| n.accesskit_node().role() != Role::Button)
+            .map(|n| n.rect())
+            .find(|r| from.contains(r.center()));
+        let a = match (by_name, name) {
+            (true, Some(name)) => name.center(),
+            _ => egui::pos2(name.map_or(from.left(), |n| n.right()) + 30.0, from.center().y),
+        };
+        self.note(format!(
+            "dragged the row of {layer} in {place}, held {}, onto {onto}, {}",
+            if by_name { "by its name" } else { "right of its name" },
+            match part {
+                p if p < 0.3 => "near its top edge",
+                p if p > 0.7 => "near its bottom edge",
+                _ => "in its middle",
+            }
+        ));
+        let b = egui::pos2(a.x, to.top() + to.height() * part);
+        self.h.hover_at(a);
+        self.h.run_steps(1);
+        self.press(a, egui::PointerButton::Primary, true, Modifiers::NONE);
+        (1..=8).for_each(|i| {
+            self.h.hover_at(a + (b - a) * (i as f32 / 8.0));
+            self.h.run_steps(1);
+        });
+        self.press(b, egui::PointerButton::Primary, false, Modifiers::NONE);
+        self.h.run_steps(3);
+        true
+    }
+
+    pub(super) fn spot_of(&self, hint: &str) -> Option<egui::Rect> {
+        self.hinted(hint).filter(|(_, _, seen)| *seen).map(|(rect, _, _)| rect)
+    }
+
+    pub(super) fn hint_in_sight(&self, hint: &str) -> bool {
+        self.hinted(hint).is_some_and(|(_, _, seen)| seen)
+    }
+
+    pub(super) fn drag_screen(&mut self, from: Pos2, to: Pos2, what: &str) {
+        self.note(format!("dragged {what}"));
+        self.h.hover_at(from);
+        self.h.run_steps(1);
+        self.press(from, egui::PointerButton::Primary, true, Modifiers::NONE);
+        (1..=8).for_each(|i| {
+            self.h.hover_at(from + (to - from) * (i as f32 / 8.0));
+            self.h.run_steps(1);
+        });
+        self.press(to, egui::PointerButton::Primary, false, Modifiers::NONE);
+        self.h.run_steps(3);
+    }
+
     pub(super) fn act(&mut self, what: &str) {
         self.step += 1;
         self.lines.push(String::new());
@@ -288,14 +551,47 @@ impl Journey {
         self.h.query_all_by_label_contains(label).next().is_some()
     }
 
+    fn choose(&self, label: &str, keep: impl Fn(Role) -> bool) -> Result<usize, bool> {
+        let hints = crate::theme::hints(&self.h.ctx);
+        let hinted = |r: egui::Rect| {
+            hints
+                .iter()
+                .any(|(h, _)| (h.min - r.min).abs().max_elem() < 0.5 && (h.max - r.max).abs().max_elem() < 0.5)
+        };
+        let nodes: Vec<(usize, egui::Rect, bool)> = self
+            .h
+            .query_all_by_label(label)
+            .enumerate()
+            .filter(|(_, n)| keep(n.accesskit_node().role()))
+            .map(|(i, n)| (i, n.rect(), hinted(n.rect())))
+            .collect();
+        match nodes.iter().find(|(_, r, hinted)| *hinted && self.visible(*r)) {
+            Some((i, _, _)) => Ok(*i),
+            None if nodes.iter().any(|(_, _, hinted)| *hinted) => Err(true),
+            None => nodes.first().map(|(i, _, _)| *i).ok_or(false),
+        }
+    }
+
+    fn missing(label: &str, hidden: bool, to: &str) -> String {
+        match hidden {
+            true => format!("looked for \"{label}\" to {to}: it is scrolled out of sight"),
+            false => format!("looked for \"{label}\" to {to}: not on screen"),
+        }
+    }
+
     pub(super) fn click(&mut self, label: &str) -> bool {
-        let found = self.h.query_all_by_label(label).next().map(|n| n.click()).is_some();
-        self.note(match found {
-            true => format!("clicked \"{label}\""),
-            false => format!("looked for \"{label}\" to click: not on screen"),
+        let chosen = self.choose(label, |_| true);
+        if let Ok(i) = chosen
+            && let Some(n) = self.h.query_all_by_label(label).nth(i)
+        {
+            n.click();
+        }
+        self.note(match chosen {
+            Ok(_) => format!("clicked \"{label}\""),
+            Err(hidden) => Self::missing(label, hidden, "click"),
         });
         self.h.run_steps(3);
-        found
+        chosen.is_ok()
     }
 
     pub(super) fn click_containing(&mut self, label: &str) -> bool {
@@ -346,10 +642,14 @@ impl Journey {
     }
 
     pub(super) fn double_click(&mut self, label: &str) -> bool {
-        let at = self.h.query_all_by_label(label).next().map(|n| n.rect().center());
-        self.note(match at {
-            Some(_) => format!("double clicked \"{label}\""),
-            None => format!("looked for \"{label}\" to double click: not on screen"),
+        let chosen = self.choose(label, |_| true);
+        let at = chosen
+            .ok()
+            .and_then(|i| self.h.query_all_by_label(label).nth(i))
+            .map(|n| n.rect().center());
+        self.note(match chosen {
+            Ok(_) => format!("double clicked \"{label}\""),
+            Err(hidden) => Self::missing(label, hidden, "double click"),
         });
         if let Some(at) = at {
             self.h.hover_at(at);
@@ -370,30 +670,29 @@ impl Journey {
     }
 
     pub(super) fn type_into(&mut self, label: &str, text: &str) -> bool {
-        let found = self
-            .h
-            .query_all_by_label(label)
-            .find(|n| matches!(n.accesskit_node().role(), Role::TextInput | Role::MultilineTextInput))
-            .map(|n| {
-                n.focus();
-                n.type_text(text);
-            })
-            .is_some();
-        self.note(match found {
-            true => format!("typed \"{text}\" into \"{label}\""),
-            false => format!("looked for a field \"{label}\" to type in: not on screen"),
+        let chosen = self.choose(label, |role| matches!(role, Role::TextInput | Role::MultilineTextInput));
+        if let Ok(i) = chosen
+            && let Some(n) = self.h.query_all_by_label(label).nth(i)
+        {
+            n.focus();
+            n.type_text(text);
+        }
+        self.note(match chosen {
+            Ok(_) => format!("typed \"{text}\" into \"{label}\""),
+            Err(hidden) => Self::missing(label, hidden, "type in"),
         });
         self.h.run_steps(3);
-        found
+        chosen.is_ok()
     }
 
     pub(super) fn retype(&mut self, label: &str, text: &str) -> bool {
-        let found = self
-            .h
-            .query_all_by_label(label)
-            .find(|n| matches!(n.accesskit_node().role(), Role::TextInput | Role::MultilineTextInput))
-            .map(|n| n.click())
-            .is_some();
+        let chosen = self.choose(label, |role| matches!(role, Role::TextInput | Role::MultilineTextInput));
+        if let Ok(i) = chosen
+            && let Some(n) = self.h.query_all_by_label(label).nth(i)
+        {
+            n.click();
+        }
+        let found = chosen.is_ok();
         self.h.run_steps(2);
         if found {
             self.h.key_press_modifiers(Modifiers::COMMAND, Key::A);
@@ -408,6 +707,61 @@ impl Journey {
         });
         self.h.run_steps(3);
         found
+    }
+
+    pub(super) fn click_leftmost(&mut self, label: &str) -> bool {
+        let found = self
+            .h
+            .query_all_by_label(label)
+            .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+            .map(|n| n.click())
+            .is_some();
+        self.note(match found {
+            true => format!("clicked \"{label}\", the one furthest left"),
+            false => format!("looked for \"{label}\" to click: not on screen"),
+        });
+        self.h.run_steps(3);
+        found
+    }
+
+    pub(super) fn retype_leftmost(&mut self, label: &str, text: &str) -> bool {
+        let found = self
+            .h
+            .query_all_by_label(label)
+            .filter(|n| matches!(n.accesskit_node().role(), Role::TextInput | Role::MultilineTextInput))
+            .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+            .map(|n| n.click())
+            .is_some();
+        self.h.run_steps(2);
+        if found {
+            self.h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+            self.h.run_steps(1);
+            self.h.event(egui::Event::Text(text.to_string()));
+            self.h.run_steps(1);
+            self.h.key_press(Key::Enter);
+        }
+        self.note(match found {
+            true => format!(
+                "clicked into the \"{label}\" field furthest left, selected all, typed \"{text}\" and pressed Return"
+            ),
+            false => format!("looked for a field \"{label}\" to type in: not on screen"),
+        });
+        self.h.run_steps(3);
+        found
+    }
+
+    pub(super) fn in_sight_containing(&self, label: &str) -> bool {
+        self.h
+            .query_all_by_label_contains(label)
+            .map(|n| n.rect())
+            .any(|r| self.visible(r))
+    }
+
+    pub(super) fn in_sight(&self, label: &str) -> bool {
+        self.h
+            .query_all_by_label(label)
+            .map(|n| n.rect())
+            .any(|r| self.visible(r))
     }
 
     pub(super) fn click_inside(&mut self, label: &str, across: f32, down: f32) -> bool {
@@ -477,6 +831,33 @@ impl Journey {
         self.press(screen[screen.len() - 1], egui::PointerButton::Primary, false, modifiers);
         self.h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
         self.h.run_steps(3);
+    }
+
+    pub(super) fn pen_down(&mut self, x: f32, y: f32) {
+        let at = self.at(x, y);
+        self.note(format!("pressed on the canvas at {x:.0},{y:.0} and held"));
+        self.h.hover_at(at);
+        self.h.run_steps(1);
+        self.press(at, egui::PointerButton::Primary, true, Modifiers::NONE);
+    }
+
+    pub(super) fn pen_move(&mut self, x: f32, y: f32) {
+        let at = self.at(x, y);
+        self.note(format!("moved to {x:.0},{y:.0} with the button held"));
+        self.h.hover_at(at);
+        self.h.run_steps(2);
+    }
+
+    pub(super) fn pen_up(&mut self, x: f32, y: f32) {
+        let at = self.at(x, y);
+        self.note(format!("let go at {x:.0},{y:.0}"));
+        self.press(at, egui::PointerButton::Primary, false, Modifiers::NONE);
+        self.h.run_steps(3);
+    }
+
+    pub(super) fn drawing(&self) -> String {
+        self.ed()
+            .map_or_else(String::new, |ed| ed.scene.bundle.root.display().to_string())
     }
 
     pub(super) fn drag(&mut self, points: &[(f32, f32)]) {

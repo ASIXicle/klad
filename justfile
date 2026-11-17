@@ -86,6 +86,7 @@ drag-time bundle="":
     KLAD_DRAG_BUNDLE={{bundle}} cargo test --release -p klad-app -- --ignored drag_time --nocapture
 
 journeys out="":
+    cargo build -p klad-cli
     KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- journeys
 
 sweep out="":

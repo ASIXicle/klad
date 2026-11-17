@@ -1,5 +1,5 @@
 use super::Editor;
-use super::testkit::{copy_dir, written};
+use super::testkit::{FNV, copy_dir, mix, picture, written};
 use super::ui_tests::{canvas_at, editor, harness};
 use crate::commands::Cmd;
 use crate::layout;
@@ -877,12 +877,6 @@ fn out_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-const FNV: u64 = 0xcbf2_9ce4_8422_2325;
-
-fn mix(hash: u64, value: u64) -> u64 {
-    (hash ^ value).wrapping_mul(0x0100_0000_01b3)
-}
-
 struct Desk {
     h: Harness<'static, Editor>,
     folder: PathBuf,
@@ -1041,16 +1035,7 @@ impl Desk {
         let ed = self.ed();
         let doc = &ed.scene.bundle.doc;
         let undo = klad_core::history::entries(&ed.scene.bundle, Stack::Undo).map_or(0, |e| e.len());
-        let picture = {
-            let outbox = crate::stats::lock(&ed.outbox);
-            ed.scene
-                .all_tiles()
-                .iter()
-                .filter_map(|i| outbox.tile(*i))
-                .fold(FNV, |hash, tile| {
-                    tile.iter().fold(hash, |hash, v| mix(hash, u64::from(v.to_bits())))
-                })
-        };
+        let picture = picture(ed);
         let floor = self.h.ctx.content_rect().bottom() - layout::STATUS;
         let json = serde_json::to_string(doc).unwrap_or_default();
         Snap {
