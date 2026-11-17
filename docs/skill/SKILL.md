@@ -15,7 +15,7 @@ Working on klad itself: the repository's `CLAUDE.md`, `CONTRIBUTING.md` and `doc
 ## The loop
 
 1. Look: `klad ls art.klad` (tree, top layer first, ids and bounds) and `klad render art.klad --scale 0.5 --overlay ids,bbox`. Read the PNG it prints.
-2. Change: `klad add`, `klad set`, `klad rm`, `klad mv`, `klad stroke`, `klad fill`, `klad transform`, `klad lasso`, `klad path`, `klad palette`, or many at once with `klad apply` (JSON lines, one transaction).
+2. Change: `klad add`, `klad set`, `klad rm`, `klad mv`, `klad stroke`, `klad fill`, `klad transform`, `klad lasso`, `klad path`, `klad palette`, or many at once with `klad apply` (JSON lines, one transaction; with `--steps` one edit per line). A picture of more than a handful of marks comes from a generator, also when the user watches it being drawn: see Scripts.
 3. Check: add `--render` (preview, longest side 1024) and `--overlay ids,bbox` to the edit, or `klad diff` (before and after, side by side), or `klad render --focus <id>` for a close-up.
 4. Undo freely: `klad undo`, `klad redo`, `klad log`. History is shared with the editor.
 
@@ -393,7 +393,23 @@ Size the canvas for the largest size the art is ever seen at, not for the size i
 
 ## Scripts
 
-For anything with more than a handful of shapes, write a generator that prints ops as JSON lines and pipe it into `klad apply`. Rebuild from scratch each run (copy the source bundle, apply, render) so the script stays the source of truth. A landscape generator of about 18,000 nodes builds and renders in about 4 s this way.
+For anything with more than a handful of marks, write a generator that prints ops as JSON lines and pipe it into `klad apply`. Rebuild from scratch each run (copy the source bundle, apply, render) so the script stays the source of truth. A landscape generator of about 18,000 nodes builds and renders in about 4 s this way. It is also how the picture gets good: a generator constructs (one projection, one pose function, one light model for everything) and runs again until the picture is right, where marks sent one command at a time are first guesses that stay, each worked out by hand and each a round trip.
+
+### When someone watches: make it in code, replay it in steps
+
+When the user asks to draw straight into the drawing they have open, or is recording the editor, they want to see the picture appear mark by mark. That changes how the result is written, not how it is made: still a generator, never a command per mark.
+
+1. Build on a copy. `cp -R art.klad "$TMPDIR/try.klad"`, then `klad apply "$TMPDIR/try.klad" --file ops.jsonl --steps`, render, look, fix the generator, copy again and repeat until it is right. Give every layer the generator adds an id of its own, and its drawing too (`{"op":"add","layer":{"id":"lines","kind":"paint","name":"lines","cels":[{"id":"lines0","frame":0}]}}`, `"id"` on a `cel` op), and name them by it: strokes and fills take a layer by id. Marks are numbered in the order they land (`lines0:s1`, `lines0:s2`, ...), and what was in the drawing keeps its ids in the copy, so every address is the same in the copy and in the open drawing, as long as the open one has not changed since: compare the `rev` of `klad info` before the replay, and copy again if it moved.
+2. Order the ops the way a person draws: construction on the sketch layer, then the lines, flat colour under the lines, shade and light, details last; within a part the big shapes first. Add each layer right before its first mark.
+3. Replay into the open drawing in one command: `klad apply art.klad --file ops.jsonl --steps --delay 120`.
+
+- With `--steps` every line is an edit of its own: its own step in the history, and the editor shows it as it lands. `--delay` is the wait after each step in ms: about 80 to 150 for strokes. Without `--delay` the steps run as fast as they can and pauses are skipped, which is what the copy wants.
+- `{"pause":600}` on a line of its own waits between two parts (the head is done, now the body). A line that is a list, `[{"op":...},{"op":...}]`, is one step: use it for ops that belong together and for small repeated marks (teeth, scales, hatching) that would take too long one by one.
+- Lines starting with `//` are skipped, so the file can name its parts.
+- A line that fails stops the run and says which: the lines before it are in the drawing. Fix that line and go on with `--from <line>`; never start over on top of what landed.
+- Work out how long it takes before starting (lines times the delay, plus the pauses): 400 lines at 120 ms are about 50 s. Give the command a timeout to match, or run it in the background.
+- Ops that need a batch of their own (`inbetween`, `fill` with `like`, `paintover`) get one this way, and poses, cels, keys and clips are ops too, so an animation replays the same way, a drawing at a time.
+- An id the generator did not choose (a drawing made by `cel dup`, a posed frame) is looked up in the copy: `klad ls`, `klad strokes` and `klad frames` there give the ids the open drawing will get.
 
 ## Time
 

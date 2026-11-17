@@ -684,6 +684,13 @@ pub fn height_notes(doc: &klad_core::doc::Document, ops: &[Op]) -> Vec<String> {
 }
 
 pub fn edit(path: &Path, ops: &[Op], out: &Output) -> Result<()> {
+    let (bundle, applied) = commit(path, ops)?;
+    let render = preview(&bundle, out)?;
+    report(&bundle, &applied, render, out);
+    Ok(())
+}
+
+fn commit(path: &Path, ops: &[Op]) -> Result<(Bundle, Applied)> {
     let mut bundle = Bundle::open(path)?;
     let mut ops = ops.to_vec();
     ops.iter()
@@ -718,12 +725,115 @@ pub fn edit(path: &Path, ops: &[Op], out: &Output) -> Result<()> {
     bundle.ensure_unchanged()?;
     let applied = bundle.apply(&ops)?;
     bundle.stamp("cli")?;
+    Ok((bundle, applied))
+}
+
+pub struct Steps {
+    pub delay_ms: u64,
+    pub from: usize,
+}
+
+#[derive(Debug, PartialEq)]
+enum Step {
+    Edit(Vec<Op>),
+    Pause(u64),
+}
+
+fn parse_step(value: Value) -> Result<Step> {
+    match value {
+        Value::Array(ops) if ops.is_empty() => bail!("an empty list is no step"),
+        Value::Array(ops) => ops.into_iter().map(Op::parse).collect::<Result<_>>().map(Step::Edit),
+        Value::Object(ref map) if map.contains_key("pause") && !map.contains_key("op") => map["pause"]
+            .as_u64()
+            .map(Step::Pause)
+            .context("pause takes whole milliseconds, as in {\"pause\":600}"),
+        op => Op::parse(op).map(|op| Step::Edit(vec![op])),
+    }
+}
+
+fn parse_steps(text: &str) -> Result<Vec<(usize, Step)>> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty() && !line.trim_start().starts_with("//"))
+        .map(|(n, line)| {
+            let value: Value = serde_json::from_str(line).with_context(|| format!("line {}", n + 1))?;
+            Ok((n + 1, parse_step(value).with_context(|| format!("line {}", n + 1))?))
+        })
+        .collect()
+}
+
+const CHANGED_TRIES: usize = 20;
+
+fn commit_patiently(path: &Path, ops: &[Op]) -> Result<(Bundle, Applied)> {
+    let changed = |e: &anyhow::Error| e.downcast_ref::<klad_core::bundle::Changed>().is_some();
+    (1..CHANGED_TRIES)
+        .find_map(|_| match commit(path, ops) {
+            Err(e) if changed(&e) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                None
+            }
+            done => Some(done),
+        })
+        .unwrap_or_else(|| commit(path, ops))
+}
+
+fn apply_steps(path: &Path, text: &str, steps: &Steps, out: &Output) -> Result<()> {
+    let todo: Vec<(usize, Step)> = parse_steps(text)?
+        .into_iter()
+        .filter(|(line, _)| *line >= steps.from)
+        .collect();
+    if !todo.iter().any(|(_, step)| matches!(step, Step::Edit(_))) {
+        bail!(
+            "no steps from line {}: give JSON lines on stdin or with --file",
+            steps.from
+        );
+    }
+    let before = Bundle::open(path)?.doc.rev;
+    let last = todo.len() - 1;
+    let wait = |ms: u64| std::thread::sleep(std::time::Duration::from_millis(ms));
+    let mut done = 0usize;
+    let mut added: Vec<String> = Vec::new();
+    for (at, (line, step)) in todo.iter().enumerate() {
+        match step {
+            Step::Pause(ms) if steps.delay_ms > 0 => wait(*ms),
+            Step::Pause(_) => {}
+            Step::Edit(ops) => {
+                let (_, applied) = commit_patiently(path, ops).with_context(|| {
+                    format!(
+                        "line {line} stopped the steps; the {done} before it are in the drawing, so fix that line and go on with --from {line}"
+                    )
+                })?;
+                added.extend(applied.added);
+                done += 1;
+                if at < last {
+                    wait(steps.delay_ms);
+                }
+            }
+        }
+    }
+    let bundle = Bundle::open(path)?;
     let render = preview(&bundle, out)?;
-    report(&bundle, &applied, render, out);
+    if out.json {
+        let value = json!({
+            "rev": bundle.doc.rev,
+            "from_rev": before,
+            "steps": done,
+            "added": added,
+            "render": render.map(|p| p.display().to_string()),
+        });
+        println!("{value}");
+        return Ok(());
+    }
+    println!("{done} steps, each its own step in the history");
+    added.iter().for_each(|id| println!("added {id}"));
+    println!("rev {} (from {before})", bundle.doc.rev);
+    if let Some(path) = render {
+        println!("{}", path.display());
+    }
     Ok(())
 }
 
-pub fn apply(path: &Path, file: Option<PathBuf>, out: &Output) -> Result<()> {
+pub fn apply(path: &Path, file: Option<PathBuf>, steps: Option<Steps>, out: &Output) -> Result<()> {
     let text = match file {
         Some(file) => std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?,
         None => {
@@ -732,6 +842,9 @@ pub fn apply(path: &Path, file: Option<PathBuf>, out: &Output) -> Result<()> {
             text
         }
     };
+    if let Some(steps) = steps {
+        return apply_steps(path, &text, &steps, out);
+    }
     let ops = parse_lines(&text)?;
     if ops.is_empty() {
         bail!("no ops: give JSON lines on stdin or with --file");
@@ -1075,6 +1188,22 @@ pub fn show(path: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_is_an_op_a_list_of_ops_or_a_pause() {
+        let stroke = r#"{"op":"stroke","layer":"l1","path":"M1 1 L9 9"}"#;
+        let text = format!("{stroke}\n\n// part two\n{{\"pause\":250}}\n[{stroke},{stroke}]\n");
+        let steps = parse_steps(&text).unwrap();
+        let lines: Vec<usize> = steps.iter().map(|(line, _)| *line).collect();
+        assert_eq!(lines, [1, 4, 5], "lines are counted as the file has them");
+        assert!(matches!(&steps[0].1, Step::Edit(ops) if ops.len() == 1));
+        assert_eq!(steps[1].1, Step::Pause(250));
+        assert!(matches!(&steps[2].1, Step::Edit(ops) if ops.len() == 2));
+        let said = |text: &str| format!("{:#}", parse_steps(text).unwrap_err());
+        assert!(said("[]").contains("line 1") && said("[]").contains("empty list"));
+        assert!(said(r#"{"pause":"long"}"#).contains("whole milliseconds"));
+        assert!(said(&format!("{stroke}\n{{\"op\":\"nope\"}}")).starts_with("line 2"));
+    }
 
     #[test]
     fn values_parse_as_json_or_strings() {

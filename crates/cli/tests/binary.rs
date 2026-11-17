@@ -2670,3 +2670,80 @@ fn directions_shine_depth_surfaces_exports_and_checks_of_the_light_maps_from_the
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn apply_in_steps_makes_one_edit_per_line_waits_between_them_and_goes_on_after_a_failure() {
+    let dir = std::env::temp_dir().join(format!("draw-binary-steps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bundle = dir.join("a.klad");
+    let path = bundle.to_str().unwrap();
+    let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_klad")).args(args).output().unwrap();
+    let draw = |args: &[&str]| {
+        let out = run(args);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    draw(&["new", path, "--width", "200", "--height", "100"]);
+    let undo_steps = || -> usize {
+        let log = draw(&["log", path]);
+        let words: Vec<&str> = log.lines().next().unwrap().split_whitespace().collect();
+        let at = words.iter().position(|w| *w == "undo").unwrap();
+        words[at - 1].parse().unwrap()
+    };
+    let strokes = || -> u64 {
+        let ls: serde_json::Value = serde_json::from_str(&draw(&["ls", path, "--json"])).unwrap();
+        ls["layers"][0]["strokes"].as_u64().unwrap()
+    };
+    let line =
+        |layer: &str, y: u32| format!(r#"{{"op":"stroke","layer":"{layer}","path":"M10 {y} L190 {y}","size":4}}"#);
+    let script = |fifth: &str| {
+        [
+            line("l1", 10),
+            "// the second part".to_string(),
+            r#"{"pause":40}"#.to_string(),
+            format!("[{},{}]", line("l1", 30), line("l1", 50)),
+            line(fifth, 70),
+            line("l1", 90),
+        ]
+        .join("\n")
+    };
+    let ops = dir.join("ops.jsonl");
+    let file = ops.to_str().unwrap();
+    std::fs::write(&ops, script("nope")).unwrap();
+    let before = undo_steps();
+
+    let whole = run(&["apply", path, "--file", file]);
+    assert!(!whole.status.success(), "a pause is only a line of --steps");
+    assert_eq!((strokes(), undo_steps()), (0, before), "one write: all or none");
+
+    let started = std::time::Instant::now();
+    let stopped = run(&["apply", path, "--file", file, "--steps", "--delay", "30"]);
+    let said = String::from_utf8_lossy(&stopped.stderr).to_string();
+    assert_eq!(stopped.status.code(), Some(1), "{said}");
+    assert!(said.contains("line 5") && said.contains("--from 5"), "{said}");
+    assert!(said.contains("the 2 before it"), "{said}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(100),
+        "30 ms after each of two steps and a pause of 40"
+    );
+    assert_eq!(strokes(), 3, "the lines before the one that failed stay");
+    assert_eq!(
+        undo_steps(),
+        before + 2,
+        "a line is a step in the history, a list of ops one step"
+    );
+
+    std::fs::write(&ops, script("l1")).unwrap();
+    let rest = draw(&["apply", path, "--file", file, "--from", "5"]);
+    assert!(rest.starts_with("2 steps"), "{rest}");
+    assert_eq!((strokes(), undo_steps()), (5, before + 4));
+    draw(&["undo", path]);
+    draw(&["undo", path]);
+    draw(&["undo", path]);
+    assert_eq!(strokes(), 1, "undoing the list takes both its strokes");
+
+    let nothing = run(&["apply", path, "--file", file, "--from", "9"]);
+    assert!(String::from_utf8_lossy(&nothing.stderr).contains("no steps from line 9"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

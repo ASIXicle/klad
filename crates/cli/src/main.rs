@@ -896,12 +896,29 @@ enum Command {
     },
     #[command(
         about = "Apply many edits from JSON lines (stdin or --file) in one write",
-        long_about = "Apply many edits from JSON lines in one transaction: all apply or none.\n\n  {\"op\":\"add\",\"layer\":{\"kind\":\"vector\",\"name\":\"sky\"}}\n  {\"op\":\"add\",\"node\":{\"type\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50,\"fill\":\"#336699\"},\"in\":\"l1\"}\n  {\"op\":\"set\",\"id\":\"n2\",\"fill\":\"#ff0000\",\"transform.rotate\":15}\n  {\"op\":\"rm\",\"id\":\"n2\"}\n  {\"op\":\"mv\",\"id\":\"l1\",\"below\":\"l3\"}\n  {\"op\":\"add\",\"cel\":{\"frame\":4,\"hold\":2},\"in\":\"l3\"}\n\nNew ids are printed in order."
+        long_about = "Apply many edits from JSON lines in one transaction: all apply or none.\n\n  {\"op\":\"add\",\"layer\":{\"kind\":\"vector\",\"name\":\"sky\"}}\n  {\"op\":\"add\",\"node\":{\"type\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50,\"fill\":\"#336699\"},\"in\":\"l1\"}\n  {\"op\":\"set\",\"id\":\"n2\",\"fill\":\"#ff0000\",\"transform.rotate\":15}\n  {\"op\":\"rm\",\"id\":\"n2\"}\n  {\"op\":\"mv\",\"id\":\"l1\",\"below\":\"l3\"}\n  {\"op\":\"add\",\"cel\":{\"frame\":4,\"hold\":2},\"in\":\"l3\"}\n\nNew ids are printed in order.\n\nWith --steps every line is an edit of its own, made in order: a step in the history that can be undone alone, and one the open editor shows as it lands. A line may be a list of ops that belong together ([{\"op\":...},{\"op\":...}]), and {\"pause\":600} waits that many ms between two parts. --delay 120 waits after each step, so a drawing made by a script appears mark by mark for someone watching; without a delay the pauses are skipped and the steps run as fast as they can, which is how to try the same file on a copy first. A line that fails stops the run with the lines before it in the drawing: fix it and go on with --from <line>. Ops that need a batch of their own (inbetween, fill --like, paintover) get one this way.\n\n  klad apply art.klad --file ops.jsonl --steps --delay 120\n  klad apply art.klad --file ops.jsonl --from 48 --delay 120"
     )]
     Apply {
         bundle: PathBuf,
         #[arg(long)]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "One edit per line, in order: each line is its own step in the history, and the open editor shows each one arrive"
+        )]
+        steps: bool,
+        #[arg(
+            long,
+            value_name = "MS",
+            help = "With --steps: wait this long after each step, so someone watching sees the drawing grow"
+        )]
+        delay: Option<u64>,
+        #[arg(
+            long,
+            value_name = "LINE",
+            help = "With --steps: start at this line, to go on after a line that failed"
+        )]
+        from: Option<usize>,
         #[arg(long, default_value_t = 0, help = "Frame to render with --render")]
         frame: u32,
         #[command(flatten)]
@@ -3291,9 +3308,18 @@ fn run() -> Result<()> {
         Command::Apply {
             bundle,
             file,
+            steps,
+            delay,
+            from,
             frame,
             flags,
-        } => agent::apply(&bundle, file, &output(&flags, frame))?,
+        } => {
+            let steps = (steps || delay.is_some() || from.is_some()).then(|| agent::Steps {
+                delay_ms: delay.unwrap_or(0),
+                from: from.unwrap_or(1),
+            });
+            agent::apply(&bundle, file, steps, &output(&flags, frame))?
+        }
         Command::Path {
             bundle,
             node,
