@@ -2749,6 +2749,17 @@ fn layer_rows_drag_rename_duplicate_group_and_delete() {
     h.key_press(egui::Key::Enter);
     h.run_steps(2);
     assert_eq!(top_down(&h)[0], "rim light");
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Fill, "the keys work again once the name is kept");
+    h.state_mut().invoke(Cmd::RenameLayer).unwrap();
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_press(egui::Key::B);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Brush, "and after Esc left the name as it was");
+    assert_eq!(top_down(&h)[0], "rim light");
     activate(&mut h, "lines");
     h.state_mut().invoke(Cmd::DuplicateLayer).unwrap();
     h.run_steps(2);

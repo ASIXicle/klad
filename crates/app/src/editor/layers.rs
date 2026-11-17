@@ -364,6 +364,9 @@ impl Editor {
                 }
                 _ => self.renaming = Some(rename(text, false)),
             }
+            if self.renaming.is_none() {
+                child.memory_mut(|m| m.surrender_focus(edit.id));
+            }
         } else {
             let name = child.add(
                 egui::Label::new(RichText::new(&row.name).color(if active { Color32::WHITE } else { theme::TEXT }))
