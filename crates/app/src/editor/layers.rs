@@ -374,6 +374,7 @@ impl Editor {
             let name = child.add(
                 egui::Label::new(RichText::new(&row.name).color(if active { Color32::WHITE } else { theme::TEXT }))
                     .truncate()
+                    .selectable(false)
                     .sense(Sense::click()),
             );
             if name.double_clicked() {

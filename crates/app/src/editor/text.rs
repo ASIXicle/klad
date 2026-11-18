@@ -47,6 +47,8 @@ pub(super) struct Typing {
     pub text: Text,
     pub before: String,
     pub caret: usize,
+    pub anchor: Option<usize>,
+    pub undo: Vec<(String, usize)>,
     pub fill: [f32; 4],
     pub matrix: [f32; 6],
     pub focused: bool,
@@ -69,6 +71,23 @@ pub(super) struct Picker {
 }
 
 pub(super) const TEXT_SIZE: f32 = 48.0;
+const SELECTED_TEXT: f32 = 0.35;
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+fn word_around(text: &str, at: usize) -> (usize, usize) {
+    let word = |c: char| c.is_alphanumeric() || c == '\'' || c == '_';
+    let from = text[..at]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| word(*c))
+        .last()
+        .map_or(at, |(i, _)| i);
+    let to = text[at..]
+        .char_indices()
+        .find(|(_, c)| !word(*c))
+        .map_or(text.len(), |(i, _)| at + i);
+    (from, to)
+}
 const PICTURE_MOST: usize = 8192;
 const PICTURE_ROOM: f32 = 0.9;
 
@@ -168,6 +187,15 @@ impl Editor {
         typeset::layout_in(&t.bytes, &t.text).ok()
     }
 
+    pub(super) fn text_drag(&mut self, c: Vec2) {
+        let Some(at) = self.inside_typing(c) else {
+            return;
+        };
+        if let Some(t) = self.text_edit.as_mut().filter(|t| t.anchor.is_some()) {
+            t.caret = at;
+        }
+    }
+
     fn inside_typing(&self, c: Vec2) -> Option<usize> {
         let t = self.text_edit.as_ref()?;
         let layout = self.typing_layout()?;
@@ -181,8 +209,28 @@ impl Editor {
 
     pub(super) fn text_down(&mut self, c: Vec2) -> Result<()> {
         if let Some(at) = self.inside_typing(c) {
+            let shift = self.modifiers.shift;
+            let twice = self
+                .text_click
+                .is_some_and(|(when, was)| was == at && when.elapsed() < DOUBLE_CLICK);
+            self.text_click = Some((std::time::Instant::now(), at));
+            self.text_pressing = !twice;
             if let Some(t) = self.text_edit.as_mut() {
-                t.caret = at;
+                match (shift, twice) {
+                    (true, _) => {
+                        t.anchor = t.anchor.or(Some(t.caret));
+                        t.caret = at;
+                    }
+                    (false, true) => {
+                        let (from, to) = word_around(&t.text.text, at);
+                        t.anchor = Some(from);
+                        t.caret = to;
+                    }
+                    (false, false) => {
+                        t.anchor = Some(at);
+                        t.caret = at;
+                    }
+                }
             }
             return Ok(());
         }
@@ -250,6 +298,8 @@ impl Editor {
             before: written.text.text.clone(),
             text: written.text,
             caret,
+            anchor: None,
+            undo: Vec::new(),
             fill: written.fill,
             matrix: written.matrix,
             focused: false,
@@ -304,6 +354,8 @@ impl Editor {
             text,
             before: String::new(),
             caret: 0,
+            anchor: None,
+            undo: Vec::new(),
             fill: self.color,
             matrix: IDENTITY,
             focused: false,
@@ -452,17 +504,58 @@ impl Editor {
         }
         let events = ui.input(|i| i.events.clone());
         let mut finish = false;
+        let mut copied: Option<String> = None;
         events.iter().for_each(|e| {
             let layout = self.typing_layout();
             let Some(t) = self.text_edit.as_mut() else {
                 return;
             };
+            let chosen = t
+                .anchor
+                .filter(|a| *a != t.caret)
+                .map(|a| a.min(t.caret)..a.max(t.caret));
+            let shift = matches!(e, egui::Event::Key { modifiers, .. } if modifiers.shift);
+            let moving = matches!(
+                e,
+                egui::Event::Key {
+                    key: Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown | Key::Home | Key::End,
+                    pressed: true,
+                    ..
+                }
+            );
+            if moving && shift && t.anchor.is_none() {
+                t.anchor = Some(t.caret);
+            }
             let words = &mut t.text.text;
+            let cut = |words: &mut String, caret: &mut usize, undo: &mut Vec<(String, usize)>| -> bool {
+                match chosen.clone() {
+                    Some(range) => {
+                        undo.push((words.clone(), *caret));
+                        *caret = range.start;
+                        words.replace_range(range, "");
+                        true
+                    }
+                    None => false,
+                }
+            };
             match e {
                 egui::Event::Text(s) | egui::Event::Paste(s) => {
                     let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+                    if !cut(words, &mut t.caret, &mut t.undo) {
+                        t.undo.push((words.clone(), t.caret));
+                    }
                     words.insert_str(t.caret, &clean);
                     t.caret += clean.len();
+                    t.anchor = None;
+                }
+                egui::Event::Copy | egui::Event::Cut => {
+                    if let Some(range) = chosen.clone() {
+                        copied = Some(words[range].to_string());
+                        if matches!(e, egui::Event::Cut) {
+                            cut(words, &mut t.caret, &mut t.undo);
+                            t.anchor = None;
+                        }
+                    }
                 }
                 egui::Event::Key {
                     key,
@@ -472,18 +565,47 @@ impl Editor {
                 } => match key {
                     Key::Escape => finish = true,
                     Key::Enter if modifiers.command => finish = true,
+                    Key::A if modifiers.command => {
+                        t.anchor = Some(0);
+                        t.caret = words.len();
+                    }
+                    Key::Z if modifiers.command => {
+                        if let Some((was, caret)) = t.undo.pop() {
+                            *words = was;
+                            t.caret = caret.min(words.len());
+                            t.anchor = None;
+                        }
+                    }
                     Key::Enter => {
+                        if !cut(words, &mut t.caret, &mut t.undo) {
+                            t.undo.push((words.clone(), t.caret));
+                        }
                         words.insert(t.caret, '\n');
                         t.caret += 1;
+                        t.anchor = None;
+                    }
+                    Key::Backspace | Key::Delete if chosen.is_some() => {
+                        cut(words, &mut t.caret, &mut t.undo);
+                        t.anchor = None;
                     }
                     Key::Backspace if t.caret > 0 => {
+                        t.undo.push((words.clone(), t.caret));
                         let from = prev_char(words, t.caret);
                         words.replace_range(from..t.caret, "");
                         t.caret = from;
                     }
                     Key::Delete if t.caret < words.len() => {
+                        t.undo.push((words.clone(), t.caret));
                         let to = next_char(words, t.caret);
                         words.replace_range(t.caret..to, "");
+                    }
+                    Key::ArrowLeft if !shift && chosen.is_some() => {
+                        t.caret = chosen.clone().map_or(t.caret, |r| r.start);
+                        t.anchor = None;
+                    }
+                    Key::ArrowRight if !shift && chosen.is_some() => {
+                        t.caret = chosen.clone().map_or(t.caret, |r| r.end);
+                        t.anchor = None;
                     }
                     Key::ArrowLeft => t.caret = prev_char(words, t.caret),
                     Key::ArrowRight => t.caret = next_char(words, t.caret),
@@ -513,7 +635,13 @@ impl Editor {
                 },
                 _ => {}
             }
+            if moving && !shift {
+                t.anchor = None;
+            }
         });
+        if let Some(text) = copied {
+            ui.ctx().copy_text(text);
+        }
         if finish {
             self.finish_typing()?;
         }
@@ -612,6 +740,32 @@ impl Editor {
             let x1 = x1.max(x0 + t.text.size * 0.3);
             let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)].map(|(x, y)| to_screen(x, y));
             painter.add(egui::Shape::dashed_line(&corners, Stroke::new(1.0, accent), 5.0, 4.0));
+        }
+        if let Some(range) = t
+            .anchor
+            .filter(|a| *a != t.caret)
+            .map(|a| a.min(t.caret)..a.max(t.caret))
+        {
+            layout.lines.iter().for_each(|line| {
+                let at = |i: usize| line.carets.iter().find(|(c, _)| *c == i).map(|(_, x)| *x);
+                let first = line
+                    .carets
+                    .iter()
+                    .map(|(c, _)| *c)
+                    .filter(|c| range.contains(c) || *c == range.end);
+                let (lo, hi) = first.fold((usize::MAX, 0), |(lo, hi), c| (lo.min(c), hi.max(c)));
+                if let (Some(x0), Some(x1)) = (at(lo), at(hi))
+                    && lo < hi
+                {
+                    let (top, bottom) = (line.baseline - layout.ascent, line.baseline + layout.descent);
+                    let corners = [(x0, top), (x1, top), (x1, bottom), (x0, bottom)].map(|(x, y)| to_screen(x, y));
+                    painter.add(egui::Shape::convex_polygon(
+                        corners.to_vec(),
+                        accent.gamma_multiply(SELECTED_TEXT),
+                        Stroke::NONE,
+                    ));
+                }
+            });
         }
         if let Some((x, top, bottom)) = layout.caret(t.caret) {
             let line = [to_screen(x, top), to_screen(x, bottom)];

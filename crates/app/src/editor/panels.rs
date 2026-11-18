@@ -268,6 +268,7 @@ impl Editor {
     fn tend_jobs(&mut self) {
         self.jobs.poll().into_iter().for_each(|e| {
             let took = e.took.as_secs_f32();
+            self.job_ended = Some(Instant::now());
             match e.outcome {
                 Outcome::Rerun => self.say_job(
                     Tone::Info,

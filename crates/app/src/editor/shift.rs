@@ -129,6 +129,9 @@ impl Editor {
 
     pub(super) fn finish_shift_drag(&mut self, drag: &Drag) -> Result<()> {
         if !drag.moved() {
+            if drag.outside {
+                self.end_shift();
+            }
             return Ok(());
         }
         let every = self.shifting.as_ref().is_some_and(|s| s.every);

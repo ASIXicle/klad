@@ -18,6 +18,8 @@ pub(super) struct Held {
     events: Vec<PenEvent>,
 }
 
+const BAR_GAP: f32 = 6.0;
+
 impl Held {
     pub fn admit(&mut self, busy: bool, events: Vec<PenEvent>) -> Vec<PenEvent> {
         match busy {
@@ -329,19 +331,31 @@ impl Editor {
             Selected::Points => None,
             _ => self.handles().map(|(_, c)| c),
         };
-        let at = match corners {
+        let (at, above) = match corners {
             Some(corners) => {
                 let screen: Vec<egui::Pos2> = corners.iter().map(|c| self.screen(view, rect, *c)).collect();
                 let (lo, hi) = screen
                     .iter()
                     .fold((screen[0], screen[0]), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
                 match hi.y + 30.0 + 40.0 < rect.bottom() {
-                    true => egui::pos2((lo.x + hi.x) / 2.0, hi.y + 30.0),
-                    false => egui::pos2((lo.x + hi.x) / 2.0, lo.y - 72.0),
+                    true => (egui::pos2((lo.x + hi.x) / 2.0, hi.y + 30.0), false),
+                    false => (
+                        egui::pos2((lo.x + hi.x) / 2.0, lo.y - super::KNOB - theme::GRAB - BAR_GAP),
+                        true,
+                    ),
                 }
             }
-            None => egui::pos2(rect.center().x, rect.bottom() - 60.0),
+            None => (egui::pos2(rect.center().x, rect.bottom() - 60.0), false),
         };
+        self.bar_above = above;
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let over_bar = pointer.is_some_and(|p| {
+            ctx.memory(|m| m.area_rect(Id::unique("selection bar")))
+                .is_some_and(|r| r.contains(p))
+        });
+        if ctx.input(|i| i.modifiers.shift) && !over_bar {
+            return;
+        }
         let at = egui::pos2(
             at.x.clamp(rect.left() + 8.0, rect.right() - 8.0),
             at.y.max(rect.top() + 8.0),
@@ -423,7 +437,10 @@ impl Editor {
         }
         egui::Area::new(bar)
             .order(egui::Order::Foreground)
-            .pivot(egui::Align2::CENTER_TOP)
+            .pivot(match above {
+                true => egui::Align2::CENTER_BOTTOM,
+                false => egui::Align2::CENTER_TOP,
+            })
             .fixed_pos(at)
             .constrain(true)
             .show(ctx, |ui| {

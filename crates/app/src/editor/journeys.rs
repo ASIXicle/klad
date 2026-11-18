@@ -1251,27 +1251,34 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
         "the knob turns the selection, also when the bar sits above the box",
     );
 
-    j.act("the bar is on the knob: scroll the grass up to the middle of the canvas and try the knob again");
-    let low = j.at(268.0, 1160.0).y;
-    j.wheel(268.0, 1160.0, vec2(0.0, -220.0), Modifiers::NONE);
-    if j.at(268.0, 1160.0).y >= low {
-        j.wheel(268.0, 1160.0, vec2(0.0, 440.0), Modifiers::NONE);
-    }
-    j.note(format!(
-        "the grass went from y {low:.0} to y {:.0} on screen",
-        j.at(268.0, 1160.0).y
-    ));
-    if let Some(c) = handle_corners(&j) {
-        let knob = knob_of(c);
-        j.drag_screen(
-            knob,
-            knob + vec2(40.0, 10.0),
-            "the knob above the selection's box to the right",
-        );
-    }
-    j.look("turned-with-room");
-    let after_turn = box_of(&layer_marks(&j, "lines"), &two);
-    j.note(format!("their box went from {before_turn:?} to {after_turn:?}"));
+    let turned_first = !near(before_turn, after_turn, 0.5);
+    let after_turn = match turned_first {
+        true => after_turn,
+        false => {
+            j.act("the bar is on the knob: scroll the grass up to the middle of the canvas and try the knob again");
+            let low = j.at(268.0, 1160.0).y;
+            j.wheel(268.0, 1160.0, vec2(0.0, -220.0), Modifiers::NONE);
+            if j.at(268.0, 1160.0).y >= low {
+                j.wheel(268.0, 1160.0, vec2(0.0, 440.0), Modifiers::NONE);
+            }
+            j.note(format!(
+                "the grass went from y {low:.0} to y {:.0} on screen",
+                j.at(268.0, 1160.0).y
+            ));
+            if let Some(c) = handle_corners(&j) {
+                let knob = knob_of(c);
+                j.drag_screen(
+                    knob,
+                    knob + vec2(40.0, 10.0),
+                    "the knob above the selection's box to the right",
+                );
+            }
+            j.look("turned-with-room");
+            let after_turn = box_of(&layer_marks(&j, "lines"), &two);
+            j.note(format!("their box went from {before_turn:?} to {after_turn:?}"));
+            after_turn
+        }
+    };
     j.expect(
         "knob-turns",
         !near(before_turn, after_turn, 0.5) && sizes(&j, &two) == now,
@@ -1632,10 +1639,7 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
     j.finish(&[
         "cmd-x-cuts",
         "esc-closes-the-picker-first",
-        "knob-turns-under-the-bar",
-        "one-recolour-is-one-undo",
         "picking-a-shape-goes-to-its-layer",
-        "recolouring-a-gradient-keeps-it-a-gradient",
     ]);
 }
 
@@ -2006,9 +2010,10 @@ fn someone_rearranges_the_layers_of_an_agents_drawing_and_transforms_parts() {
         if still { "still on" } else { "over" },
         j.heard()
     ));
+    let outside_turned = !near(small, turned, 1.0);
     j.expect(
         "outside-the-box-turns-as-the-message-says",
-        !near(small, turned, 1.0),
+        outside_turned,
         "a drag from outside the box turns the group, as the message says",
     );
 
@@ -2032,15 +2037,13 @@ fn someone_rearranges_the_layers_of_an_agents_drawing_and_transforms_parts() {
     );
     j.key(Key::Escape);
     j.look("transform-done");
-    j.chord(CMD, Key::Z);
-    j.chord(CMD, Key::Z);
-    j.chord(CMD, Key::Z);
+    (0..3 + usize::from(outside_turned)).for_each(|_| j.chord(CMD, Key::Z));
     j.look("transforms-undone");
     let shown = j.picture();
     j.expect(
         "three-undos-take-the-transforms-back",
         near(lines_before, layer_box(&j, "lines"), 0.5) && shown == pictured,
-        "three undos put the lantern back where it was",
+        "an undo per transform (three, and one more for the turn from outside) puts the lantern back where it was",
     );
 
     j.act("throw the agent's hidden sketch away: click sketch, the bin, and take it back");
@@ -2084,11 +2087,9 @@ fn someone_rearranges_the_layers_of_an_agents_drawing_and_transforms_parts() {
     );
 
     j.finish(&[
-        "a-row-drags-by-its-name",
         "grouping-keeps-the-picture",
         "layers-panel-shows-the-layers",
         "moving-into-the-group-keeps-the-picture",
-        "outside-the-box-turns-as-the-message-says",
         "the-lantern-moves-as-one",
     ]);
 }
@@ -2487,7 +2488,7 @@ fn someone_works_on_a_drawing_while_their_agent_edits_it() {
         "the agent's line and the stroke painted right after it are both kept",
     );
 
-    j.finish(&["an-agent-edit-is-announced", "undo-says-whose-step-it-took"]);
+    j.finish(&[]);
 }
 
 const GODOT_CHECK: &str = r#"extends SceneTree

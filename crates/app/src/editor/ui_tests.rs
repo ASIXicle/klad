@@ -8620,6 +8620,8 @@ fn windows_fit_above_the_status_line_open_at_their_size_and_a_second_opens_besid
 fn a_menu_longer_than_the_window_scrolls_to_its_last_item() {
     let path = sample("menu-scrolls");
     let mut h = harness(editor(&path), vec2(1280.0, 420.0));
+    h.ctx
+        .all_styles_mut(|s| s.scroll_animation = egui::style::ScrollAnimation::none());
     let labels = |h: &Harness<'static, Editor>| -> Vec<(String, Rect)> {
         h.query_all(By::new().predicate(|n| matches!(n.role(), Role::Button | Role::CheckBox) && n.label().is_some()))
             .map(|n| (n.accesskit_node().label().unwrap_or_default().to_string(), n.rect()))
@@ -8781,6 +8783,69 @@ fn text_typed_on_a_sprite_starts_small_and_stays_drawn_at_any_zoom() {
     assert!(
         at.width() > limit / h.ctx.pixels_per_point(),
         "it is drawn at its size on screen: {at:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn an_open_text_selects_takes_back_typing_and_lets_command_keys_through() {
+    let path = sample("text-keys");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let at = canvas_at(&h, 200.0, 150.0);
+    open_text(&mut h, at);
+    h.event(egui::Event::Text("hello world".into()));
+    h.run_steps(1);
+    let typed = |h: &Harness<'static, Editor>| h.state().text_edit.as_ref().map(|t| t.text.text.clone());
+    h.key_press_modifiers(Modifiers::SHIFT, Key::ArrowLeft);
+    h.key_press_modifiers(Modifiers::SHIFT, Key::ArrowLeft);
+    h.run_steps(1);
+    h.event(egui::Event::Text("LD".into()));
+    h.run_steps(1);
+    assert_eq!(
+        typed(&h).as_deref(),
+        Some("hello worLD"),
+        "shift and the arrows select, typing replaces"
+    );
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    h.event(egui::Event::Text("bye".into()));
+    h.run_steps(1);
+    assert_eq!(typed(&h).as_deref(), Some("bye"), "cmd A selects the whole text");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(1);
+    assert_eq!(typed(&h).as_deref(), Some("hello worLD"), "cmd Z takes back the typing");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::K);
+    h.run_steps(2);
+    assert!(
+        h.state().palette.is_some(),
+        "cmd K opens the finder while a text is open"
+    );
+    assert!(
+        h.state().text_edit.is_none(),
+        "the text is kept before the command runs"
+    );
+    assert!(texts(&h).iter().any(|(_, t)| t.text == "hello worLD"));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn grouping_a_clipped_layer_away_from_its_base_says_so() {
+    let path = sample("clip-group");
+    Bundle::open(&path)
+        .unwrap()
+        .apply(&parse_lines(r#"{"op":"set","id":"l2","clip":true}"#).unwrap())
+        .unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let name = h.state().scene.bundle.doc.layer("l2").unwrap().name.clone();
+    activate(&mut h, &name);
+    h.state_mut().invoke(Cmd::GroupLayer).unwrap();
+    h.run_steps(2);
+    let said: Vec<String> = h.state().messages.log().map(|m| m.text.clone()).collect();
+    assert!(
+        said.iter()
+            .any(|m| m.starts_with(&format!("{name} is clipped to the layer below"))),
+        "{said:?}"
     );
     let _ = std::fs::remove_dir_all(&path);
 }

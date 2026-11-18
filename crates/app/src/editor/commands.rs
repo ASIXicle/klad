@@ -8,7 +8,7 @@ use crate::messages::Tone;
 use crate::stats::{Stats, lock};
 use crate::theme::{self, Hint};
 use anyhow::Result;
-use egui::RichText;
+use egui::{Key, RichText};
 use klad_core::doc::{Kind as LayerKind, MASK, Shape};
 use klad_core::history::Stack;
 use klad_core::markedit::LassoAction;
@@ -44,6 +44,39 @@ const ON_THE_DRAWING: [Cmd; 12] = [
     Cmd::MoveEarlier,
     Cmd::MoveLater,
 ];
+
+const TEXT_KEYS: [Key; 12] = [
+    Key::A,
+    Key::Z,
+    Key::C,
+    Key::X,
+    Key::V,
+    Key::Enter,
+    Key::Backspace,
+    Key::Delete,
+    Key::ArrowLeft,
+    Key::ArrowRight,
+    Key::ArrowUp,
+    Key::ArrowDown,
+];
+
+fn typing_passes(e: &egui::Event) -> bool {
+    match e {
+        egui::Event::Key {
+            key,
+            modifiers,
+            pressed: true,
+            ..
+        } => {
+            let function = matches!(
+                key,
+                Key::F1 | Key::F2 | Key::F3 | Key::F4 | Key::F5 | Key::F6 | Key::F7 | Key::F8
+            );
+            (modifiers.command || function) && !TEXT_KEYS.contains(key)
+        }
+        _ => false,
+    }
+}
 
 impl Editor {
     fn drawing_here(&self) -> Option<(klad_core::doc::Cel, u32)> {
@@ -1339,7 +1372,8 @@ impl Editor {
     }
 
     pub(super) fn command_keys(&mut self, ui: &egui::Ui) -> Result<()> {
-        if ui.ctx().egui_wants_keyboard_input() || self.field_had_focus {
+        let typing = self.text_edit.is_some();
+        if (ui.ctx().egui_wants_keyboard_input() || self.field_had_focus) && !typing {
             return Ok(());
         }
         if self.capturing.is_some() {
@@ -1351,6 +1385,7 @@ impl Editor {
         let pressed: Vec<(Option<Cmd>, bool, bool)> = ui.input(|i| {
             i.events
                 .iter()
+                .filter(|e| !typing || typing_passes(e))
                 .filter_map(|e| match e {
                     egui::Event::Copy => Some((Some(Cmd::Copy), false, false)),
                     egui::Event::Paste(_) => Some((Some(Cmd::Paste), false, false)),
@@ -1373,6 +1408,9 @@ impl Editor {
             .filter(|(cmd, _, _)| !modal || *cmd == Cmd::Settings)
             .try_for_each(|(cmd, repeat, shift)| {
                 self.key_shift = shift;
+                if self.text_edit.is_some() {
+                    self.finish_typing()?;
+                }
                 let skip = repeat
                     && match cmd.spec().repeat {
                         Repeat::No => true,

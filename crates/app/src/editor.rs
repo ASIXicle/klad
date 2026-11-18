@@ -94,6 +94,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use target::Target;
 
+const OWN_JOB: Duration = Duration::from_secs(3);
 const TEXT_SHARE: f32 = 0.25;
 const HANDLE: f32 = 12.0;
 const DROPPER: f32 = 22.0;
@@ -420,6 +421,7 @@ struct Drag {
     corners: [Vec2; 4],
     slop: f32,
     crossed: bool,
+    outside: bool,
 }
 
 impl Drag {
@@ -737,6 +739,11 @@ pub(crate) struct Editor {
     brush: String,
     previous_brush: String,
     other_size: Option<f32>,
+    heard_seq: Option<u64>,
+    bar_above: bool,
+    text_click: Option<(Instant, usize)>,
+    text_pressing: bool,
+    job_ended: Option<Instant>,
     tuning: Tuning,
     size: f32,
     color: [f32; 4],
@@ -949,6 +956,11 @@ impl Editor {
             brush: "ink".into(),
             previous_brush: "ink".into(),
             other_size: None,
+            heard_seq: None,
+            bar_above: false,
+            text_click: None,
+            text_pressing: false,
+            job_ended: None,
             tuning,
             size: 12.0,
             color: [0.08, 0.08, 0.1, 1.0],
@@ -1101,6 +1113,12 @@ impl Editor {
             frames,
         };
         editor.use_defaults();
+        editor.heard_seq = Some(
+            klad_core::history::peek(&editor.scene.bundle, Stack::Undo)
+                .ok()
+                .flatten()
+                .map_or(0, |(entry, _)| entry.seq),
+        );
         editor.request_canvas();
         editor.tend_canvas(timeline::OPEN_WAIT)?;
         Ok(editor)
@@ -1312,7 +1330,15 @@ impl Editor {
     pub(super) fn write(&mut self, ops: &[Op]) -> Result<(Vec<usize>, klad_core::ops::Applied)> {
         self.follow_the_folder()?;
         lock::refuse(&self.scene.bundle.doc, ops)?;
-        self.scene.apply_with(ops, &self.brushes)
+        let layered = ops
+            .iter()
+            .any(|op| matches!(op, Op::Move { .. } | Op::AddLayer { .. } | Op::Remove { .. }));
+        let bases = layered.then(|| words::clip_bases(&self.scene.bundle.doc));
+        let done = self.scene.apply_with(ops, &self.brushes)?;
+        if let Some(words) = bases.and_then(|b| self.clips_moved(&b)) {
+            self.say(Tone::Refused, words);
+        }
+        Ok(done)
     }
 
     fn reload(&mut self) -> Result<()> {
@@ -1344,7 +1370,28 @@ impl Editor {
             None => format!("{tiles} tiles refreshed in {took:.0} ms"),
         };
         self.measure("sync", text);
+        self.hear_the_agent();
         Ok(())
+    }
+
+    fn hear_the_agent(&mut self) {
+        let Some((entry, _)) = klad_core::history::peek(&self.scene.bundle, Stack::Undo).ok().flatten() else {
+            return;
+        };
+        let known = self.heard_seq.replace(entry.seq);
+        let own = self.jobs.busy(crate::jobs::Tag::Edit)
+            || self.jobs.busy(crate::jobs::Tag::Inbetween)
+            || self.job_ended.is_some_and(|t| t.elapsed() < OWN_JOB);
+        if known.is_some_and(|seq| entry.seq > seq) && entry.author != "editor" && !own {
+            let who = match entry.author.as_str() {
+                "cli" => "the agent".to_string(),
+                other => history::who(other),
+            };
+            self.say(
+                Tone::Done,
+                format!("{who} changed the drawing: {}", self.step_words(&entry.summary)),
+            );
+        }
     }
 
     pub(super) fn shapes(&self) -> Vec<String> {
@@ -1455,10 +1502,20 @@ impl Editor {
         self.follow_the_folder()?;
         let start = Instant::now();
         let word = if stack == Stack::Undo { "undid" } else { "redid" };
+        let author = klad_core::history::peek(&self.scene.bundle, stack)
+            .ok()
+            .flatten()
+            .map(|(entry, _)| entry.author);
         match self.scene.step(stack, &self.brushes)? {
             Some((summary, dirty)) => {
                 self.measure("undo", format!("{word} {summary} in {:.0} ms", ms(start)));
-                self.say(Tone::Info, format!("{word}: {}", self.step_words(&summary)));
+                let whose = match author.as_deref() {
+                    Some("editor") | None => String::new(),
+                    Some("cli") => " the agent's step".to_string(),
+                    Some(other) => format!(" {}'s step", history::who(other)),
+                };
+                let tone = if whose.is_empty() { Tone::Info } else { Tone::Done };
+                self.say(tone, format!("{word}{whose}: {}", self.step_words(&summary)));
                 self.dirty.extend(dirty);
                 self.forget_missing_selection();
             }
@@ -2061,6 +2118,7 @@ impl Editor {
             corners,
             slop: DRAG_SLOP / self.view.map_or(1.0, |v| v.zoom),
             crossed: false,
+            outside: false,
         });
     }
 
@@ -2237,6 +2295,7 @@ impl Editor {
             self.activate(path)?;
             let name = self.scene.active_layer().map(|l| l.name.clone()).unwrap_or_default();
             self.say(Tone::Info, format!("on layer {name}"));
+            self.scene.rebuild_caches(None)?;
             if !self.ensure_canvas()? {
                 self.say(Tone::Info, format!("{name} is still loading; press again in a moment"));
                 return Ok(());
@@ -2363,7 +2422,14 @@ impl Editor {
             && let Some((layer, _)) = self.pick_cels(true).into_iter().next()
             && let Some(klad_core::doc::Loc::Layer(path)) = self.scene.bundle.doc.locate(&layer)
         {
+            let from = self.scene.active_layer().map(|l| l.name.clone());
             self.activate(path)?;
+            if let (Some(from), Some(to)) = (from, self.scene.active_layer().map(|l| l.name.clone())) {
+                self.say(
+                    Tone::Info,
+                    format!("{from} has no strokes on this frame, so the loop picks on {to}"),
+                );
+            }
         }
         let Some(cel) = self.scene.active_cel() else {
             let why = match self.scene.active_layer() {
@@ -3392,10 +3458,15 @@ impl Editor {
                         && !self.on_marks()
                         && self.toggle_shape(c)? => {}
                 Some((id, grab, corners)) => self.start_drag(id, grab, corners, c, false),
-                None => {
-                    self.end_shift();
-                    self.grab_under(c, e.pos)?
+                None if self.shifting.is_some() => {
+                    if let Some((id, corners)) = self.handles() {
+                        self.start_drag(id, Grab::Rotate, corners, c, false);
+                        if let Some(drag) = self.drag.as_mut() {
+                            drag.outside = true;
+                        }
+                    }
                 }
+                None => self.grab_under(c, e.pos)?,
             },
             (Tool::Select, Phase::Move) => {
                 if let Some(drag) = self.drag.as_mut() {
@@ -3425,6 +3496,8 @@ impl Editor {
             (Tool::Shape, Phase::Move) => self.shape_move(c),
             (Tool::Shape, Phase::Up) => self.shape_up()?,
             (Tool::Text, Phase::Down) => self.text_down(c)?,
+            (Tool::Text, Phase::Move) if self.text_pressing => self.text_drag(c),
+            (Tool::Text, Phase::Up) => self.text_pressing = false,
             (Tool::Bone, Phase::Down) => self.bone_down(c),
             (Tool::Bone, Phase::Move) => self.bone_move(c),
             (Tool::Bone, Phase::Up) => self.bone_up()?,
@@ -4625,13 +4698,22 @@ impl Editor {
             return Ok(());
         };
         let hex = color::hex(rgba);
-        let has_outline = matches!(
-            self.scene.bundle.doc.item(&id),
-            Some(Item::Node(_, _, node)) if node.stroke.is_some()
-        );
+        let node = match self.scene.bundle.doc.item(&id) {
+            Some(Item::Node(_, _, node)) => Some(node.clone()),
+            _ => None,
+        };
+        let has_outline = node.as_ref().is_some_and(|n| n.stroke.is_some());
+        let now = node.as_ref().and_then(|n| match outline {
+            true => n.stroke.as_ref().map(|s| s.paint.clone()),
+            false => n.fill.clone(),
+        });
+        let paint = match now.and_then(|p| regraded(p, rgba)) {
+            Some(graded) => serde_json::to_value(graded)?,
+            None => json!(hex),
+        };
         let props = match (outline, has_outline) {
-            (false, _) => json!({"fill": hex}),
-            (true, true) => json!({"stroke.paint": hex}),
+            (false, _) => json!({"fill": paint}),
+            (true, true) => json!({"stroke.paint": paint}),
             (true, false) => json!({"stroke": {"paint": hex, "width": self.pen_width}}),
         };
         let props = props.as_object().cloned().unwrap_or_default();
@@ -4696,6 +4778,9 @@ impl Editor {
     }
 
     fn dye(&mut self, dye: Dye, rgba: [f32; 4]) -> Result<()> {
+        if self.dyed(dye).is_some_and(|now| color::hex(now) == color::hex(rgba)) {
+            return Ok(());
+        }
         match dye {
             Dye::Strokes => self.recolour_picked_to(rgba)?,
             Dye::Fill => self.recolour_shape_to(false, rgba)?,
@@ -4756,6 +4841,7 @@ impl Editor {
             .collect();
         let picked = color::Square::new(ui, ("dye", dye.what()), now.unwrap_or(self.color), dye.what())
             .current(self.color)
+            .upward(self.bar_above)
             .colours("palette", palette)
             .colours("recent", recent)
             .under(ui, &response);
@@ -6013,6 +6099,31 @@ impl Editor {
     }
 }
 
+fn regraded(paint: klad_core::doc::Paint, target: [f32; 4]) -> Option<klad_core::doc::Paint> {
+    use klad_core::doc::Paint;
+    let regrade = |stops: &mut Vec<klad_core::doc::Stop>| {
+        let colours: Vec<[f32; 4]> = stops.iter().map(|s| color::rgba_of(&s.1).unwrap_or(target)).collect();
+        let moved = klad_core::color::recolour(&colours, [target[0], target[1], target[2], 1.0]);
+        stops
+            .iter_mut()
+            .zip(colours.iter().zip(moved))
+            .for_each(|(stop, (was, now))| {
+                stop.1 = klad_core::color::to_hex([now[0], now[1], now[2], was[3]]);
+            });
+    };
+    match paint {
+        Paint::Solid(_) => None,
+        Paint::Linear { mut linear } => {
+            regrade(&mut linear.stops);
+            Some(Paint::Linear { linear })
+        }
+        Paint::Radial { mut radial } => {
+            regrade(&mut radial.stops);
+            Some(Paint::Radial { radial })
+        }
+    }
+}
+
 fn erases_any(buffer: &StrokeBuffer, raster: Option<&Raster>) -> bool {
     let Some(raster) = raster else {
         return false;
@@ -6087,6 +6198,7 @@ mod tests {
                 ],
                 slop: 0.5,
                 crossed: true,
+                outside: false,
             };
             let committed = drag.mark_transform();
             let a = committed.affine(committed.pivot.unwrap_or([0.0, 0.0]));

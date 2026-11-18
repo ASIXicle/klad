@@ -1,6 +1,8 @@
 use super::Editor;
+use klad_core::doc::{Document, Layer};
 use klad_core::ops::{ClipEdit, Op};
 use klad_core::timing::CelAction;
+use std::collections::BTreeMap;
 
 fn plural(n: u32, one: &str, many: &str) -> String {
     match n {
@@ -9,7 +11,41 @@ fn plural(n: u32, one: &str, many: &str) -> String {
     }
 }
 
+fn clip_base<'a>(layers: &'a [Layer], id: &str) -> Option<Option<&'a Layer>> {
+    match layers.iter().position(|l| l.id == id) {
+        Some(at) => Some(layers[..at].iter().rev().find(|l| !l.clip)),
+        None => layers.iter().find_map(|l| clip_base(l.children(), id)),
+    }
+}
+
+pub(super) fn clip_bases(doc: &Document) -> BTreeMap<String, Option<String>> {
+    doc.all_layers()
+        .iter()
+        .filter(|l| l.clip)
+        .filter_map(|l| clip_base(&doc.layers, &l.id).map(|base| (l.id.clone(), base.map(|b| b.id.clone()))))
+        .collect()
+}
+
 impl Editor {
+    pub(super) fn clips_moved(&self, before: &BTreeMap<String, Option<String>>) -> Option<String> {
+        let doc = &self.scene.bundle.doc;
+        let after = clip_bases(doc);
+        let moved: Vec<String> = after
+            .iter()
+            .filter(|(id, base)| before.get(*id).is_some_and(|was| was != *base))
+            .filter_map(|(id, base)| {
+                let name = doc.layer(id)?.name.clone();
+                Some(match base.as_ref().and_then(|b| doc.layer(b)) {
+                    Some(b) => format!("{name} is clipped to the layer below, which is {} now", b.name),
+                    None => format!(
+                        "{name} is clipped to the layer below, and nothing is below it now, so it shows nothing"
+                    ),
+                })
+            })
+            .collect();
+        (!moved.is_empty()).then(|| format!("{}: untick clip in Layer settings, or cmd Z", moved.join("; ")))
+    }
+
     pub(super) fn layer_name(&self, id: &str) -> String {
         self.scene
             .bundle

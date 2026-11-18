@@ -429,6 +429,7 @@ pub struct Square {
     current: Option<[f32; 4]>,
     alpha: bool,
     removable: bool,
+    upward: bool,
     palette: Vec<Shelf>,
 }
 
@@ -446,6 +447,7 @@ impl Square {
             current: None,
             alpha: false,
             removable: false,
+            upward: false,
             palette: Vec::new(),
         }
     }
@@ -457,6 +459,11 @@ impl Square {
                 colours,
             });
         }
+        self
+    }
+
+    pub fn upward(mut self, up: bool) -> Self {
+        self.upward = up;
         self
     }
 
@@ -511,99 +518,105 @@ impl Square {
         let live_id = self.id.with("live");
         let text_id = self.id.with("hex");
         let mut out = None;
-        Popup::from_toggle_button_response(response)
+        let popup = Popup::from_toggle_button_response(response)
             .id(self.id)
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                ui.label(egui::RichText::new(&self.what).color(theme::WEAK));
-                let wheel = picker(ui, &mut live, 150.0);
-                if wheel.drag_stopped() || (wheel.clicked() && wheel.changed()) {
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside);
+        let popup = match self.upward {
+            true => popup.align(egui::RectAlign::TOP_START),
+            false => popup,
+        };
+        popup.show(|ui| {
+            ui.label(egui::RichText::new(&self.what).color(theme::WEAK));
+            let wheel = picker(ui, &mut live, 150.0);
+            if wheel.drag_stopped() || (wheel.clicked() && wheel.changed()) {
+                out = Some(Pick::Chosen(live.rgba()));
+            } else if wheel.changed() {
+                out = Some(Pick::Dragging(live.rgba()));
+            }
+            if self.alpha {
+                let slider = ui
+                    .add(egui::Slider::new(&mut live.a, 0.0..=1.0).text("opacity"))
+                    .hint("how see-through this colour is");
+                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                     out = Some(Pick::Chosen(live.rgba()));
-                } else if wheel.changed() {
+                } else if slider.changed() {
                     out = Some(Pick::Dragging(live.rgba()));
                 }
-                if self.alpha {
-                    let slider = ui
-                        .add(egui::Slider::new(&mut live.a, 0.0..=1.0).text("opacity"))
-                        .hint("how see-through this colour is");
-                    if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-                        out = Some(Pick::Chosen(live.rgba()));
-                    } else if slider.changed() {
-                        out = Some(Pick::Dragging(live.rgba()));
-                    }
+            }
+            ui.horizontal(|ui| {
+                let label = ui.label("hex");
+                let typed = ui.data(|d| d.get_temp::<String>(text_id));
+                let editing = typed.is_some();
+                let mut text = typed.unwrap_or_else(|| hex(live.rgba()));
+                let field = ui
+                    .add(egui::TextEdit::singleline(&mut text).desired_width(90.0))
+                    .labelled_by(label.id)
+                    .hint("type a colour as #rrggbb; Return keeps it");
+                match field.has_focus() {
+                    true => ui.data_mut(|d| {
+                        d.insert_temp(text_id, text.clone());
+                    }),
+                    false => ui.data_mut(|d| d.remove::<String>(text_id)),
                 }
-                ui.horizontal(|ui| {
-                    let label = ui.label("hex");
-                    let mut text = ui
-                        .data(|d| d.get_temp::<String>(text_id))
-                        .unwrap_or_else(|| hex(live.rgba()));
-                    let field = ui
-                        .add(egui::TextEdit::singleline(&mut text).desired_width(90.0))
-                        .labelled_by(label.id)
-                        .hint("type a colour as #rrggbb; Return keeps it");
-                    match field.has_focus() {
-                        true => ui.data_mut(|d| {
-                            d.insert_temp(text_id, text.clone());
-                        }),
-                        false => ui.data_mut(|d| d.remove::<String>(text_id)),
-                    }
-                    if field.lost_focus()
-                        && let Some(rgba) = rgba_of(&text)
-                    {
-                        let rgba = if self.alpha {
-                            rgba
-                        } else {
-                            [rgba[0], rgba[1], rgba[2], live.a]
-                        };
-                        live = Hsva::from_rgba(rgba, live.h);
-                        out = Some(Pick::Chosen(rgba));
-                    }
-                });
-                self.palette.iter().for_each(|Shelf { title, colours }| {
-                    ui.label(egui::RichText::new(title).color(theme::WEAK));
-                    ui.scope(|ui| {
-                        ui.set_max_width(8.0 * (theme::TARGET + 3.0));
-                        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-                        ui.horizontal_wrapped(|ui| {
-                            colours.iter().for_each(|(rgba, name)| {
-                                let same = hex(*rgba) == hex(live.rgba());
-                                if swatch(ui, *rgba, same, theme::TARGET).hint(name.clone()).clicked() {
-                                    let rgba = if self.alpha {
-                                        *rgba
-                                    } else {
-                                        [rgba[0], rgba[1], rgba[2], live.a]
-                                    };
-                                    live = Hsva::from_rgba(rgba, live.h);
-                                    out = Some(Pick::Chosen(rgba));
-                                }
-                            });
+                if field.lost_focus()
+                    && editing
+                    && let Some(rgba) = rgba_of(&text)
+                {
+                    let rgba = if self.alpha {
+                        rgba
+                    } else {
+                        [rgba[0], rgba[1], rgba[2], live.a]
+                    };
+                    live = Hsva::from_rgba(rgba, live.h);
+                    out = Some(Pick::Chosen(rgba));
+                    ui.memory_mut(|m| m.surrender_focus(field.id));
+                }
+            });
+            self.palette.iter().for_each(|Shelf { title, colours }| {
+                ui.label(egui::RichText::new(title).color(theme::WEAK));
+                ui.scope(|ui| {
+                    ui.set_max_width(8.0 * (theme::TARGET + 3.0));
+                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                    ui.horizontal_wrapped(|ui| {
+                        colours.iter().for_each(|(rgba, name)| {
+                            let same = hex(*rgba) == hex(live.rgba());
+                            if swatch(ui, *rgba, same, theme::TARGET).hint(name.clone()).clicked() {
+                                let rgba = if self.alpha {
+                                    *rgba
+                                } else {
+                                    [rgba[0], rgba[1], rgba[2], live.a]
+                                };
+                                live = Hsva::from_rgba(rgba, live.h);
+                                out = Some(Pick::Chosen(rgba));
+                            }
                         });
                     });
                 });
-                ui.horizontal(|ui| {
-                    if let Some(current) = self.current {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(theme::TARGET), Sense::hover());
-                        paint_swatch(ui, rect, current, false);
-                        if ui
-                            .button("use the current colour")
-                            .hint("use the colour you paint with")
-                            .clicked()
-                        {
-                            let rgba = if self.alpha {
-                                current
-                            } else {
-                                [current[0], current[1], current[2], live.a]
-                            };
-                            out = Some(Pick::Chosen(rgba));
-                            Popup::close_id(ui.ctx(), self.id);
-                        }
-                    }
-                    if self.removable && ui.button("remove").hint("take this colour out").clicked() {
-                        out = Some(Pick::Remove);
+            });
+            ui.horizontal(|ui| {
+                if let Some(current) = self.current {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(theme::TARGET), Sense::hover());
+                    paint_swatch(ui, rect, current, false);
+                    if ui
+                        .button("use the current colour")
+                        .hint("use the colour you paint with")
+                        .clicked()
+                    {
+                        let rgba = if self.alpha {
+                            current
+                        } else {
+                            [current[0], current[1], current[2], live.a]
+                        };
+                        out = Some(Pick::Chosen(rgba));
                         Popup::close_id(ui.ctx(), self.id);
                     }
-                });
+                }
+                if self.removable && ui.button("remove").hint("take this colour out").clicked() {
+                    out = Some(Pick::Remove);
+                    Popup::close_id(ui.ctx(), self.id);
+                }
             });
+        });
         let base = match out {
             Some(Pick::Dragging(rgba) | Pick::Chosen(rgba)) => rgba,
             _ => self.rgba,
