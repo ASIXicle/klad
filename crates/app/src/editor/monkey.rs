@@ -503,7 +503,9 @@ fn way_out(h: &mut Harness<'static, Editor>, path: &Path) -> Result<(), Broken> 
             what: busy_with(h),
         });
     }
+    let shown: Vec<u64> = h.state().messages.toasts(Instant::now()).iter().map(|m| m.id).collect();
     let ed = h.state_mut();
+    shown.into_iter().for_each(|id| ed.messages.dismiss(id));
     ed.windows = super::Windows::default();
     ed.first.open = false;
     ed.palette = None;
