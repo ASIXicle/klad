@@ -209,7 +209,7 @@ impl CelCache {
     }
 
     pub fn store(&self, cel: &str, key: u64, raster: &Raster, replay: &CelReplay) -> Result<()> {
-        fs::create_dir_all(&self.dir)?;
+        klad_core::bundle::make_folder(&self.dir)?;
         let (pixels, record) = self.paths(cel);
         let mut bytes = key.to_le_bytes().to_vec();
         bytes.extend(compress(raster)?);

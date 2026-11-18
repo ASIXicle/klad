@@ -5713,6 +5713,49 @@ fn text_is_typed_on_the_canvas_and_edited_in_place() {
     assert!(path.join("fonts/Cinzel.ttf").is_file(), "picking a font copies it in");
 }
 
+#[test]
+fn a_drawing_put_back_as_another_folder_stays_open_and_one_that_is_gone_asks_to_close() {
+    let path = sample("put-back");
+    let shelf = path.with_extension("shelf");
+    let away = shelf.join("put-back");
+    let _ = std::fs::remove_dir_all(&shelf);
+    std::fs::create_dir_all(&shelf).unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    let before = h.state().scene.total_marks();
+    std::fs::rename(&path, &away).unwrap();
+    copy_dir(&away, &path);
+    std::fs::create_dir_all(path.join(".cache")).unwrap();
+    std::fs::copy(klad_core::here::path(&away), klad_core::here::path(&path)).unwrap();
+    Bundle::open(&path)
+        .unwrap()
+        .apply(&parse_lines(r#"{"op":"stroke","layer":"l6","path":"M10 10 L90 90","size":6}"#).unwrap())
+        .unwrap();
+    h.run_steps(6);
+    assert!(h.state().wants.is_none(), "the drawing stays open");
+    assert_eq!(
+        h.state().scene.total_marks(),
+        before + 1,
+        "and shows what the folder that was put back holds"
+    );
+    let (from, to) = (canvas_at(&h, 100.0, 300.0), canvas_at(&h, 300.0, 320.0));
+    drag(&mut h, from, to);
+    h.run_steps(4);
+    let on_disk = |path: &Path| Bundle::open(path).unwrap().read_marks("l6", "c6").unwrap().len();
+    assert_eq!((on_disk(&path), on_disk(&away)), (before + 2, before));
+    std::fs::remove_dir_all(&path).unwrap();
+    h.run_steps(3);
+    assert!(
+        matches!(h.state().wants, Some(super::Want::Gone)),
+        "a drawing whose folder is gone asks to be closed"
+    );
+    let (from, to) = (canvas_at(&h, 100.0, 100.0), canvas_at(&h, 300.0, 120.0));
+    drag(&mut h, from, to);
+    h.run_steps(20);
+    assert!(!path.exists(), "and nothing makes the folder again");
+    let _ = std::fs::remove_dir_all(&shelf);
+}
+
 fn text_shows(doc: &klad_core::doc::Document, id: &str) -> Option<bool> {
     match doc.item(id) {
         Some(klad_core::doc::Item::Node(_, _, n)) => Some(n.visible),

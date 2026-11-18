@@ -2,7 +2,7 @@ use super::Editor;
 use super::options;
 use crate::messages::Tone;
 use crate::theme::{self, Hint};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use egui::{Color32, RichText, TextureHandle, TextureOptions};
 use klad_core::brushes::{AngleDef, BrushDef, ColorDef, Curve, DualDef, GrainDef, PaintDef, Paper, TIP_IMAGES, TipDef};
 use std::path::Path;
@@ -130,7 +130,6 @@ impl Editor {
                 "a picture {name} is in this drawing already with other pixels; brushes using it would change, so give it another name"
             );
         }
-        std::fs::create_dir_all(path.parent().ok_or_else(|| anyhow!("no folder"))?)?;
         klad_core::bundle::write_atomic(&path, bytes)?;
         self.brushes.add_picture(name, picture);
         self.say(

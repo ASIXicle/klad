@@ -264,11 +264,13 @@ impl Home {
         }
         let mut chosen = None;
         let mut closing = false;
+        let mut gone = None;
         match self.editor.as_mut() {
             Some(editor) => {
                 editor.frame(ui);
                 match editor.wants.take() {
                     Some(Want::Close) => closing = true,
+                    Some(Want::Gone) => gone = Some(editor.scene.bundle.root.clone()),
                     Some(Want::Path(path)) => chosen = Some(path),
                     Some(Want::New) => self.start = Some(Start::new(&editor.settings, Section::New)),
                     Some(Want::Recent) => self.start = Some(Start::new(&editor.settings, Section::Recent)),
@@ -349,6 +351,17 @@ impl Home {
                 {
                     start.error = Some(format!("saving your settings: {e:#}"));
                 }
+            }
+        }
+        if let Some(root) = gone {
+            self.close(&ctx);
+            let name = root
+                .file_stem()
+                .map_or_else(|| root.display().to_string(), |s| s.to_string_lossy().to_string());
+            if let Some(start) = self.start.as_mut() {
+                start.error = Some(format!(
+                    "{name} was moved or deleted while it was open, so it is closed here. Every change made until then is saved in its folder: open it from where it is now."
+                ));
             }
         }
         if closing {

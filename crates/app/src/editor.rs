@@ -69,7 +69,7 @@ use klad_brush::{
     stroke_blend,
 };
 use klad_core::brushes::{BrushDef, Curve, TipDef, pick_id};
-use klad_core::bundle::now_ms;
+use klad_core::bundle::{Whereabouts, now_ms};
 use klad_core::doc::{Item, Kind, Linear, Loc, MASK, Node, Paint, Radial, Shape, Stop};
 use klad_core::fill::{self, Fill, FillRef, FillSource, Seed};
 use klad_core::history::Stack;
@@ -703,6 +703,7 @@ pub(crate) enum Want {
     Open,
     Recent,
     Close,
+    Gone,
     Path(std::path::PathBuf),
 }
 
@@ -1166,6 +1167,54 @@ impl Editor {
             }
             self.shared = now;
         }
+    }
+
+    pub(super) fn folder_is_there(&mut self) -> bool {
+        match self.scene.bundle.whereabouts() {
+            Whereabouts::Here => true,
+            Whereabouts::Renamed(to) => {
+                self.follow(to);
+                true
+            }
+            Whereabouts::Replaced => {
+                self.scene.bundle.adopt();
+                self.watch = watch(&self.scene.bundle.root, self.ctx.clone()).ok();
+                self.external.get_or_insert(now_ms());
+                true
+            }
+            Whereabouts::Gone => {
+                self.wants = Some(Want::Gone);
+                false
+            }
+        }
+    }
+
+    fn follow(&mut self, to: PathBuf) {
+        let from = self.scene.bundle.root.clone();
+        self.scene.bundle.follow(to.clone());
+        self.frames.disk = Some(self.scene.pictures());
+        self.watch = match watch(&to, self.ctx.clone()) {
+            Ok(watch) => Some(watch),
+            Err(e) => {
+                self.say(
+                    Tone::Error,
+                    format!("not watching the drawing's folder, so agent edits will not show: {e}"),
+                );
+                None
+            }
+        };
+        self.external.get_or_insert(now_ms());
+        self.settings.moved(&from, &to);
+        self.settings_dirty = true;
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Title(crate::start::title(Some(&to))));
+        let name = to
+            .file_stem()
+            .map_or_else(|| to.display().to_string(), |s| s.to_string_lossy().to_string());
+        self.say(
+            Tone::Info,
+            format!("this drawing's folder was renamed: it is called {name} now, and klad goes on in it"),
+        );
     }
 
     fn sync(&mut self) -> Result<()> {

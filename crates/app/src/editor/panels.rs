@@ -81,6 +81,9 @@ impl Editor {
             theme::install(&ctx);
             self.themed = true;
         }
+        if !self.folder_is_there() {
+            return;
+        }
         theme::clear_hints(&ctx);
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 1e-3 {
             ctx.set_zoom_factor(self.settings.ui_scale);

@@ -3200,22 +3200,131 @@ fn someone_keeps_their_drawings_in_order() {
         "the refusal says how a picture comes into klad",
     );
 
-    let moved_open: &[&str] = match renamed {
-        true => &[
-            "a-stroke-after-the-move-is-kept-or-refused-aloud",
-            "the-move-leaves-no-second-drawing",
-        ],
-        false => &[],
-    };
-    let known: Vec<&str> = [
+    j.finish(&[
         "a-damaged-drawing-is-explained",
         "a-picture-given-to-open-says-how-to-bring-it-in",
-    ]
-    .iter()
-    .chain(moved_open)
-    .copied()
-    .collect();
-    j.finish(&known);
+    ]);
+}
+
+#[test]
+fn someone_renames_and_moves_a_drawing_while_it_is_open() {
+    let mut j = Journey::begin("renamed-while-open", WINDOW, Some("lantern.klad"));
+    let home = j.folder.clone();
+    let shown = |text: String| text.replace(&format!("{}/", home.display()), "");
+    let (old, new) = (home.join("lantern.klad"), home.join("lantern at night.klad"));
+    let holds = |j: &Journey| j.ed().map_or(0, |ed| ed.scene.total_marks());
+    let open_at = |j: &Journey| j.ed().map(|ed| ed.scene.bundle.root.clone());
+
+    j.act("open the lantern, a drawing of several layers, and give its folder another name in the file browser");
+    j.settle();
+    j.look("opened");
+    let before = holds(&j);
+    j.note(format!(
+        "the editor holds {before} marks, the folder {:?}",
+        on_disk(&old)
+    ));
+    if std::fs::rename(&old, &new).is_err() {
+        j.note("the system refused to rename the folder of an open drawing: nothing to see here");
+        return j.finish(&[]);
+    }
+    j.h.run_steps(6);
+    j.look("renamed");
+    let said = shown(j.heard());
+    j.note(format!("after the rename it said: {said}"));
+    j.expect(
+        "the-editor-follows-the-renamed-folder",
+        open_at(&j).as_deref() == Some(new.as_path()),
+        "klad goes on in the folder under its new name",
+    );
+    j.expect(
+        "the-rename-is-told-in-plain-words",
+        said.contains("lantern at night") && !said.contains("os error") && !said.contains("doc.json"),
+        "klad says that the drawing has another name now, without a path to a file or an error number",
+    );
+
+    j.act("paint a stroke");
+    j.key(Key::B);
+    j.drag(&[(300.0, 300.0), (700.0, 320.0)]);
+    j.look("painted-after-the-rename");
+    j.note(format!(
+        "the editor holds {} marks; lantern at night.klad holds {:?}; in the folder: {:?}; it said: {}",
+        holds(&j),
+        on_disk(&new),
+        files_in(&home),
+        shown(j.heard())
+    ));
+    j.expect(
+        "a-stroke-after-the-rename-lands-in-the-renamed-drawing",
+        holds(&j) == before + 1 && on_disk(&new) == Some(before + 1),
+        "the stroke is in the editor and in the renamed folder, with everything that was there",
+    );
+    j.expect(
+        "the-rename-leaves-no-second-drawing",
+        !old.exists(),
+        "no folder comes back under the old name",
+    );
+
+    j.act("take the stroke back with cmd Z");
+    j.chord(CMD, Key::Z);
+    j.look("undone-after-the-rename");
+    j.note(format!(
+        "the editor holds {} marks; lantern at night.klad holds {:?}; in the folder: {:?}",
+        holds(&j),
+        on_disk(&new),
+        files_in(&home)
+    ));
+    j.expect(
+        "an-undo-after-the-rename-keeps-every-layer",
+        holds(&j) == before && on_disk(&new) == Some(before) && !old.exists(),
+        "the editor and the renamed folder hold the drawing as it was, on every layer",
+    );
+
+    j.act("close it: the recent drawings know it under its new name");
+    j.chord(CMD, Key::W);
+    j.look("closed-after-the-rename");
+    j.expect(
+        "recent-knows-the-new-name",
+        j.shown("lantern at night") && !j.shown("moved or deleted"),
+        "the recent row shows the drawing under its new name, and no card for a drawing that is gone",
+    );
+
+    j.act("open it again, paint, and move its folder into another folder while it is open");
+    j.click("lantern at night");
+    j.settle();
+    j.expect(
+        "the-renamed-drawing-opens-from-recent",
+        j.ed().is_some(),
+        "a click on its card opens the drawing under its new name",
+    );
+    if j.ed().is_none() {
+        return j.finish(&[]);
+    }
+    j.key(Key::B);
+    j.drag(&[(300.0, 400.0), (700.0, 420.0)]);
+    j.settle();
+    let kept = holds(&j);
+    let away = home.join("archive").join("lantern at night.klad");
+    std::fs::create_dir_all(home.join("archive")).unwrap();
+    std::fs::rename(&new, &away).unwrap();
+    j.h.run_steps(6);
+    j.look("moved-away");
+    let said = shown(start_error(&j));
+    j.note(format!(
+        "the editor is {}; it said: {said}",
+        if j.ed().is_some() { "still open" } else { "closed" }
+    ));
+    j.expect(
+        "a-drawing-moved-away-is-closed-with-a-word",
+        j.ed().is_none() && said.contains("lantern at night") && said.contains("moved") && !said.contains("os error"),
+        "klad closes a drawing whose folder it can no longer find, and says so in plain words",
+    );
+    j.h.run_steps(30);
+    j.expect(
+        "a-move-leaves-nothing-behind",
+        !new.exists() && on_disk(&away) == Some(kept),
+        "nothing comes back at the old place, and the moved folder holds the whole drawing",
+    );
+    j.finish(&[]);
 }
 
 fn finder_offers(query: &str) -> Vec<&'static str> {
@@ -6334,7 +6443,9 @@ fn someone_lights_a_drawing_for_a_game() {
     j.click("Export");
     let project = j.folder.join("game").join("art");
     let folder = project.clone();
-    let written = j.wait("the scene", |_| files_in(&folder).iter().any(|f| f.ends_with(".tscn")));
+    let written = j.wait("the scene", |ed| {
+        ed.jobs.is_empty() && files_in(&folder).iter().any(|f| f.ends_with(".tscn"))
+    });
     j.look("godot-exported");
     let files = files_in(&project);
     let text: String = files

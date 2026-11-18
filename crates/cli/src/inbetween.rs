@@ -709,6 +709,7 @@ fn compute(
     let view = Bundle {
         root: bundle.root.clone(),
         seen: bundle.seen,
+        folder: bundle.folder,
         doc: staged.clone(),
     };
     let frames: BTreeSet<u32> = jobs.iter().map(|j| j.frame).collect();

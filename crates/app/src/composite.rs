@@ -374,7 +374,7 @@ fn read_picture(dir: &Path, key: u64) -> Option<FrameImage> {
 }
 
 fn write_picture(dir: &Path, image: &FrameImage) -> Result<()> {
-    fs::create_dir_all(dir)?;
+    klad_core::bundle::make_folder(dir)?;
     let mut bytes = PICTURE.to_vec();
     [klad_brush::ENGINE_VERSION, image.width, image.height]
         .iter()
@@ -1306,6 +1306,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             rasters,
@@ -1880,6 +1881,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             paint: paint.into_iter().filter(|(_, c)| !self.cels.contains_key(c)).collect(),
@@ -2045,6 +2047,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             rasters,
@@ -2078,6 +2081,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             rasters: Rasters::new(),
@@ -2429,6 +2433,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: self.bundle.doc.clone(),
             },
             frame: self.frame,

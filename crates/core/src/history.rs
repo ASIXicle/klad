@@ -87,8 +87,9 @@ fn next_seq(bundle: &Bundle) -> Result<u64> {
 }
 
 fn write_entry(bundle: &Bundle, stack: Stack, entry: &Entry, patch: &Patch) -> Result<()> {
+    bundle.ensure_here()?;
     let dir = entry_dir(bundle, stack, entry.seq);
-    fs::create_dir_all(dir.join("files"))?;
+    crate::bundle::make_folder(&dir.join("files"))?;
     write_atomic(
         &dir.join("patch.json.zst"),
         &zstd::encode_all(&serde_json::to_vec(patch)?[..], 3)?,
@@ -197,6 +198,7 @@ pub fn peek(bundle: &Bundle, stack: Stack) -> Result<Option<(Entry, Option<Patch
 }
 
 pub fn step(bundle: &mut Bundle, stack: Stack) -> Result<Option<Entry>> {
+    bundle.ensure_here()?;
     let Some(seq) = seqs(bundle, stack)?.first().copied() else {
         return Ok(None);
     };

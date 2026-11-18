@@ -243,6 +243,18 @@ impl Settings {
         self.welcomed = true;
     }
 
+    pub fn moved(&mut self, from: &Path, to: &Path) {
+        let from = from
+            .parent()
+            .and_then(|dir| fs::canonicalize(dir).ok())
+            .zip(from.file_name())
+            .map_or_else(|| from.to_path_buf(), |(dir, name)| dir.join(name))
+            .display()
+            .to_string();
+        self.documents.retain(|p| *p != from);
+        self.opened(to);
+    }
+
     pub fn forget(&mut self, path: &str) {
         self.documents.retain(|p| p != path);
     }
