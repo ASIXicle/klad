@@ -29,6 +29,20 @@ const TIMELINE_KEYS: [Cmd; 6] = [
     Cmd::MoveEarlier,
     Cmd::MoveLater,
 ];
+const ON_THE_DRAWING: [Cmd; 12] = [
+    Cmd::NewDrawing,
+    Cmd::NewDrawingAfter,
+    Cmd::Duplicate,
+    Cmd::DeleteDrawing,
+    Cmd::Link,
+    Cmd::Unlink,
+    Cmd::HoldLonger,
+    Cmd::HoldShorter,
+    Cmd::InsertFrame,
+    Cmd::RemoveFrame,
+    Cmd::MoveEarlier,
+    Cmd::MoveLater,
+];
 
 impl Editor {
     fn drawing_here(&self) -> Option<(klad_core::doc::Cel, u32)> {
@@ -114,6 +128,10 @@ impl Editor {
                 .then(|| "no clip here: click a clip's bar above the frame numbers".to_string())
         };
         let editing = self.busy().then(|| "finish the stroke or drag first".to_string());
+        let spanned = matches!(cmd, Cmd::Duplicate | Cmd::DeleteDrawing) && span.is_some();
+        if let Some(locked) = layer.filter(|l| l.locked && ON_THE_DRAWING.contains(&cmd) && !spanned) {
+            return Some(super::lock::Locked(vec![locked.name.clone()]).to_string());
+        }
         if crate::commands::DEVELOPER.contains(&cmd) && !self.settings.developer {
             return Some(
                 "the numbers are a developer tool: turn on developer tools in Settings > Layout first".to_string(),

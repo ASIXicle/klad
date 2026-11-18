@@ -14,6 +14,7 @@ mod first;
 mod history;
 mod keys;
 mod layers;
+mod lock;
 mod look;
 mod make;
 mod maps;
@@ -1141,6 +1142,10 @@ impl Editor {
     }
 
     pub(crate) fn failed(&mut self, e: anyhow::Error) {
+        if let Some(locked) = e.downcast_ref::<lock::Locked>() {
+            self.say(Tone::Refused, locked.to_string());
+            return;
+        }
         if e.downcast_ref::<klad_core::bundle::Changed>().is_some() {
             self.say(
                 Tone::Refused,
@@ -1259,6 +1264,7 @@ impl Editor {
 
     pub(super) fn write(&mut self, ops: &[Op]) -> Result<(Vec<usize>, klad_core::ops::Applied)> {
         self.follow_the_folder()?;
+        lock::refuse(&self.scene.bundle.doc, ops)?;
         self.scene.apply_with(ops, &self.brushes)
     }
 

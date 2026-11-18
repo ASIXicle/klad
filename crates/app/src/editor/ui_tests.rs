@@ -8111,3 +8111,123 @@ fn shine_fog_ambient_and_fill_squares_open_the_picker_with_the_current_colour() 
     );
     let _ = std::fs::remove_dir_all(&path);
 }
+
+fn drawing_of(path: &Path, name: &str) -> (serde_json::Value, Vec<usize>, String) {
+    let bundle = Bundle::open(path).unwrap();
+    let layer = bundle.doc.find_layer(name).unwrap().clone();
+    let marks: Vec<Vec<klad_core::stroke::Mark>> = layer
+        .cels()
+        .iter()
+        .map(|c| bundle.read_marks(&layer.id, &c.id).unwrap_or_default())
+        .collect();
+    let mut value = serde_json::to_value(&layer).unwrap();
+    value.as_object_mut().unwrap().remove("locked");
+    value["frames"] = serde_json::json!(bundle.doc.timeline.frames);
+    (value, marks.iter().map(Vec::len).collect(), format!("{marks:?}"))
+}
+
+#[test]
+fn a_locked_layer_does_not_change_until_it_is_unlocked() {
+    let path = sample("locked-layer");
+    let lines = Bundle::open(&path).unwrap().doc.find_layer("lines").unwrap().id.clone();
+    Bundle::open(&path)
+        .unwrap()
+        .apply(&parse_lines(&format!(r#"{{"op":"set","id":"{lines}","locked":true}}"#)).unwrap())
+        .unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let before = drawing_of(&path, "lines");
+    assert_eq!(before.1, vec![2], "the sample's lines layer holds two strokes");
+    let select = |h: &mut Harness<'static, Editor>| {
+        h.key_press(Key::Escape);
+        h.state_mut().invoke(Cmd::FirstFrame).unwrap();
+        h.state_mut().invoke(Cmd::Shapes).unwrap();
+        h.run_steps(2);
+        let at = canvas_at(h, 170.0, 120.0);
+        click_with(h, at, Modifiers::NONE);
+        h.run_steps(3);
+        if h.state().picked.is_none() {
+            ready(h);
+            click_with(h, at, Modifiers::NONE);
+        }
+        assert!(
+            h.state().picked.is_some(),
+            "the strokes of a locked layer can still be selected"
+        );
+    };
+    let tried: Vec<String> = [
+        Cmd::Delete,
+        Cmd::NudgeRight,
+        Cmd::Recolour,
+        Cmd::FlipH,
+        Cmd::TurnLeft90,
+        Cmd::Thinner,
+        Cmd::Thicker,
+        Cmd::MoveToNewLayer,
+        Cmd::NewDrawingAfter,
+        Cmd::Duplicate,
+        Cmd::DeleteDrawing,
+        Cmd::HoldLonger,
+        Cmd::HoldShorter,
+        Cmd::InsertFrame,
+        Cmd::RemoveFrame,
+        Cmd::MoveLater,
+    ]
+    .into_iter()
+    .filter_map(|cmd| {
+        select(&mut h);
+        let heard = h.state().messages.latest().map(|m| (m.id, m.times));
+        h.state_mut().run_later(cmd);
+        h.run_steps(3);
+        let now = drawing_of(&path, "lines");
+        let message = h.state().messages.latest().filter(|m| Some((m.id, m.times)) != heard);
+        let named = message.is_some_and(|m| m.tone == Tone::Refused && m.text.contains("lines is locked"));
+        let found = (now != before || !named).then(|| {
+            format!(
+                "{}: {}{}",
+                cmd.spec().id,
+                if now != before { "changed the layer, " } else { "" },
+                message.map_or("said nothing".to_string(), |m| format!(
+                    "said {:?} {:?}",
+                    m.tone, m.text
+                ))
+            )
+        });
+        (0..3).for_each(|_| {
+            if drawing_of(&path, "lines") != before {
+                h.state_mut().invoke(Cmd::Undo).unwrap();
+                h.run_steps(3);
+            }
+        });
+        assert_eq!(
+            drawing_of(&path, "lines"),
+            before,
+            "{}: undo brings the layer back",
+            cmd.spec().id
+        );
+        found
+    })
+    .collect();
+    assert!(
+        tried.is_empty(),
+        "a locked layer changed, or the refusal did not name the lock: {tried:#?}"
+    );
+    h.key_press(Key::ArrowLeft);
+    h.run_steps(3);
+    assert_eq!(
+        drawing_of(&path, "lines"),
+        before,
+        "the arrow keys do not move a locked layer's strokes"
+    );
+    h.state_mut().invoke(Cmd::ToggleLocked).unwrap();
+    h.run_steps(3);
+    select(&mut h);
+    h.state_mut().invoke(Cmd::Delete).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        drawing_of(&path, "lines").1,
+        vec![1],
+        "once unlocked, Delete removes the stroke"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
