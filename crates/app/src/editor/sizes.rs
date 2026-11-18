@@ -3,7 +3,7 @@ use super::prefs::Section;
 use super::testkit::{Journey, written};
 use super::{Editor, Windows};
 use crate::commands::Cmd;
-use crate::layout::Pane;
+use crate::layout::{self, Pane};
 use crate::settings::Settings;
 use egui::{Key, Modifiers, Pos2, Rect, pos2, vec2};
 use egui_kittest::kittest::{By, NodeT, Queryable};
@@ -269,6 +269,9 @@ fn reach(j: &mut Journey, at: Option<Pos2>, wanted: &[usize], step: f32) -> Vec<
 fn fresh(j: &mut Journey) {
     if let Some(ed) = j.ed_mut() {
         ed.settings.layout = Settings::default().layout;
+        ed.timeline_still = None;
+        ed.dock_kept = None;
+        ed.folded_for_room.clear();
         ed.windows = Windows::default();
         ed.palette = None;
         ed.first.open = false;
@@ -372,7 +375,7 @@ fn shell(j: &mut Journey, rows: &mut Vec<Row>, state: &str) {
         rows.push(Row {
             state: state.to_string(),
             kind: "panel",
-            count: usize::from(!shown || (!*folded && body < pane.min_body() - 1.0)),
+            count: usize::from(!shown || (!*folded && body < layout::USABLE - 1.0)),
             of: 1,
             detail: format!(
                 "{}: title {}, {}",
@@ -381,7 +384,7 @@ fn shell(j: &mut Journey, rows: &mut Vec<Row>, state: &str) {
                 match folded {
                     true => "folded".to_string(),
                     false => format!(
-                        "{body:.0} points of its body in sight (it asks for {:.0})",
+                        "{body:.0} points of its body in sight (its usual least is {:.0})",
                         pane.min_body()
                     ),
                 }
@@ -445,7 +448,8 @@ fn pane(j: &mut Journey, rows: &mut Vec<Row>, pane: Pane, cmd: Cmd) {
     let window = j.window();
     let (open, folded) = j.ed().map_or((false, false), |ed| {
         let p = ed.settings.layout.pane(pane);
-        (p.is_some_and(|p| p.open), p.is_some_and(|p| p.collapsed))
+        let folded = p.is_some_and(|p| p.collapsed) || ed.folded_for_room.contains(&pane);
+        (p.is_some_and(|p| p.open), folded)
     });
     let how = match (open, folded) {
         (true, false) => "open in a new window's layout",
@@ -464,9 +468,8 @@ fn pane(j: &mut Journey, rows: &mut Vec<Row>, pane: Pane, cmd: Cmd) {
                 None => {
                     if let Some(ed) = j.ed_mut() {
                         let _ = ed.invoke(cmd);
-                        let _ = ed.invoke(cmd);
                     }
-                    "folded in a new window's layout with its title out of sight, opened with the Window menu twice"
+                    "folded in a new window's layout with its title out of sight, opened with the Window menu"
                 }
             }
         }
@@ -511,7 +514,7 @@ fn pane(j: &mut Journey, rows: &mut Vec<Row>, pane: Pane, cmd: Cmd) {
     let at = (body > 24.0).then(|| {
         pos2(
             (z.left + window.right()) / 2.0,
-            title.rect.bottom() + 3.0 + (body / 2.0).min(40.0),
+            title.rect.bottom() + 3.0 + (body - 20.0).max(body / 2.0),
         )
     });
     let lost = reach(j, at, &inside, 30.0);

@@ -23,7 +23,7 @@ impl std::fmt::Display for Locked {
 
 impl std::error::Error for Locked {}
 
-fn and_list(names: &[String]) -> String {
+pub(super) fn and_list(names: &[String]) -> String {
     match names {
         [] => String::new(),
         [one] => one.clone(),

@@ -112,23 +112,37 @@ impl Editor {
             .exact_size(layout::STATUS)
             .resizable(false)
             .show(ui, |ui| self.status_line(ui));
+        self.fold_for_stills();
+        self.timeline_shown = 0.0;
         if self.settings.layout.shows_timeline() {
             let folded = self.settings.layout.timeline_folded;
-            let (lo, hi) = Layout::timeline_range(window);
+            let margin = egui::Frame::side_top_panel(&ctx.global_style()).total_margin().sum().y;
+            let scale = self.settings.ui_scale;
+            let (target, lo, hi) = self
+                .settings
+                .layout
+                .timeline_size(window, scale, self.timeline_rows + margin);
             let panel = match folded {
                 true => egui::Panel::bottom("timeline folded")
-                    .exact_size(layout::TIMELINE_FOLDED)
+                    .exact_size(self.timeline_bar + margin)
                     .resizable(false),
-                false => egui::Panel::bottom("timeline")
-                    .default_size(self.settings.layout.timeline_height)
+                false => egui::Panel::bottom(("timeline", (target * 2.0).round() as i32))
+                    .default_size(target)
                     .size_range(lo..=hi)
                     .resizable(true),
             };
             let shown = panel.show(ui, |ui| self.check(|e| e.timeline_panel(ui)));
             let height = shown.response.rect.height();
-            if !folded && !pressing && (height - self.settings.layout.timeline_height).abs() > 0.5 {
-                self.settings.layout.timeline_height = height;
-                self.settings_dirty = true;
+            self.timeline_shown = height;
+            let moved = !folded && (height - target).abs() > 0.5;
+            match (pressing, moved || self.timeline_dragged) {
+                (true, true) => self.timeline_dragged = true,
+                (false, true) if self.timeline_dragged => {
+                    self.timeline_dragged = false;
+                    self.settings.layout.keep_timeline_height(height, scale);
+                    self.settings_dirty = true;
+                }
+                _ => {}
             }
         }
         if self.settings.layout.shows_strip() {
@@ -572,26 +586,40 @@ impl Editor {
 
     fn dock(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
+        ui.spacing_mut().scroll = egui::style::ScrollStyle {
+            dormant_handle_opacity: 0.5,
+            ..egui::style::ScrollStyle::floating()
+        };
         self.dock_room = ui.available_height();
-        let bodies = self.settings.layout.bodies(ui.available_height());
+        self.dock_fit.chosen = self.dock_kept;
+        self.folded_for_room = self.settings.layout.folded_for_room(self.dock_room, &self.dock_fit);
+        let bodies = self.settings.layout.bodies(self.dock_room, &self.dock_fit);
         let mut previous: Option<(Pane, bool)> = None;
-        bodies.into_iter().for_each(|(pane, body)| {
-            self.pane_title(ui, pane, body.is_none(), previous);
-            if let Some(height) = body {
-                egui::ScrollArea::vertical()
-                    .id_salt(("pane", pane))
-                    .max_height(height)
-                    .min_scrolled_height(height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 5.0;
-                        egui::Frame::new()
-                            .inner_margin(Margin::symmetric(8, 6))
-                            .show(ui, |ui| self.check(|e| e.pane_body(ui, pane)));
-                    });
-            }
-            previous = Some((pane, body.is_some()));
-        });
+        let content: Vec<(Pane, f32)> = bodies
+            .into_iter()
+            .filter_map(|(pane, body)| {
+                self.pane_title(ui, pane, body.is_none(), previous);
+                previous = Some((pane, body.is_some()));
+                body.map(|height| match pane {
+                    Pane::Layers => (pane, self.layers_body(ui, height)),
+                    _ => {
+                        let shown = egui::ScrollArea::vertical()
+                            .id_salt(("pane", pane))
+                            .max_height(height)
+                            .min_scrolled_height(height)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 5.0;
+                                egui::Frame::new()
+                                    .inner_margin(Margin::symmetric(8, 6))
+                                    .show(ui, |ui| self.check(|e| e.pane_body(ui, pane)));
+                            });
+                        (pane, shown.content_size.y)
+                    }
+                })
+            })
+            .collect();
+        self.dock_fit.content = content;
     }
 
     fn pane_title(&mut self, ui: &mut egui::Ui, pane: Pane, collapsed: bool, previous: Option<(Pane, bool)>) {
@@ -646,11 +674,16 @@ impl Editor {
                 self.check(|e| e.layer_header(ui));
             }
         });
-        if toggle.clicked()
-            && let Some(p) = self.settings.layout.pane_mut(pane)
-        {
-            p.collapsed = !p.collapsed;
-            self.settings_dirty = true;
+        if toggle.clicked() {
+            match collapsed {
+                true => self.show_pane(pane),
+                false => {
+                    if let Some(p) = self.settings.layout.pane_mut(pane) {
+                        p.collapsed = true;
+                    }
+                    self.settings_dirty = true;
+                }
+            }
         }
         if close {
             self.settings.layout.toggle(pane);
@@ -665,7 +698,7 @@ impl Editor {
                 self.brush_tiles(ui);
                 Ok(())
             }
-            Pane::Layers => self.layers_pane(ui),
+            Pane::Layers => Ok(()),
             Pane::Inspector => match (self.tool, self.selection.clone()) {
                 _ if self.on_marks() => {
                     self.strokes_inspector(ui)?;
@@ -928,11 +961,7 @@ impl Editor {
         let layout = &self.settings.layout;
         let dock = if layout.shows_dock() { layout.dock_width } else { 0.0 };
         let strip = if layout.shows_strip() { layout::STRIP } else { 0.0 };
-        let timeline = if layout.shows_timeline() {
-            layout.timeline_height
-        } else {
-            0.0
-        };
+        let timeline = self.timeline_shown;
         let above = screen.bottom() - layout::STATUS - timeline;
         let numbers_at = Spot::At(egui::pos2(screen.right() - dock - 380.0, screen.top() + 16.0));
         let log_at = Spot::At(egui::pos2(

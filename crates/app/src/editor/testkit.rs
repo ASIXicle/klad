@@ -530,9 +530,13 @@ impl Journey {
         let Some((rect, _, true)) = found else {
             return false;
         };
-        let at = rect.center();
-        self.h.hover_at(at);
+        self.h.hover_at(rect.center());
         self.h.run_steps(1);
+        let at = self
+            .hinted(hint)
+            .filter(|(_, _, seen)| *seen)
+            .map_or(rect.center(), |(now, _, _)| now.center());
+        self.h.hover_at(at);
         self.press(at, egui::PointerButton::Primary, true, Modifiers::NONE);
         self.press(at, egui::PointerButton::Primary, false, Modifiers::NONE);
         self.h.run_steps(3);

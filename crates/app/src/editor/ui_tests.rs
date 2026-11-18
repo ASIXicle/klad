@@ -669,12 +669,126 @@ fn the_shell_fits_a_small_window_without_scrolling() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
+fn still(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("draw-ui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut doc = Document::new(512, 384);
+    LAYERS.iter().rev().enumerate().for_each(|(i, name)| {
+        doc.layers.push(Layer::paint(&format!("l{i}"), name, &format!("c{i}")));
+    });
+    doc.next_id = 40;
+    Bundle::create(&dir, doc).unwrap();
+    dir
+}
+
+#[test]
+fn a_still_opens_with_the_timeline_folded_and_a_dock_that_shares_the_window() {
+    [(1.0, 0.45), (1.5, 0.25)].into_iter().for_each(|(scale, share)| {
+        let path = still(&format!("still-{scale}"));
+        let mut first = editor(&path);
+        first.settings.ui_scale = scale;
+        let mut h = harness(first, vec2(1280.0, 720.0));
+        h.run_steps(4);
+        let ed = h.state();
+        assert!(ed.settings.layout.timeline_folded, "one frame: the timeline is folded");
+        assert!(ed.timeline_shown < 80.0, "folded to its bar: {}", ed.timeline_shown);
+        let window = h.ctx.content_rect();
+        let canvas = ed.canvas_rect;
+        let got = canvas.area() / window.area();
+        assert!(got > share, "at {scale} the canvas gets {got:.2} of the window");
+        let bodies = ed.settings.layout.bodies(ed.dock_room, &ed.dock_fit);
+        let used: f32 = bodies.iter().map(|(_, b)| b.unwrap_or(0.0) + layout::TITLE).sum();
+        assert!(used <= ed.dock_room + 0.5, "no panel runs past the dock: {bodies:?}");
+        let rows = bodies
+            .iter()
+            .find(|(p, _)| *p == Pane::Layers)
+            .and_then(|(_, b)| *b)
+            .unwrap();
+        assert!(
+            rows + 0.5 >= ed.dock_fit.layers_least,
+            "Layers keeps three rows: {rows}"
+        );
+        ed.settings.layout.panes.iter().filter(|p| p.open).for_each(|p| {
+            let title = h.get_by_label(p.pane.title()).rect();
+            assert!(
+                title.bottom() <= canvas.bottom() + 0.5,
+                "{} has its title above the timeline at {scale}",
+                p.pane.title()
+            );
+        });
+        h.state_mut().invoke(Cmd::InsertFrameAll).unwrap();
+        h.run_steps(4);
+        let ed = h.state();
+        assert_eq!(ed.scene.bundle.doc.timeline.frames, 2);
+        assert!(!ed.settings.layout.timeline_folded, "a second frame opens the timeline");
+        assert!(
+            ed.timeline_shown <= layout::TIMELINE_DEFAULT / scale + 1.0,
+            "at {scale} the timeline keeps its size on screen: {}",
+            ed.timeline_shown
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    });
+}
+
+#[test]
+fn window_history_shows_a_folded_history_at_once_and_ticks_only_what_shows() {
+    let path = sample("history-menu");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    assert_eq!(h.state().is_on(Cmd::HistoryPane), Some(false), "folded: not ticked");
+    h.state_mut().invoke(Cmd::HistoryPane).unwrap();
+    h.run_steps(4);
+    let ed = h.state();
+    assert_eq!(ed.is_on(Cmd::HistoryPane), Some(true));
+    let bodies = ed.settings.layout.bodies(ed.dock_room, &ed.dock_fit);
+    let history = bodies.iter().find(|(p, _)| *p == Pane::History).and_then(|(_, b)| *b);
+    assert!(
+        history.is_some_and(|b| b >= Pane::History.min_body()),
+        "one choice shows the panel with its content: {bodies:?}"
+    );
+    h.state_mut().invoke(Cmd::HistoryPane).unwrap();
+    h.run_steps(2);
+    assert!(
+        !h.state().settings.layout.is_open(Pane::History),
+        "chosen again, it closes"
+    );
+    let mut small = harness(editor(&path), vec2(1280.0, 720.0));
+    small.run_steps(4);
+    let folded = small.state().folded_for_room.clone();
+    assert!(!folded.is_empty(), "a short dock shows some panels folded");
+    let pane = folded[0];
+    let cmd = [
+        (Pane::Brush, Cmd::BrushPane),
+        (Pane::Tool, Cmd::ToolPane),
+        (Pane::Inspector, Cmd::InspectorPane),
+    ]
+    .into_iter()
+    .find(|(p, _)| *p == pane)
+    .map(|(_, c)| c)
+    .unwrap();
+    assert_eq!(small.state().is_on(cmd), Some(false), "folded for room: not ticked");
+    small.state_mut().invoke(cmd).unwrap();
+    small.run_steps(4);
+    let ed = small.state();
+    assert!(ed.settings.layout.is_open(pane) && ed.is_on(cmd) == Some(true));
+    let bodies = ed.settings.layout.bodies(ed.dock_room, &ed.dock_fit);
+    assert!(
+        bodies
+            .iter()
+            .find(|(p, _)| *p == pane)
+            .and_then(|(_, b)| *b)
+            .is_some_and(|b| b >= layout::USABLE),
+        "{pane:?} is brought up, others give way: {bodies:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 #[test]
 fn the_layout_comes_back_as_it_was_left() {
     let path = sample("layout");
     let mut first = editor(&path);
     first.settings.layout.dock_width = 410.0;
     first.settings.layout.timeline_height = 300.0;
+    first.settings.layout.toggle(Pane::History);
     first.settings.layout.toggle(Pane::History);
     let mut h = harness(first, vec2(1440.0, 900.0));
     let layout = h.state().settings.layout.clone();
@@ -1494,6 +1608,7 @@ fn several_shapes_select_with_shift_or_a_lasso_move_together_align_and_distribut
 fn a_pixel_layer_is_added_shows_its_marks_hard_and_keeps_brush_strokes_out() {
     let path = sample("pixel-layer");
     let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    h.state_mut().show_pane(Pane::Inspector);
     activate(&mut h, "notes");
     assert!(h.state().can_run(Cmd::NewPixelLayer).is_none());
     h.state_mut().invoke(Cmd::NewPixelLayer).unwrap();
@@ -3571,6 +3686,7 @@ fn notes_stay_one_line_inside_the_pane_and_done_ones_clear_together() {
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
     [
         (Pane::Tool, true),
+        (Pane::Brush, true),
         (Pane::Layers, true),
         (Pane::Inspector, true),
         (Pane::Notes, false),
@@ -3621,9 +3737,7 @@ fn a_note_pinned_on_the_canvas_is_marked_done_by_the_agent_and_edited_from_its_p
     let path = sample("notes");
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
     h.state_mut().go_to(12).unwrap();
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Notes) {
-        p.collapsed = false;
-    }
+    h.state_mut().show_pane(Pane::Notes);
     h.state_mut().tool = Tool::Note;
     h.run_steps(3);
     let c = h.state().canvas_rect.center();
@@ -4015,9 +4129,7 @@ fn a_checkout_under_the_open_editor_shows_the_drawing_it_brings() {
 fn an_agent_edit_while_the_editor_is_open_shows_in_the_history_and_keeps_its_author() {
     let path = sample("agent-row");
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::History) {
-        p.collapsed = false;
-    }
+    h.state_mut().show_pane(Pane::History);
     h.run_steps(3);
     Bundle::open(&path)
         .unwrap()
@@ -4876,6 +4988,9 @@ fn heavy_edits_and_revisits_keep_the_ui_free() {
 fn a_closed_panel_comes_back_from_the_strip() {
     let path = sample("panels");
     let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    h.state_mut().show_pane(Pane::Inspector);
+    h.run_steps(2);
+    assert_eq!(h.state().is_on(Cmd::InspectorPane), Some(true));
     h.state_mut().invoke(Cmd::InspectorPane).unwrap();
     h.run_steps(2);
     assert!(!h.state().settings.layout.is_open(Pane::Inspector));
@@ -5312,9 +5427,12 @@ fn a_selected_shape_turns_into_a_repeat_and_back() {
     use klad_core::doc::Shape;
     let path = sample("wrap");
     let mut h = harness(editor(&path), vec2(1440.0, 1200.0));
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
-        p.collapsed = false;
-    }
+    [Pane::Tool, Pane::Brush].into_iter().for_each(|pane| {
+        if let Some(p) = h.state_mut().settings.layout.pane_mut(pane) {
+            p.collapsed = true;
+        }
+    });
+    h.state_mut().show_pane(Pane::Inspector);
     activate(&mut h, "shapes");
     let rect = h.state().scene.bundle.doc.find_layer("shapes").unwrap().cels()[0].nodes[0]
         .id
@@ -5426,9 +5544,11 @@ fn holding_d_builds_a_plane_per_layer_and_the_inspector_sets_depth_and_fog() {
 fn an_imported_picture_lands_on_its_own_layer_and_can_be_a_reference() {
     let path = sample("picture");
     let mut h = harness(editor(&path), vec2(1440.0, 1200.0));
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
-        p.collapsed = false;
-    }
+    [Pane::Tool, Pane::Brush].into_iter().for_each(|pane| {
+        if let Some(p) = h.state_mut().settings.layout.pane_mut(pane) {
+            p.collapsed = true;
+        }
+    });
     activate(&mut h, "lines");
     let rgba = klad_render::assets::Rgba {
         width: 4,
@@ -6980,6 +7100,7 @@ fn bones_are_picked_from_the_list_and_the_canvas_and_edited_in_place() {
 fn a_layer_is_keyed_from_the_inspector_and_eases_between_its_keys() {
     let path = sample("keyed-layer");
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut().show_pane(Pane::Inspector);
     activate(&mut h, "lines");
     let id = h.state().scene.active_id().unwrap();
     h.state_mut()

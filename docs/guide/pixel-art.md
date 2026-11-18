@@ -1,4 +1,4 @@
-_Last updated: 2026-11-17 09:25_
+_Last updated: 2026-11-18 13:53_
 
 # Drawing pixel art
 
@@ -47,7 +47,7 @@ To export one file for each, see [palette variants](exporting.md#export-palette-
 
 ## Animate a sprite
 
-1. Right click the drawing's cell in the timeline and pick **duplicate to the next frame**.
+1. Click the arrow at the left of the timeline to open it: a drawing of one frame shows only its bar. Right click the drawing's cell and pick **duplicate to the next frame**.
 2. Press **O** for onion skin, and change the pixels that move.
 3. Click a drawing's cell in the timeline and press **=** to hold it a frame longer.
 4. Press **Return** to play, and again to stop.

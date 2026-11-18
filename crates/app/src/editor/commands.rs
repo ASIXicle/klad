@@ -84,9 +84,11 @@ impl Editor {
 
     fn timeline_key(&self, cmd: Cmd) -> Option<String> {
         (!self.on_timeline() && TIMELINE_KEYS.contains(&cmd)).then(|| {
-            let first = match self.settings.layout.shows_timeline() && !self.settings.layout.timeline_folded {
-                true => "click a frame in the timeline first",
-                false => "open the timeline (Window > Timeline) and click a frame first",
+            let layout = &self.settings.layout;
+            let first = match (layout.shows_timeline(), layout.timeline_folded) {
+                (true, false) => "click a frame in the timeline first",
+                (true, true) => "open the timeline with the arrow at its left and click a frame first",
+                (false, _) => "show the timeline (Window > Timeline) and click a frame first",
             };
             format!(
                 "{} is a timeline key ({}): {first}, or use Frame > {}",
@@ -542,8 +544,8 @@ impl Editor {
             Cmd::FlipView => self.view.is_some_and(|v| v.flip),
             Cmd::PixelGrid => self.settings.pixel_grid,
             Cmd::WrapCanvas => self.scene.bundle.doc.canvas.wrap,
-            Cmd::PreviewPane => layout.dock && layout.is_open(Pane::Preview),
-            Cmd::MapsPane => layout.dock && layout.is_open(Pane::Maps),
+            Cmd::PreviewPane => self.shows_pane(Pane::Preview),
+            Cmd::MapsPane => self.shows_pane(Pane::Maps),
             Cmd::LitView => self.maps.show == Some(super::maps::Show::Lit),
             Cmd::MapView => matches!(self.maps.show, Some(super::maps::Show::Map(_))),
             Cmd::ShowOccluders => self.maps.outlines,
@@ -579,12 +581,12 @@ impl Editor {
             Cmd::ClipOwnFps => self.current_clip().is_some_and(|c| c.fps.is_some()),
             Cmd::HideAll => layout.hidden,
             Cmd::HideDock => !layout.dock,
-            Cmd::LayersPane => layout.dock && layout.is_open(Pane::Layers),
-            Cmd::ToolPane => layout.dock && layout.is_open(Pane::Tool),
-            Cmd::BrushPane => layout.dock && layout.is_open(Pane::Brush),
-            Cmd::InspectorPane => layout.dock && layout.is_open(Pane::Inspector),
-            Cmd::NotesPane => layout.dock && layout.is_open(Pane::Notes),
-            Cmd::HistoryPane => layout.dock && layout.is_open(Pane::History),
+            Cmd::LayersPane => self.shows_pane(Pane::Layers),
+            Cmd::ToolPane => self.shows_pane(Pane::Tool),
+            Cmd::BrushPane => self.shows_pane(Pane::Brush),
+            Cmd::InspectorPane => self.shows_pane(Pane::Inspector),
+            Cmd::NotesPane => self.shows_pane(Pane::Notes),
+            Cmd::HistoryPane => self.shows_pane(Pane::History),
             Cmd::Timeline => layout.timeline,
             Cmd::PickAllLayers => self.settings.pick_all_layers,
             Cmd::SoloLayer => self
@@ -641,18 +643,38 @@ impl Editor {
         self.set(&id, vec![(key.to_string(), value)])
     }
 
+    pub(super) fn shows_pane(&self, pane: Pane) -> bool {
+        self.settings.layout.shows(pane) && !self.folded_for_room.contains(&pane)
+    }
+
+    pub(super) fn show_pane(&mut self, pane: Pane) {
+        if !self.shows_pane(pane) {
+            self.pane(pane);
+        }
+    }
+
     fn pane(&mut self, pane: Pane) {
-        self.settings.layout.toggle(pane);
-        self.settings_dirty = true;
-        if !self.settings.layout.is_open(pane) {
+        if self.settings.layout.shows(pane) && self.folded_for_room.contains(&pane) {
+            self.dock_kept = Some(pane);
+            self.folded_for_room.retain(|p| *p != pane);
             return;
         }
+        self.settings.layout.toggle(pane);
+        self.settings_dirty = true;
+        if !self.settings.layout.shows(pane) {
+            return;
+        }
+        self.dock_kept = Some(pane);
         let folded = self.settings.layout.make_room(pane, self.dock_room);
         if !folded.is_empty() {
-            let names: Vec<&str> = folded.iter().map(|p| p.title()).collect();
+            let names: Vec<String> = folded.iter().map(|p| p.title().to_string()).collect();
             self.say(
                 Tone::Info,
-                format!("folded {} to make room for {}", names.join(" and "), pane.title()),
+                format!(
+                    "folded {} to make room for {}",
+                    super::lock::and_list(&names),
+                    pane.title()
+                ),
             );
         }
     }
@@ -820,6 +842,7 @@ impl Editor {
             Cmd::Bigger => self.size = (self.size * 1.25).min(800.0),
             Cmd::Fit => {
                 self.view = Some(self.fitted(area));
+                self.fitted_to = Some(area);
                 self.zoom_wanted = None;
             }
             Cmd::ActualSize => {

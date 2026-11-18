@@ -1,4 +1,4 @@
-_Last updated: 2026-11-17 09:25_
+_Last updated: 2026-11-18 13:53_
 
 # Animating frame by frame
 
@@ -13,6 +13,8 @@ Draw an animation one drawing at a time, check it against the drawing before, an
 3. Press **O** for onion skin: the drawing before shows in red under the one you're drawing.
 4. Draw the next pose, and repeat.
 5. Press **Return** to play, and again to stop.
+
+A drawing of one frame shows the timeline folded to its bar. It opens when the second drawing is made, or with the arrow at its left.
 
 To animate on twos, click **2s** next to **shift K on** in the timeline header first.
 

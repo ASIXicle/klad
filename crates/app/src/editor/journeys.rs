@@ -1642,9 +1642,6 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
         "one-recolour-is-one-undo",
         "picking-a-shape-goes-to-its-layer",
         "recolouring-a-gradient-keeps-it-a-gradient",
-        "shape-number-fields-after-folding",
-        "shape-number-fields-in-sight",
-        "the-picker-leaves-the-selection-in-sight",
     ]);
 }
 
@@ -1739,8 +1736,14 @@ fn someone_rearranges_the_layers_of_an_agents_drawing_and_transforms_parts() {
         "with the panel under it folded too, the Layers panel shows every layer",
     );
     j.press_hinted("open Layer settings");
+    j.act("the timeline shows every layer's row: open it with its arrow, folded as it is on a drawing of one frame");
+    j.press_hinted("open the timeline: its layers and frames");
+    j.look("timeline-opened");
     let rows = Rows::Timeline;
-    j.note("the timeline shows every layer: working with its rows from here");
+    j.note(format!(
+        "in sight in the timeline: {:?}; working with its rows from here",
+        j.rows_in_sight(&all, rows)
+    ));
 
     j.act("put the halo in front of the lines: take its row by the name and drag it above lines");
     let before = j.picture();
@@ -2089,11 +2092,9 @@ fn someone_rearranges_the_layers_of_an_agents_drawing_and_transforms_parts() {
     j.finish(&[
         "a-row-drags-by-its-name",
         "grouping-keeps-the-picture",
-        "layers-panel-grows-when-others-fold",
         "layers-panel-shows-the-layers",
         "moving-into-the-group-keeps-the-picture",
         "outside-the-box-turns-as-the-message-says",
-        "the-edge-between-panels-drags",
         "the-lantern-moves-as-one",
     ]);
 }
@@ -2311,37 +2312,22 @@ fn someone_works_on_a_drawing_while_their_agent_edits_it() {
         listed(&j),
         "Window > History shows the history",
     );
-
-    j.act("nothing came up: choose Window > History once more");
-    j.click("Window");
-    j.click("History");
-    j.look("history-open");
     let rows = history(&mut j, 6);
-    j.note(format!("the history, newest first: {rows:?}; it said: {}", j.heard()));
-    j.expect(
-        "making-room-shows-the-history",
-        listed(&j),
-        "the room klad makes for the History panel shows its steps",
-    );
+    j.note(format!("the history, newest first: {rows:?}"));
 
-    j.act("only its buttons show: fold Layer settings as well");
-    j.press_hinted("fold Layer settings to its title");
-    j.look("history-with-three-folded");
-    j.expect(
-        "history-shows-with-three-panels-folded",
-        listed(&j),
-        "with Colour, Brush and Layer settings folded the History panel shows its steps",
-    );
-
-    j.act("one step shows, cut off: fold Layers too");
-    j.press_hinted("fold Layers to its title");
-    j.look("history-with-room");
-    j.expect(
-        "history-names-you-and-the-agent",
-        listed(&j),
-        "the History panel names the agent's steps and yours",
-    );
-    j.press_hinted("open Layers");
+    if !listed(&j) {
+        j.act("nothing came up: fold Colour, Layer settings and Layers to make room");
+        j.press_hinted("fold Colour to its title");
+        j.press_hinted("fold Layer settings to its title");
+        j.press_hinted("fold Layers to its title");
+        j.look("history-with-room");
+        j.expect(
+            "history-names-you-and-the-agent",
+            listed(&j),
+            "the History panel names the agent's steps and yours",
+        );
+        j.press_hinted("open Layers");
+    }
 
     j.act("draw a long line while the agent paints in the middle of it");
     let before = count_on(&j, "lines");
@@ -2507,14 +2493,7 @@ fn someone_works_on_a_drawing_while_their_agent_edits_it() {
         "the agent's line and the stroke painted right after it are both kept",
     );
 
-    j.finish(&[
-        "an-agent-edit-is-announced",
-        "history-panel-is-in-the-window",
-        "history-shows-with-three-panels-folded",
-        "making-room-shows-the-history",
-        "undo-says-whose-step-it-took",
-        "window-menu-brings-up-history-at-once",
-    ]);
+    j.finish(&["an-agent-edit-is-announced", "undo-says-whose-step-it-took"]);
 }
 
 const GODOT_CHECK: &str = r#"extends SceneTree
@@ -3956,6 +3935,7 @@ fn someone_sketches_inks_and_colours_a_picture() {
 
     j.act("hide the sketch and look at the picture");
     let with = j.picture();
+    j.scroll_to_hinted("show or hide paint 1");
     j.press_hinted("show or hide paint 1");
     j.look("sketch-hidden");
     let without = j.picture();
@@ -4627,6 +4607,8 @@ fn someone_draws_shapes_and_text() {
     j.key(Key::Escape);
 
     j.act("make the rectangle wider by its right edge, and turn it by the knob");
+    let was = kinds(&drawing, "rect").first().map_or(0.0, |(_, b)| b[2]);
+    let step = 40.0 / j.ed().and_then(|ed| ed.view).map_or(1.0, |v| v.zoom);
     j.tap(350.0, 300.0);
     if let Some(c) = handle_corners(&j) {
         let edge = c[1].lerp(c[2], 0.5);
@@ -4641,7 +4623,8 @@ fn someone_draws_shapes_and_text() {
     j.note(format!("rectangles: {wide:?}"));
     j.expect(
         "an-edge-stretches-a-shape",
-        wide.iter().any(|(_, b)| b[2] > 380.0 && (b[3] - 200.0).abs() < 8.0),
+        wide.iter()
+            .any(|(_, b)| b[2] > was + step * 0.8 && (b[3] - 200.0).abs() < 8.0),
         "dragging an edge makes the rectangle wider and no taller",
     );
     if let Some(c) = handle_corners(&j) {
@@ -4680,6 +4663,8 @@ fn someone_draws_shapes_and_text() {
     );
 
     j.act("lift the top of the roof: A, a click on the shape, a drag on its top point");
+    let tall = kinds(&drawing, "path").first().map_or(0.0, |(_, b)| b[3]);
+    let lift = 30.0 / j.ed().and_then(|ed| ed.view).map_or(1.0, |v| v.zoom);
     j.key(Key::A);
     j.tap(350.0, 590.0);
     j.look("roof-points");
@@ -4706,7 +4691,7 @@ fn someone_draws_shapes_and_text() {
     j.note(format!("paths: {lifted:?}"));
     j.expect(
         "a-moves-a-point-of-a-shape",
-        anchors.len() == 3 && lifted.iter().any(|(_, b)| b[3] > 150.0),
+        anchors.len() == 3 && lifted.iter().any(|(_, b)| b[3] > tall + lift * 0.8),
         "A shows the roof's three points and a drag lifts its top",
     );
     j.key(Key::Escape);
@@ -5054,11 +5039,7 @@ fn someone_draws_a_small_sprite() {
         "the exported picture is the sprite enlarged by a whole number",
     );
 
-    j.finish(&[
-        "the-palettes-button-is-in-sight",
-        "the-ramp-refusal-points-at-the-editor",
-        "the-whole-palette-is-in-sight",
-    ]);
+    j.finish(&["the-ramp-refusal-points-at-the-editor"]);
 }
 
 fn frame_now(j: &Journey) -> (u32, u32) {
@@ -5467,6 +5448,21 @@ fn someone_animates_frame_by_frame() {
         "the-first-drawing-is-there",
         first.is_some(),
         "the stroke is on the first frame",
+    );
+
+    j.act("the timeline of a drawing with one frame is folded to its bar: open it with its arrow");
+    let folded = j.ed().is_some_and(|ed| ed.settings.layout.timeline_folded);
+    j.press_hinted("open the timeline: its layers and frames");
+    j.look("timeline-opened");
+    j.expect(
+        "a-still-opens-with-the-timeline-folded",
+        folded,
+        "a new drawing of one frame shows the timeline folded to its bar",
+    );
+    j.expect(
+        "the-arrow-opens-the-timeline",
+        j.ed().is_some_and(|ed| !ed.settings.layout.timeline_folded),
+        "its arrow opens the timeline",
     );
 
     j.act("the second key from the first: a click on its frame in the timeline, cmd D");
@@ -6144,6 +6140,9 @@ fn someone_gives_an_arm_bones_and_poses_it() {
         }
     });
     j.click("back to rest");
+    if j.hint_in_sight("open the timeline: its layers and frames") {
+        j.press_hinted("open the timeline: its layers and frames");
+    }
     j.drag_frames(&layer, 0, 0);
     j.chord(Modifiers::SHIFT, Key::I);
     j.key(Key::Period);
@@ -6223,7 +6222,6 @@ fn someone_gives_an_arm_bones_and_poses_it() {
         "a-pose-of-nothing-is-not-called-done",
         "a-pose-on-the-first-frame-is-kept-or-refused-plainly",
         "posing-with-no-layer-attached-says-so",
-        "the-rows-bone-button-is-in-reach",
     ]);
 }
 
@@ -6459,5 +6457,5 @@ fn someone_lights_a_drawing_for_a_game() {
         );
     }
 
-    j.finish(&["the-preview-lights-are-in-reach"]);
+    j.finish(&[]);
 }

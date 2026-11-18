@@ -100,6 +100,8 @@ const DRAG_SLOP: f32 = 3.0;
 const KNOB: f32 = 30.0;
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 const GRID_FROM: f32 = 8.0;
+const SETTLING_FRAMES: u32 = 10;
+const REFIT_CHANGE: f32 = 0.15;
 pub(crate) const REAL_MAX: u32 = 512;
 
 type RealKey = (u64, u32, u64);
@@ -715,6 +717,17 @@ pub(crate) struct Editor {
     buffer: StrokeBuffer,
     live: Option<Live>,
     dock_room: f32,
+    dock_fit: crate::layout::Fit,
+    dock_kept: Option<crate::layout::Pane>,
+    folded_for_room: Vec<crate::layout::Pane>,
+    fitted_to: Option<Vec2>,
+    canvas_frames: u32,
+    layer_in_sight: Option<String>,
+    timeline_still: Option<bool>,
+    timeline_rows: f32,
+    timeline_bar: f32,
+    timeline_shown: f32,
+    timeline_dragged: bool,
     tool: Tool,
     brush: String,
     previous_brush: String,
@@ -915,6 +928,17 @@ impl Editor {
             embedded,
             live: None,
             dock_room: 0.0,
+            dock_fit: crate::layout::Fit::default(),
+            dock_kept: None,
+            folded_for_room: Vec::new(),
+            fitted_to: None,
+            canvas_frames: 0,
+            layer_in_sight: None,
+            timeline_still: None,
+            timeline_rows: f32::INFINITY,
+            timeline_bar: crate::layout::TIMELINE_FOLDED,
+            timeline_shown: 0.0,
+            timeline_dragged: false,
             tool: Tool::Brush,
             brush: "ink".into(),
             previous_brush: "ink".into(),
@@ -3851,8 +3875,20 @@ impl Editor {
         self.canvas_rect = rect;
         let area = rect.size();
         let canvas = self.canvas_size();
-        if self.view.is_none() {
+        self.canvas_frames = self.canvas_frames.saturating_add(1);
+        let settling = self.canvas_frames <= SETTLING_FRAMES;
+        let refit = match (self.view, self.fitted_to) {
+            (None, _) => true,
+            (Some(view), Some(was)) => {
+                let moved =
+                    (area.x - was.x).abs() > REFIT_CHANGE * was.x || (area.y - was.y).abs() > REFIT_CHANGE * was.y;
+                was != area && view == self.fitted(was) && (settling || moved)
+            }
+            (Some(_), None) => false,
+        };
+        if refit {
             self.view = Some(self.fitted(area));
+            self.fitted_to = Some(area);
         }
         self.navigate(ui, &response, rect);
         self.keep_typing_preview()?;
@@ -5043,16 +5079,6 @@ impl Editor {
                 props.push(("name".into(), json!(name)));
             }
         });
-        if let Some(paint) = self.paint_editor(ui, id, &node) {
-            props.push(("fill".into(), serde_json::to_value(paint)?));
-        }
-        if let Shape::Rays(rays) = &node.shape {
-            let changed = ui.horizontal_wrapped(|ui| self.rays_section(ui, id, rays)).inner;
-            if let Some(Value::Object(fields)) = changed {
-                props.extend(fields);
-            }
-        }
-        props.extend(self.shape_fields(ui, id, &node));
         let t = node.transform;
         ui.horizontal(|ui| {
             if let Some(v) = self.number(
@@ -5113,6 +5139,16 @@ impl Editor {
                 props.push(("transform.sy".into(), json!(v)));
             }
         });
+        if let Some(paint) = self.paint_editor(ui, id, &node) {
+            props.push(("fill".into(), serde_json::to_value(paint)?));
+        }
+        if let Shape::Rays(rays) = &node.shape {
+            let changed = ui.horizontal_wrapped(|ui| self.rays_section(ui, id, rays)).inner;
+            if let Some(Value::Object(fields)) = changed {
+                props.extend(fields);
+            }
+        }
+        props.extend(self.shape_fields(ui, id, &node));
         ui.horizontal(|ui| {
             if let Some(v) = self.number(
                 ui,
@@ -5504,6 +5540,43 @@ impl Editor {
             return self.height_panel(ui);
         }
         let mut picked: Option<[f32; 4]> = None;
+        let edit = match self.scene.bundle.doc.pixel_art() {
+            true => {
+                let edit = self.palette_part(ui);
+                self.colour_mixer(ui, &mut picked);
+                edit
+            }
+            false => {
+                self.colour_mixer(ui, &mut picked);
+                self.palette_part(ui)
+            }
+        };
+        if !self.settings.recent.is_empty() {
+            ui.label("recent");
+            let recent = self.settings.recent.clone();
+            let current = color::hex(self.color);
+            ui.horizontal_wrapped(|ui| {
+                recent.iter().for_each(|hex| {
+                    if let Some(rgba) = color::rgba_of(hex)
+                        && color::swatch(ui, rgba, hex.eq_ignore_ascii_case(&current), 24.0)
+                            .hint(format!("{hex}, used lately"))
+                            .clicked()
+                    {
+                        picked = Some(rgba);
+                    }
+                });
+            });
+        }
+        if let Some(rgba) = picked {
+            self.pick_new_colour(rgba);
+        }
+        match edit {
+            Some(edit) => self.apply(vec![Op::Palette(edit)]),
+            None => Ok(()),
+        }
+    }
+
+    fn colour_mixer(&mut self, ui: &mut egui::Ui, picked: &mut Option<[f32; 4]>) {
         let mut hsva = self.hsva;
         ui.horizontal_top(|ui| {
             if color::picker(ui, &mut hsva, 150.0).changed() {
@@ -5522,7 +5595,7 @@ impl Editor {
                         "type #rrggbb or #rrggbbaa and press Return",
                     ) {
                         match color::rgba_of(&text) {
-                            Some(rgba) => picked = Some(rgba),
+                            Some(rgba) => *picked = Some(rgba),
                             None => self.say(
                                 Tone::Refused,
                                 format!("{text} is not a colour: type it as #rrggbb or #rrggbbaa, for example #c8a070"),
@@ -5533,6 +5606,9 @@ impl Editor {
                 self.colour_channels(ui);
             });
         });
+    }
+
+    fn palette_part(&mut self, ui: &mut egui::Ui) -> Option<klad_core::ops::PaletteEdit> {
         ui.label("palette");
         let edit = self.palette_row(ui);
         let variants: Vec<String> = self
@@ -5584,30 +5660,7 @@ impl Editor {
                 self.command_button(ui, Cmd::RemoveVariant, Some("remove variant"));
             }
         });
-        let edit = edit.or(show.map(|name| klad_core::ops::PaletteEdit::Variant { name }));
-        if !self.settings.recent.is_empty() {
-            ui.label("recent");
-            let recent = self.settings.recent.clone();
-            let current = color::hex(self.color);
-            ui.horizontal_wrapped(|ui| {
-                recent.iter().for_each(|hex| {
-                    if let Some(rgba) = color::rgba_of(hex)
-                        && color::swatch(ui, rgba, hex.eq_ignore_ascii_case(&current), 24.0)
-                            .hint(format!("{hex}, used lately"))
-                            .clicked()
-                    {
-                        picked = Some(rgba);
-                    }
-                });
-            });
-        }
-        if let Some(rgba) = picked {
-            self.pick_new_colour(rgba);
-        }
-        match edit {
-            Some(edit) => self.apply(vec![Op::Palette(edit)]),
-            None => Ok(()),
-        }
+        edit.or(show.map(|name| klad_core::ops::PaletteEdit::Variant { name }))
     }
 
     fn colour_channels(&mut self, ui: &mut egui::Ui) {

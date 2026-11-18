@@ -1131,7 +1131,10 @@ impl Editor {
                     egui::Button::new(RichText::new(caret).size(theme::ICON))
                         .min_size(vec2(theme::TARGET, theme::TARGET)),
                 )
-                .hint("fold the timeline to this row, or open it again")
+                .hint(match folded {
+                    true => "open the timeline: its layers and frames",
+                    false => "fold the timeline to this row",
+                })
                 .clicked()
             {
                 self.settings.layout.timeline_folded = !folded;
@@ -1754,15 +1757,27 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn fold_for_stills(&mut self) {
+        let still = self.scene.bundle.doc.timeline.frames <= 1;
+        if self.timeline_still != Some(still) {
+            self.timeline_still = Some(still);
+            self.settings.layout.timeline_folded = still;
+        }
+    }
+
     pub(super) fn timeline_panel(&mut self, ui: &mut egui::Ui) -> Result<()> {
         self.tend_buffer();
+        let top = ui.max_rect().top();
+        let gap = ui.spacing().item_spacing.y;
         self.timeline_header(ui)?;
+        let used = ui.cursor().top() - top;
         if self.settings.layout.timeline_folded {
+            self.timeline_bar = (used - gap).max(0.0);
             return Ok(());
         }
         let rows = self.timeline_rows();
         let mut result = Ok(());
-        egui::ScrollArea::vertical()
+        let shown = egui::ScrollArea::vertical()
             .id_salt("timeline rows")
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1783,6 +1798,7 @@ impl Editor {
                         });
                 });
             });
+        self.timeline_rows = used + shown.content_size.y;
         result
     }
 }
