@@ -8231,3 +8231,69 @@ fn a_locked_layer_does_not_change_until_it_is_unlocked() {
     );
     let _ = std::fs::remove_dir_all(&path);
 }
+
+#[test]
+fn with_a_mask_picked_the_pen_the_shape_tool_and_the_text_tool_draw_on_a_new_layer_above_the_masked_one() {
+    let path = sample("mask-vector");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let pick_the_mask = |h: &mut Harness<'static, Editor>| {
+        let shade = h.state().scene.bundle.doc.find_layer("shade").unwrap().id.clone();
+        let Some(klad_core::doc::Loc::Layer(at)) = h.state().scene.bundle.doc.locate(&shade) else {
+            panic!("no shade layer");
+        };
+        h.state_mut()
+            .activate([at, vec![klad_core::doc::MASK]].concat())
+            .unwrap();
+        h.run_steps(2);
+        ready(h);
+        assert!(h.state().scene.active_is_mask());
+    };
+    let made: Vec<String> = [Cmd::Pen, Cmd::ShapeTool, Cmd::TextTool]
+        .into_iter()
+        .map(|tool| {
+            pick_the_mask(&mut h);
+            h.state_mut().invoke(tool).unwrap();
+            h.run_steps(2);
+            let heard = h.state().messages.latest().map(|m| (m.id, m.times));
+            let (a, b) = (canvas_at(&h, 200.0, 150.0), canvas_at(&h, 280.0, 210.0));
+            match tool {
+                Cmd::ShapeTool => drag(&mut h, a, b),
+                Cmd::Pen => {
+                    click_with(&mut h, a, Modifiers::NONE);
+                    click_with(&mut h, b, Modifiers::NONE);
+                    h.key_press(Key::Enter);
+                }
+                _ => {
+                    click_with(&mut h, a, Modifiers::NONE);
+                    h.event(egui::Event::Text("hi".to_string()));
+                    h.run_steps(1);
+                    h.key_press(Key::Escape);
+                }
+            }
+            h.run_steps(3);
+            let message = h.state().messages.latest().filter(|m| Some((m.id, m.times)) != heard);
+            assert!(
+                message.is_none_or(|m| m.tone != Tone::Error),
+                "{tool:?} ends in an error: {:?}",
+                message.map(|m| m.text.clone())
+            );
+            let doc = &Bundle::open(&path).unwrap().doc;
+            let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+            let shade = names.iter().position(|n| *n == "shade").unwrap();
+            let above = doc.layers.get(shade + 1).unwrap();
+            assert_eq!(above.kind(), klad_core::doc::Kind::Vector, "{tool:?}: {names:?}");
+            assert_eq!(
+                above.cels()[0].nodes.len(),
+                1,
+                "{tool:?}: what was drawn is on the new layer"
+            );
+            assert!(
+                doc.find_layer("shade").unwrap().mask.is_some(),
+                "the mask stays with its layer"
+            );
+            above.name.clone()
+        })
+        .collect();
+    assert_eq!(made, ["paths", "shapes", "text"]);
+    let _ = std::fs::remove_dir_all(&path);
+}

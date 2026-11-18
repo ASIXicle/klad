@@ -333,7 +333,7 @@ const LOOP: &[Gesture] = &[Gesture::Loop];
 const MARKERS: &[&str] = &["brush", "eraser", "fill"];
 const EVERY: &[&str] = &[];
 
-const KNOWN: [Known; 26] = [
+const KNOWN: [Known; 24] = [
     Known {
         hands: MARKERS,
         rows: &[
@@ -530,24 +530,6 @@ const KNOWN: [Known; 26] = [
         verdict: "quiet",
         kind: Kind::Idle,
         why: "a hidden stroke is not taken",
-    },
-    Known {
-        hands: &["pen", "text"],
-        rows: &["mask"],
-        gestures: PRESS,
-        places: ANYWHERE,
-        verdict: "error",
-        kind: Kind::Dead,
-        why: "it ends in an error that names internal ids, and what was drawn or typed is lost",
-    },
-    Known {
-        hands: &["rectangles and ellipses"],
-        rows: &["mask"],
-        gestures: DRAG,
-        places: ANYWHERE,
-        verdict: "error",
-        kind: Kind::Dead,
-        why: "it ends in an error that names internal ids, and what was drawn or typed is lost",
     },
     Known {
         hands: &["rectangles and ellipses"],

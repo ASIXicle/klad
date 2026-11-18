@@ -109,22 +109,31 @@ impl Editor {
                 made: None,
             };
         }
+        self.new_vector_layer(name, self.scene.frame)
+    }
+
+    pub(super) fn new_vector_layer(&self, name: &str, frame: u32) -> Home {
         let taken = self.scene.bundle.doc.ids();
         let layer = (1..)
             .map(|n| format!("l{n}"))
             .find(|id| !taken.contains(id))
             .unwrap_or_default();
-        let active = self.scene.active_layer();
+        let active = &self.scene.active;
+        let owner = match self.scene.active_is_mask() {
+            true => &active[..active.len() - 1],
+            false => &active[..],
+        };
+        let under = self.scene.bundle.doc.locate_path(owner);
         Home {
             ops: vec![Op::AddLayer {
-                layer: json!({"id": layer, "kind": "vector", "name": name, "cels": [{"frame": self.scene.frame}]}),
+                layer: json!({"id": layer, "kind": "vector", "name": name, "cels": [{"frame": frame}]}),
                 place: Place {
-                    above: active.map(|l| l.id.clone()),
+                    above: under.map(|l| l.id.clone()),
                     ..Place::default()
                 },
             }],
             layer,
-            made: Some(active.map_or("on top".to_string(), |l| format!("above {}", l.name))),
+            made: Some(under.map_or("on top".to_string(), |l| format!("above {}", l.name))),
         }
     }
 

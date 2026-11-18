@@ -409,20 +409,11 @@ impl Editor {
                 node["type"] = json!("text");
                 node["id"] = json!(id);
                 node["fill"] = json!(color::hex(typing.fill));
-                let mut ops = Vec::new();
-                let (layer, made) = match typing.layer {
-                    Some(layer) => (layer, false),
+                let (mut ops, layer, made) = match typing.layer {
+                    Some(layer) => (Vec::new(), layer, false),
                     None => {
-                        let layer = fresh("l");
-                        let above = self.scene.active_layer().map(|l| l.id.clone());
-                        ops.push(Op::AddLayer {
-                            layer: json!({"id": layer, "kind": "vector", "name": "text", "cels": [{"frame": typing.frame}]}),
-                            place: Place {
-                                above,
-                                ..Place::default()
-                            },
-                        });
-                        (layer, true)
+                        let home = self.new_vector_layer("text", typing.frame);
+                        (home.ops, home.layer, true)
                     }
                 };
                 ops.push(Op::AddNode {
