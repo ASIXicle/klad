@@ -136,6 +136,7 @@ pub enum MarkChange {
     },
     Paste {
         sources: Vec<Source>,
+        held: Vec<(String, Mark)>,
         transform: Option<MarkTransform>,
         cut: Option<Vec<[f32; 2]>>,
         made: Vec<Copied>,
@@ -192,6 +193,10 @@ impl MarkChange {
                 crate::stroke::strokes_of(marks).map(|s| s.brush.as_str()).collect()
             }
             MarkChange::Set { props, .. } => props.get("brush").and_then(Value::as_str).into_iter().collect(),
+            MarkChange::Paste { held, .. } => held
+                .iter()
+                .filter_map(|(_, m)| m.as_stroke().map(|s| s.brush.as_str()))
+                .collect(),
             _ => Vec::new(),
         }
     }

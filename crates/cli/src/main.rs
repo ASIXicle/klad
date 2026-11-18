@@ -3048,6 +3048,7 @@ fn run() -> Result<()> {
             };
             let spec = CopySpec {
                 ids,
+                held: Vec::new(),
                 to: target,
                 transform: mark_transform(offset, rotate, (scale, sx, sy), pivot, flip.as_deref())?,
                 cut,

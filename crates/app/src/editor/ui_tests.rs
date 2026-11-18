@@ -5069,6 +5069,175 @@ fn a_lasso_cut_spans_the_selected_layers() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
+fn marks_at(h: &Harness<'static, Editor>, layer: &str, frame: u32) -> Vec<klad_core::stroke::Mark> {
+    let bundle = &h.state().scene.bundle;
+    match bundle.doc.layer(layer).and_then(|l| l.content_at(frame)) {
+        Some(cel) => bundle.read_marks(layer, &cel.id).unwrap(),
+        None => Vec::new(),
+    }
+}
+
+fn in_hand(h: &Harness<'static, Editor>) -> String {
+    h.state().scene.active_id().unwrap()
+}
+
+fn pick(h: &mut Harness<'static, Editor>, parts: &[&str], cut: Option<Vec<[f32; 2]>>) {
+    let whole = cut.is_none();
+    let of = |h: &Harness<'static, Editor>, layer: &str| {
+        let cel = h.state().scene.bundle.doc.layer(layer).unwrap().content_at(0).unwrap();
+        let ids: Vec<u32> = marks_at(h, layer, 0).iter().map(klad_core::stroke::Mark::id).collect();
+        (cel.id.clone(), if whole { ids } else { Vec::new() })
+    };
+    let (cel, ids) = of(h, parts[0]);
+    let more = parts[1..]
+        .iter()
+        .map(|layer| {
+            let (cel, ids) = of(h, layer);
+            super::Part {
+                layer: layer.to_string(),
+                cel,
+                ids,
+            }
+        })
+        .collect();
+    h.state_mut().tool = Tool::Strokes;
+    h.state_mut().picked = Some(Picked { cel, ids, cut, more });
+    if !whole {
+        h.state_mut().refresh_cut();
+    }
+    h.run_steps(2);
+}
+
+fn run_all(h: &mut Harness<'static, Editor>, cmds: &[Cmd]) {
+    cmds.iter().for_each(|cmd| {
+        h.state_mut().invoke(*cmd).unwrap();
+        h.run_steps(3);
+    });
+}
+
+fn starts_of(marks: &[klad_core::stroke::Mark]) -> Vec<(f32, f32)> {
+    marks
+        .iter()
+        .filter_map(|m| m.as_stroke().map(|s| s.samples[0].pos()))
+        .collect()
+}
+
+#[test]
+fn what_was_copied_is_pasted_whatever_happened_to_the_original() {
+    let path = sample("copied-then-deleted");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let before = marks_at(&h, "l6", 0);
+    pick(&mut h, &["l6"], None);
+    run_all(&mut h, &[Cmd::Copy, Cmd::Delete, Cmd::NewPaintLayer, Cmd::Paste]);
+    let said = h.state().messages.latest().map(|m| (m.tone, m.text.clone())).unwrap();
+    assert_eq!(said.0, Tone::Done, "{}", said.1);
+    let new = in_hand(&h);
+    assert_ne!(new, "l6");
+    assert!(marks_at(&h, "l6", 0).is_empty(), "the originals are deleted");
+    assert_eq!(
+        starts_of(&marks_at(&h, &new, 0)),
+        starts_of(&before),
+        "the strokes are on the new layer as they were copied"
+    );
+    run_all(&mut h, &[Cmd::Undo, Cmd::Undo, Cmd::Undo]);
+    assert_eq!(marks_at(&h, "l6", 0).len(), before.len());
+    activate(&mut h, "lines");
+    pick(&mut h, &["l6"], None);
+    run_all(&mut h, &[Cmd::Copy]);
+    let address = klad_core::markedit::address(&h.state().scene.active_cel().unwrap(), before[0].id());
+    h.state_mut()
+        .apply(parse_lines(&format!(r#"{{"op":"transform","ids":["{address}"],"x":70}}"#)).unwrap())
+        .unwrap();
+    h.run_steps(2);
+    assert_ne!(starts_of(&marks_at(&h, "l6", 0)), starts_of(&before));
+    run_all(&mut h, &[Cmd::NewPaintLayer, Cmd::Paste]);
+    assert_eq!(
+        starts_of(&marks_at(&h, &in_hand(&h), 0)),
+        starts_of(&before),
+        "a stroke moved after the copy is pasted as it was copied"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn parts_cut_out_by_a_loop_are_pasted_after_they_were_deleted() {
+    let path = sample("copied-parts");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let before = marks_at(&h, "l6", 0).len();
+    let left = vec![[0.0, 0.0], [200.0, 0.0], [200.0, 384.0], [0.0, 384.0]];
+    pick(&mut h, &["l6"], Some(left));
+    run_all(&mut h, &[Cmd::Copy, Cmd::Delete]);
+    let kept = marks_at(&h, "l6", 0).len();
+    run_all(&mut h, &[Cmd::NewPaintLayer, Cmd::Paste]);
+    let said = h.state().messages.latest().map(|m| (m.tone, m.text.clone())).unwrap();
+    assert_eq!(said.0, Tone::Done, "{}", said.1);
+    let new = in_hand(&h);
+    assert_eq!(
+        marks_at(&h, "l6", 0).len(),
+        kept,
+        "nothing is put back on the old layer"
+    );
+    assert_eq!(marks_at(&h, &new, 0).len(), before, "the parts are on the new layer");
+    let cel = h.state().scene.active_cel().unwrap();
+    let drawn = h.state().scene.raster_of(&cel).unwrap();
+    assert!(
+        drawn.occupied().next().is_some(),
+        "and they are the parts that were inside the loop, not empty marks"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn strokes_copied_from_several_layers_land_on_the_layer_in_hand_or_stay_on_their_own() {
+    let path = sample("copied-layers");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut()
+        .apply(
+            parse_lines(r##"{"op":"stroke","layer":"l5","path":"M50 60 L280 210","size":20,"color":"#d08040"}"##)
+                .unwrap(),
+        )
+        .unwrap();
+    activate(&mut h, "lines");
+    let (lines, colour) = (marks_at(&h, "l6", 0).len(), marks_at(&h, "l5", 0).len());
+    pick(&mut h, &["l6", "l5"], None);
+    run_all(&mut h, &[Cmd::Copy, Cmd::NewPaintLayer, Cmd::Paste]);
+    let new = in_hand(&h);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap();
+    assert_eq!(
+        (
+            marks_at(&h, "l6", 0).len(),
+            marks_at(&h, "l5", 0).len(),
+            marks_at(&h, &new, 0).len()
+        ),
+        (lines, colour, lines + colour),
+        "on another layer everything lands on the layer in hand: {said}"
+    );
+    assert_eq!(
+        starts_of(&marks_at(&h, &new, 0))[0],
+        starts_of(&marks_at(&h, "l5", 0))[0],
+        "the strokes of the lower layer come first, so they stay under the others"
+    );
+    activate(&mut h, "lines");
+    run_all(&mut h, &[Cmd::Paste]);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap();
+    assert_eq!(
+        (
+            marks_at(&h, "l6", 0).len(),
+            marks_at(&h, "l5", 0).len(),
+            marks_at(&h, &new, 0).len()
+        ),
+        (lines * 2, colour * 2, lines + colour),
+        "on one of their own layers each goes to the layer it came from: {said}"
+    );
+    assert!(
+        said.contains("lines") && said.contains("colour"),
+        "and the message names the layers: {said}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 pub(super) fn canvas_at(h: &Harness<'static, Editor>, x: f32, y: f32) -> egui::Pos2 {
     let view = h.state().view.unwrap();
     let rect = h.state().canvas_rect;

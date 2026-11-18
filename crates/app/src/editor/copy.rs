@@ -4,7 +4,7 @@ use crate::commands::Cmd;
 use crate::messages::Tone;
 use anyhow::Result;
 use klad_core::doc::{Item, Kind, Loc};
-use klad_core::markedit::{self, LassoAction, MarkChange, Side, address};
+use klad_core::markedit::{self, LassoAction, MarkChange, Side};
 use klad_core::ops::{Applied, CopySpec, CopyTarget, Op, Place};
 use klad_core::stroke::Mark;
 use serde_json::{Value, json};
@@ -15,13 +15,14 @@ pub(super) struct Piece {
     layer: String,
     cel: String,
     cut: Option<Vec<[f32; 2]>>,
-    around: Vec<u32>,
-    whole: Vec<u32>,
+    around: Vec<Mark>,
+    whole: Vec<Mark>,
+    picked: usize,
 }
 
 impl Piece {
     fn count(&self) -> usize {
-        self.around.len() + self.whole.len()
+        self.picked
     }
 }
 
@@ -43,6 +44,14 @@ impl Copied {
     }
 }
 
+fn held(marks: &[Mark], ids: &[u32]) -> Vec<Mark> {
+    marks
+        .iter()
+        .filter(|m| ids.contains(&m.id()) || m.as_stroke().is_some_and(|s| s.on.iter().any(|id| ids.contains(id))))
+        .cloned()
+        .collect()
+}
+
 pub(super) fn piece(layer: &str, cel: &str, ids: &[u32], cut: Option<&Vec<[f32; 2]>>, marks: &[Mark]) -> Piece {
     let (around, whole, cut) = match cut {
         Some(polygon) => {
@@ -51,7 +60,7 @@ pub(super) fn piece(layer: &str, cel: &str, ids: &[u32], cut: Option<&Vec<[f32; 
                 .filter(|(_, side)| *side != Side::Outside)
                 .map(|(id, _)| id)
                 .collect();
-            let whole = ids.iter().copied().filter(|id| !around.contains(id)).collect();
+            let whole: Vec<u32> = ids.iter().copied().filter(|id| !around.contains(id)).collect();
             let cut = (!around.is_empty()).then(|| polygon.clone());
             (around, whole, cut)
         }
@@ -61,15 +70,17 @@ pub(super) fn piece(layer: &str, cel: &str, ids: &[u32], cut: Option<&Vec<[f32; 
         layer: layer.to_string(),
         cel: cel.to_string(),
         cut,
-        around,
-        whole,
+        picked: around.len() + whole.len(),
+        around: held(marks, &around),
+        whole: held(marks, &whole),
     }
 }
 
 pub(super) fn paste_ops(piece: &Piece, to: &CopyTarget) -> Vec<Op> {
-    let op = |ids: &[u32], cut: Option<Vec<[f32; 2]>>| {
+    let op = |marks: &[Mark], cut: Option<Vec<[f32; 2]>>| {
         Op::Copy(CopySpec {
-            ids: ids.iter().map(|id| address(&piece.cel, *id)).collect(),
+            ids: Vec::new(),
+            held: marks.iter().map(|m| (piece.cel.clone(), m.clone())).collect(),
             to: to.clone(),
             transform: None,
             cut,
@@ -104,7 +115,7 @@ impl Editor {
     pub(super) fn copied(&self) -> Option<Copied> {
         let picked = self.picked.as_ref()?;
         let layer = self.scene.active_id()?;
-        let pieces: Vec<Piece> = std::iter::once(piece(
+        let mut pieces: Vec<Piece> = std::iter::once(piece(
             &layer,
             &picked.cel,
             &picked.ids,
@@ -122,6 +133,15 @@ impl Editor {
         }))
         .filter(|p| p.count() > 0)
         .collect();
+        let order: Vec<&str> = self
+            .scene
+            .bundle
+            .doc
+            .all_layers()
+            .into_iter()
+            .map(|l| l.id.as_str())
+            .collect();
+        pieces.sort_by_key(|p| order.iter().position(|id| *id == p.layer));
         (!pieces.is_empty()).then_some(Copied { pieces })
     }
 
@@ -372,33 +392,50 @@ impl Editor {
     pub(super) fn paste_copied(&mut self, copied: Copied, word: &str) -> Result<()> {
         let doc = &self.scene.bundle.doc;
         let paintable = |l: &&klad_core::doc::Layer| l.kind() == Kind::Paint && !l.locked;
-        let targets: Vec<(&Piece, CopyTarget)> = match &copied.pieces[..] {
-            [one] => {
+        let in_hand = self.scene.active_id();
+        let own = copied.pieces.len() > 1 && copied.pieces.iter().any(|p| Some(&p.layer) == in_hand.as_ref());
+        let (targets, onto): (Vec<(&Piece, CopyTarget)>, String) = match own {
+            false => {
                 let Some(layer) = self.scene.active_layer().filter(paintable) else {
                     self.say(Tone::Refused, "make a paint layer active to paste strokes into it");
                     return Ok(());
                 };
-                vec![(one, self.target(layer))]
+                let to = self.target(layer);
+                let onto = match copied.pieces.len() {
+                    1 => String::new(),
+                    n => format!(" from {n} layers onto {}", layer.name),
+                };
+                (copied.pieces.iter().map(|p| (p, to.clone())).collect(), onto)
             }
-            many => {
-                let missing: Vec<&str> = many
+            true => {
+                let missing: Vec<&str> = copied
+                    .pieces
                     .iter()
                     .filter(|p| doc.layer(&p.layer).filter(paintable).is_none())
-                    .map(|p| p.layer.as_str())
+                    .map(|p| doc.layer(&p.layer).map_or("one that was removed", |l| l.name.as_str()))
                     .collect();
                 if !missing.is_empty() {
                     self.say(
                         Tone::Refused,
                         format!(
-                            "could not {word}: the layers {} are gone or locked; unlock them, or pick another layer",
+                            "could not {word}: these strokes go back to the layers they came from, and of those {} cannot take them (locked or gone). Unlock it, or pick a layer they did not come from to get them all there",
                             missing.join(", ")
                         ),
                     );
                     return Ok(());
                 }
-                many.iter()
-                    .filter_map(|p| doc.layer(&p.layer).map(|l| (p, self.target(l))))
-                    .collect()
+                let layers: Vec<&klad_core::doc::Layer> =
+                    copied.pieces.iter().filter_map(|p| doc.layer(&p.layer)).collect();
+                let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
+                (
+                    copied
+                        .pieces
+                        .iter()
+                        .zip(&layers)
+                        .map(|(p, l)| (p, self.target(l)))
+                        .collect(),
+                    format!(", each on the layer it came from ({})", names.join(", ")),
+                )
             }
         };
         let frame = self.scene.frame;
@@ -419,7 +456,7 @@ impl Editor {
             self.say(
                 Tone::Done,
                 format!(
-                    "{word} {} on frame {frame}, in place and selected: drag to move them (one cmd Z takes them off)",
+                    "{word} {}{onto} on frame {frame}, in place and selected: drag to move them (one cmd Z takes them off)",
                     counted(made.len(), "mark")
                 ),
             );
@@ -445,16 +482,27 @@ mod tests {
         let marks = vec![line(1, 20.0), line(2, 50.0), line(3, 200.0)];
         let polygon = vec![[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
         let cut = piece("l4", "c4", &[3], Some(&polygon), &marks);
-        assert_eq!((cut.around.clone(), cut.whole.clone()), (vec![1, 2], vec![3]));
+        let ids = |marks: &[Mark]| marks.iter().map(Mark::id).collect::<Vec<_>>();
+        assert_eq!(
+            (ids(&cut.around), ids(&cut.whole), cut.count()),
+            (vec![1, 2], vec![3], 3)
+        );
         let ops = paste_ops(&cut, &CopyTarget::Cel("c9".into()));
         assert_eq!(ops.len(), 2);
         let Op::Copy(first) = &ops[0] else { panic!() };
-        assert_eq!(first.ids, ["c4:s1", "c4:s2"]);
+        assert!(first.ids.is_empty(), "the copy holds the marks, not their places");
+        assert_eq!(
+            first.held,
+            vec![
+                ("c4".to_string(), marks[0].clone()),
+                ("c4".to_string(), marks[1].clone())
+            ]
+        );
         assert_eq!(first.cut.as_deref(), Some(&polygon[..]));
         let Op::Copy(second) = &ops[1] else { panic!() };
         assert_eq!(
-            (second.ids.clone(), second.cut.clone()),
-            (vec!["c4:s3".to_string()], None)
+            (second.held.clone(), second.cut.clone()),
+            (vec![("c4".to_string(), marks[2].clone())], None)
         );
         let plain = piece("l4", "c4", &[2], None, &marks);
         assert_eq!(paste_ops(&plain, &CopyTarget::Cel("c9".into())).len(), 1);

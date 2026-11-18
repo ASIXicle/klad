@@ -794,6 +794,7 @@ impl Bundle {
             }
             MarkChange::Paste {
                 sources,
+                held,
                 transform,
                 cut,
                 made,
@@ -824,6 +825,7 @@ impl Bundle {
                     .collect::<Result<Vec<_>>>()?
                     .into_iter()
                     .flatten()
+                    .chain(held.iter().cloned())
                     .collect();
                 *made = markedit::paste(marks, copies, transform.as_ref(), cut.as_deref(), doc.mark_ids(cel))?;
                 Ok(())
@@ -979,8 +981,8 @@ pub fn summarize(ops: &[Op]) -> String {
             Op::Path { id, .. } => format!("path {id}"),
             Op::Copy(spec) => format!(
                 "copy {} mark{} to {}",
-                spec.ids.len(),
-                if spec.ids.len() == 1 { "" } else { "s" },
+                spec.ids.len() + spec.held.len(),
+                if spec.ids.len() + spec.held.len() == 1 { "" } else { "s" },
                 match &spec.to {
                     crate::ops::CopyTarget::Cel(cel) => cel.clone(),
                     crate::ops::CopyTarget::Frame { frame, .. } => format!("frame {frame}"),
@@ -1256,6 +1258,87 @@ mod tests {
         bundle.reload().unwrap();
         bundle.apply(&stroke(l2).unwrap()).unwrap();
         assert_eq!((marks(&new, l2, c2), marks(&away.join("second.klad"), l2, c2)), (2, 1));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn marks_held_by_a_copy_are_pasted_when_their_source_is_gone() {
+        use crate::ops::{CopySpec, CopyTarget, parse_lines};
+        let dir = scratch("held");
+        let mut bundle = Bundle::blank(
+            &dir,
+            &Blank {
+                layers: 2,
+                ..Blank::default()
+            },
+            "cli",
+        )
+        .unwrap();
+        let places: Vec<(String, String)> = bundle
+            .doc
+            .all_layers()
+            .iter()
+            .map(|l| (l.id.clone(), l.cels()[0].id.clone()))
+            .collect();
+        let [(from, source), (to, target)] = [places[0].clone(), places[1].clone()];
+        bundle
+            .apply(
+                &parse_lines(&format!(
+                    r#"{{"op":"stroke","layer":"{from}","path":"M10 10 L90 10"}}
+{{"op":"stroke","layer":"{from}","path":"M10 40 L90 40"}}"#
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        let held: Vec<(String, Mark)> = bundle
+            .read_marks(&from, &source)
+            .unwrap()
+            .into_iter()
+            .map(|m| (source.clone(), m))
+            .collect();
+        let starts = |marks: &[Mark]| -> Vec<(f32, f32)> { strokes_of(marks).map(|s| s.samples[0].pos()).collect() };
+        let copied = starts(&held.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>());
+        let gone: Vec<String> = held.iter().map(|(cel, m)| markedit::address(cel, m.id())).collect();
+        bundle.apply(&[Op::Remove { ids: gone }]).unwrap();
+        assert!(bundle.read_marks(&from, &source).unwrap().is_empty());
+        let paste = |cut: Option<Vec<[f32; 2]>>| {
+            Op::Copy(CopySpec {
+                ids: Vec::new(),
+                held: held.clone(),
+                to: CopyTarget::Frame {
+                    frame: 0,
+                    layer: Some(to.clone()),
+                },
+                transform: None,
+                cut,
+            })
+        };
+        bundle.apply(&[paste(None)]).unwrap();
+        let pasted = bundle.read_marks(&to, &target).unwrap();
+        assert_eq!(starts(&pasted), copied, "the marks are pasted as they were held");
+        assert!(pasted.iter().all(|m| m.cuts().is_empty()));
+        let half = vec![[0.0, 0.0], [50.0, 0.0], [50.0, 100.0], [0.0, 100.0]];
+        bundle.apply(&[paste(Some(half))]).unwrap();
+        let pasted = bundle.read_marks(&to, &target).unwrap();
+        assert_eq!(pasted.len(), 4);
+        assert!(
+            pasted[2..].iter().all(|m| m.cuts().len() == 1),
+            "with a loop, the part inside it"
+        );
+        let ids: BTreeSet<u32> = pasted.iter().map(Mark::id).collect();
+        assert_eq!(ids.len(), 4, "every pasted mark has an id of its own");
+        crate::history::step(&mut bundle, crate::history::Stack::Undo)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bundle.read_marks(&to, &target).unwrap().len(), 2);
+        let nothing = Op::Copy(CopySpec {
+            ids: Vec::new(),
+            held: Vec::new(),
+            to: CopyTarget::Cel(target.clone()),
+            transform: None,
+            cut: None,
+        });
+        assert!(bundle.apply(&[nothing]).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 

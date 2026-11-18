@@ -1488,12 +1488,11 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
 
     j.act("take that back and do it the other way round: copy, a new layer, paste, and delete the originals after");
     (0..4).for_each(|_| {
-        if j.ed().map_or(0, |ed| ed.scene.total_marks()) < all_before {
+        if layer_marks(&j, "lines").len() < count_before {
             j.chord(CMD, Key::Z);
         }
     });
     if active_name(&j) != "lines" {
-        j.chord(CMD, Key::Z);
         j.click("lines");
     }
     j.key(Key::S);
@@ -1638,11 +1637,9 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
 
     j.finish(&[
         "cmd-x-cuts",
-        "copy-delete-paste-keeps-the-strokes",
         "esc-closes-the-picker-first",
         "knob-turns-under-the-bar",
         "one-recolour-is-one-undo",
-        "paste-lands-on-the-layer-in-hand",
         "picking-a-shape-goes-to-its-layer",
         "recolouring-a-gradient-keeps-it-a-gradient",
         "shape-number-fields-after-folding",

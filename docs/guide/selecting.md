@@ -1,4 +1,4 @@
-_Last updated: 2026-11-17 09:25_
+_Last updated: 2026-11-18 10:24_
 
 # Changing strokes
 
@@ -24,7 +24,7 @@ To recolour, click the palette button in the bar and pick a colour on the wheel,
 
 ## Copy and paste
 
-**cmd C** copies the selected strokes or shapes and **cmd V** pastes them in place, on this frame or on another one. Shapes pasted while a paint layer is active get a vector layer of their own above it.
+**cmd C** copies the selected strokes or shapes and **cmd V** pastes them in place, on this frame or on another one. Strokes are pasted on the layer you have selected, so to put them on another layer, select that layer before you paste. Shapes pasted while a paint layer is active get a vector layer of their own above it.
 
 ## Split part of a drawing onto its own layer
 

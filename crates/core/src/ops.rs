@@ -251,6 +251,7 @@ pub enum CopyTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CopySpec {
     pub ids: Vec<String>,
+    pub held: Vec<(String, Mark)>,
     pub to: CopyTarget,
     pub transform: Option<MarkTransform>,
     pub cut: Option<Vec<[f32; 2]>>,
@@ -1432,6 +1433,7 @@ impl Applied {
         layer: &str,
         cel: &str,
         sources: Vec<(String, String, Vec<u32>)>,
+        held: Vec<(String, Mark)>,
         transform: Option<MarkTransform>,
         cut: Option<Vec<[f32; 2]>>,
     ) {
@@ -1459,6 +1461,7 @@ impl Applied {
             cel,
             MarkChange::Paste {
                 sources,
+                held,
                 transform,
                 cut,
                 made: Vec::new(),
@@ -2941,6 +2944,7 @@ fn parse_copy(map: &mut Map<String, Value>) -> Result<CopySpec> {
     } != MarkTransform::default();
     Ok(CopySpec {
         ids,
+        held: Vec::new(),
         to,
         transform: moved.then_some(transform),
         cut,
@@ -2987,7 +2991,17 @@ fn copy(doc: &mut Document, spec: &CopySpec, out: &mut Applied) -> Result<String
             (layer, cel)
         }
     };
-    out.paste(&layer, &cel, sources, spec.transform, spec.cut.clone());
+    if sources.is_empty() && spec.held.is_empty() {
+        bail!("copy needs ids: the strokes and fills to copy (<cel>:s<id>)");
+    }
+    out.paste(
+        &layer,
+        &cel,
+        sources,
+        spec.held.clone(),
+        spec.transform,
+        spec.cut.clone(),
+    );
     out.changed.push(cel.clone());
     Ok(cel)
 }
