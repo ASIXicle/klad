@@ -17,6 +17,7 @@ pub(super) struct Parallax {
     key: (u64, u32),
     pub(super) planes: Vec<(f32, TextureHandle)>,
     job: Option<Receiver<Result<Planes>>>,
+    pub(super) preparing: bool,
 }
 
 pub(super) const SHIFT: f32 = 0.08;
@@ -110,6 +111,7 @@ impl Editor {
     pub(super) fn parallax(&mut self, ui: &egui::Ui, view: crate::view::View, rect: Rect) {
         let typing = ui.ctx().egui_wants_keyboard_input();
         let held = !typing && ui.input(|i| i.key_down(Key::D) && !i.modifiers.any());
+        self.depth.preparing = false;
         if !held {
             return;
         }
@@ -126,6 +128,7 @@ impl Editor {
                 key,
                 planes: Vec::new(),
                 job: Some(rx),
+                preparing: false,
             };
         }
         if let Some(done) = self.depth.job.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -149,13 +152,7 @@ impl Editor {
         }
         let painter = ui.painter().with_clip_rect(rect);
         if self.depth.planes.is_empty() {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "preparing the planes...",
-                egui::FontId::proportional(16.0),
-                Color32::WHITE,
-            );
+            self.depth.preparing = true;
             ui.ctx().request_repaint();
             return;
         }

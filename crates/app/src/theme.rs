@@ -219,6 +219,13 @@ pub fn apply(style: &mut Style) {
     });
 }
 
+pub fn shown_scroll() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle {
+        dormant_handle_opacity: 0.5,
+        ..egui::style::ScrollStyle::floating()
+    }
+}
+
 pub fn surround(rgb: [u8; 3]) -> [f32; 4] {
     let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
     [r, g, b, 1.0]

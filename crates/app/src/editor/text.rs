@@ -835,14 +835,15 @@ impl Editor {
             && let Some(axis) = std::fs::read(path).ok().and_then(|b| typeset::weight_axis(&b))
         {
             let mut value = self.text_tool.weight.or(implied).unwrap_or(axis.default);
-            if ui
-                .add(
+            if super::options::whole(ui, "weight", |ui| {
+                ui.add(
                     egui::Slider::new(&mut value, axis.min..=axis.max)
                         .step_by(1.0)
                         .text("weight"),
                 )
-                .hint("this font comes in every weight: 400 is regular, 700 bold")
-                .changed()
+            })
+            .hint("this font comes in every weight: 400 is regular, 700 bold")
+            .changed()
             {
                 self.text_tool.weight = Some(value);
             }
@@ -897,7 +898,8 @@ impl Editor {
             }
             t.fill = colour;
         }
-        ui.label(
+        super::options::note(
+            ui,
             RichText::new(
                 "click to type, Return for a new line, Esc to finish; the first colour fills it; click text to edit it",
             )

@@ -15,6 +15,57 @@ use std::collections::BTreeMap;
 pub const SAMPLE: (u32, u32) = (132, 30);
 pub const SIZES: [f32; 8] = [2.0, 4.0, 8.0, 12.0, 20.0, 32.0, 64.0, 128.0];
 
+const NOTE_ROOM: f32 = 160.0;
+const BAR_SLIDERS: f32 = 6.0;
+const BAR_SLIDER_LEAST: f32 = 64.0;
+
+fn at_row_start(ui: &egui::Ui) -> bool {
+    ui.available_size_before_wrap().x >= ui.max_rect().width() - 0.5
+}
+
+pub(super) fn whole(ui: &mut egui::Ui, key: &str, add: impl FnOnce(&mut egui::Ui) -> egui::Response) -> egui::Response {
+    let id = ui.scope_id().with(("whole", key));
+    let named = egui::WidgetText::from(key)
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x;
+    let spacing = ui.spacing();
+    let guess = spacing.slider_width + spacing.interact_size.x + 2.0 * spacing.item_spacing.x + named;
+    let width = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(guess);
+    if width > ui.available_size_before_wrap().x + 0.5 && !at_row_start(ui) {
+        ui.end_row();
+    }
+    let response = add(ui);
+    let drawn = response.rect.width();
+    if (drawn - width).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, drawn));
+        ui.ctx().request_repaint();
+    }
+    response
+}
+
+pub(super) fn note(ui: &mut egui::Ui, text: RichText) -> egui::Response {
+    let full = egui::WidgetText::from(text.clone())
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x;
+    if full > ui.available_size_before_wrap().x && ui.available_size_before_wrap().x < NOTE_ROOM && !at_row_start(ui) {
+        ui.end_row();
+    }
+    let width = full.min(ui.available_size_before_wrap().x).ceil();
+    ui.add_sized([width, ui.spacing().interact_size.y], egui::Label::new(text).truncate())
+}
+
 pub fn size_from_drag(start: f32, dx: f32) -> f32 {
     (start * 2f32.powf(dx / 120.0)).clamp(0.5, 800.0)
 }
@@ -208,24 +259,32 @@ impl Editor {
         if let Some(id) = picked {
             self.pick(&id);
         }
-        ui.add(
-            egui::Slider::new(&mut self.size, 0.5..=800.0)
-                .logarithmic(true)
-                .text("size"),
-        )
+        whole(ui, "size", |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.size, 0.5..=800.0)
+                    .logarithmic(true)
+                    .text("size"),
+            )
+        })
         .hint("brush size in canvas px ([ and ], or hold cmd alt and drag sideways on the canvas)");
-        if let Some(mut feather) = self.eraser_feather()
-            && ui
-                .add(egui::Slider::new(&mut feather, 0.0..=1.0).text("feather"))
-                .hint("how far in the eraser's edge fades: 0 cuts clean, 1 fades out like an airbrush; the pen's eraser end too")
-                .changed()
+        if let Some(mut feather) = self.eraser_feather() && whole(ui, "feather", |ui| {
+            ui.add(egui::Slider::new(&mut feather, 0.0..=1.0).text("feather"))
+        })
+        .hint(
+            "how far in the eraser's edge fades: 0 cuts clean, 1 fades out like an airbrush; the pen's eraser end too",
+        )
+        .changed()
         {
             self.set_eraser_feather(feather);
         }
-        ui.add(egui::Slider::new(&mut self.opacity, 0.05..=1.0).text("opacity"))
-            .hint("a stroke never gets darker than this on its own");
-        ui.add(egui::Slider::new(&mut self.flow, 0.02..=1.0).text("flow"))
-            .hint("how much each dab lays down");
+        whole(ui, "opacity", |ui| {
+            ui.add(egui::Slider::new(&mut self.opacity, 0.05..=1.0).text("opacity"))
+        })
+        .hint("a stroke never gets darker than this on its own");
+        whole(ui, "flow", |ui| {
+            ui.add(egui::Slider::new(&mut self.flow, 0.02..=1.0).text("flow"))
+        })
+        .hint("how much each dab lays down");
     }
 
     fn brush_more(&mut self, ui: &mut egui::Ui) -> Result<()> {
@@ -294,6 +353,8 @@ impl Editor {
     }
 
     pub(super) fn tool_options(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        let narrow = (ui.available_width() / BAR_SLIDERS).max(BAR_SLIDER_LEAST);
+        ui.spacing_mut().slider_width = ui.spacing().slider_width.min(narrow);
         ui.horizontal_wrapped(|ui| {
             let (cmd, name) = match self.tool {
                 Tool::Brush if self.is_on(Cmd::Eraser) == Some(true) => (Cmd::Eraser, "eraser"),
@@ -328,12 +389,10 @@ impl Editor {
                     ui.checkbox(&mut self.pixel_perfect, "pixel perfect")
                         .hint("a one-pixel line drops the corner pixels a hand leaves, so curves stay one pixel thin");
                     self.pixel_inks(ui);
-                    ui.label(
-                        RichText::new("draws whole pixels in the palette colour; shift click: a straight line from the last pixel")
-                            .color(theme::WEAK),
-                    );
+                    note(ui, RichText::new("draws whole pixels in the palette colour; shift click: a straight line from the last pixel")
+                            .color(theme::WEAK));
                     if !self.scene.can_paint() {
-                        ui.colored_label(theme::REFUSED, "this layer is locked: unlock it to draw on it");
+                        note(ui, RichText::new("this layer is locked: unlock it to draw on it").color(theme::REFUSED));
                     }
                 }
                 Tool::Brush => {
@@ -350,22 +409,19 @@ impl Editor {
                             .hint("where the mirror line stands, in canvas px");
                     }
                     if self.custom.is_some() {
-                        ui.label(RichText::new("edited, not saved").color(theme::WEAK));
+                        note(ui, RichText::new("edited, not saved").color(theme::WEAK));
                     }
                     if self.scene.active_is_mask() {
-                        ui.colored_label(Color32::from_rgb(255, 150, 150), self.mask_hint());
+                        note(ui, RichText::new(self.mask_hint()).color(Color32::from_rgb(255, 150, 150)));
                     }
                     let vector = self
                         .scene
                         .active_layer()
                         .is_some_and(|l| l.kind() == klad_core::doc::Kind::Vector);
                     if vector {
-                        ui.colored_label(
-                            theme::REFUSED,
-                            "this is a vector layer: P draws paths on it; brushes paint on paint layers",
-                        );
+                        note(ui, RichText::new("this is a vector layer: P draws paths on it; brushes paint on paint layers").color(theme::REFUSED));
                     } else if !self.scene.can_paint() {
-                        ui.colored_label(theme::REFUSED, "pick a paint layer to draw on");
+                        note(ui, RichText::new("pick a paint layer to draw on").color(theme::REFUSED));
                     }
                 }
                 Tool::Fill if self.scene.on_grid() => {
@@ -374,12 +430,10 @@ impl Editor {
                     ui.checkbox(&mut self.pixel_fill_all, "read all pixel layers")
                         .hint("the fill stops at the pixels of every visible pixel layer, not only this one's: colour on a layer under the lines");
                     self.pixel_inks(ui);
-                    ui.label(
-                        RichText::new("click a pixel: every pixel joined to it with exactly its colour takes the current colour")
-                            .color(theme::WEAK),
-                    );
+                    note(ui, RichText::new("click a pixel: every pixel joined to it with exactly its colour takes the current colour")
+                            .color(theme::WEAK));
                     if !self.scene.can_paint() {
-                        ui.colored_label(theme::REFUSED, "this layer is locked: unlock it to fill on it");
+                        note(ui, RichText::new("this layer is locked: unlock it to fill on it").color(theme::REFUSED));
                     }
                 }
                 Tool::Fill => self.fill_panel(ui),
@@ -399,27 +453,23 @@ impl Editor {
                     self.command_check(ui, Cmd::CutLasso, "takes pixels, not whole marks");
                     self.command_button(ui, Cmd::SelectSameColour, Some("same colour"));
                     self.command_button(ui, Cmd::SelectAll, Some("select all"));
-                    ui.label(
-                        RichText::new("click a mark or drag around pixels; drag them to move by whole pixels; the bar under them edits them")
-                            .color(theme::WEAK),
-                    );
+                    note(ui, RichText::new("click a mark or drag around pixels; drag them to move by whole pixels; the bar under them edits them")
+                            .color(theme::WEAK));
                 }
                 Tool::Strokes => {
                     self.pick_scope(ui);
                     self.command_check(ui, Cmd::CutLasso, "a lasso cuts strokes at its edge");
                     self.command_button(ui, Cmd::SelectAll, Some("select all"));
-                    ui.label(RichText::new("click or lasso strokes; the bar under them edits them").color(theme::WEAK));
+                    note(ui, RichText::new("click or lasso strokes; the bar under them edits them").color(theme::WEAK));
                 }
                 Tool::Select if self.shifting.is_some() => self.shift_options(ui),
                 Tool::Select => {
                     self.pick_scope(ui);
-                    ui.label(
-                        RichText::new("click what you see and drag it; alt drag: a copy; drag on empty canvas: a lasso")
-                            .color(theme::WEAK),
-                    );
+                    note(ui, RichText::new("click what you see and drag it; alt drag: a copy; drag on empty canvas: a lasso")
+                            .color(theme::WEAK));
                 }
                 Tool::Direct => {
-                    ui.label(RichText::new("click a stroke or a shape's outline, then drag its points").color(theme::WEAK));
+                    note(ui, RichText::new("click a stroke or a shape's outline, then drag its points").color(theme::WEAK));
                     self.command_button(ui, Cmd::Corner, Some("corner"));
                     self.command_button(ui, Cmd::Smooth, Some("smooth"));
                     ui.add(
@@ -461,9 +511,7 @@ impl Editor {
                     )
                     .labelled_by(label.id)
                     .hint("how thick the line or outline is, in whole pixels");
-                    ui.label(
-                        RichText::new("drag on the pixel layer; shift for a square or circle").color(theme::WEAK),
-                    );
+                    note(ui, RichText::new("drag on the pixel layer; shift for a square or circle").color(theme::WEAK));
                 }
                 Tool::Shape => {
                     [(super::make::ShapeKind::Rect, "rectangle"), (super::make::ShapeKind::Ellipse, "ellipse")]
@@ -495,13 +543,11 @@ impl Editor {
                             .suffix(" px"),
                     )
                     .hint("the outline's width");
-                    ui.label(
-                        RichText::new(match self.draws_on_vector() {
+                    note(ui, RichText::new(match self.draws_on_vector() {
                             true => "drag for a shape; shift for a square or circle, alt from the centre",
                             false => "drag for a shape: it goes on a new vector layer above this one; shift for a square or circle, alt from the centre",
                         })
-                        .color(theme::WEAK),
-                    );
+                        .color(theme::WEAK));
                 }
                 Tool::Text => self.check(|e| e.text_options(ui)),
                 Tool::Bone => self.check(|e| e.bone_options(ui)),
@@ -518,21 +564,17 @@ impl Editor {
                             .suffix(" px"),
                     )
                     .hint("the outline's width");
-                    ui.label(
-                        RichText::new(match self.draws_on_vector() {
+                    note(ui, RichText::new(match self.draws_on_vector() {
                             true => "click for corners, drag for curves, click the first point to close, Return finishes, Esc drops it",
                             false => "the path goes on a new vector layer above this one: click for corners, drag for curves, click the first point to close, Return finishes, Esc drops it",
                         })
-                        .color(theme::WEAK),
-                    );
+                        .color(theme::WEAK));
                 }
                 Tool::Note => {
-                    ui.label(
-                        RichText::new(
+                    note(ui, RichText::new(
                             "click the canvas to pin a note for the agent; right click a pin (any frame's) to go to it, Delete removes it",
                         )
-                        .color(theme::WEAK),
-                    );
+                        .color(theme::WEAK));
                 }
             }
         });

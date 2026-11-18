@@ -441,7 +441,13 @@ impl Journey {
                     && ((at.y < body && at.y >= body - crate::layout::TITLE)
                         || (r.top() >= body - 1.0 && r.bottom() <= floor + 1.0))
             }
-            None => at.y < canvas.bottom() || r.bottom() <= window.bottom() - crate::layout::STATUS + 1.0,
+            None => {
+                at.y < canvas.bottom()
+                    || r.bottom() <= window.bottom() - crate::layout::STATUS + 1.0
+                    || self
+                        .ed()
+                        .is_some_and(|ed| r.top() >= canvas.bottom() + ed.timeline_shown - 1.0)
+            }
         }
     }
 

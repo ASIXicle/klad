@@ -730,14 +730,51 @@ fn menu(j: &mut Journey, rows: &mut Vec<Row>, name: &str, picture: bool) {
                 .any(|(l, r)| l == label && (r.min - rect.min).abs().max_elem() < 0.5)
         })
         .collect();
-    let cut: Vec<String> = items
-        .iter()
-        .filter(|(_, r)| !window.expand(1.0).contains_rect(*r))
-        .map(|(label, _)| short(label))
-        .collect();
     if picture {
         j.look(&format!("menu-{}", name.to_lowercase()));
     }
+    let inside = |r: &Rect| window.expand(1.0).contains_rect(*r);
+    let mut seen: Vec<bool> = items.iter().map(|(_, r)| inside(r)).collect();
+    let sight = items
+        .iter()
+        .map(|(_, r)| r.intersect(window))
+        .filter(|r| area(*r) > 0.0)
+        .fold(Rect::NOTHING, Rect::union);
+    if seen.iter().any(|s| !*s) && area(sight) > 0.0 {
+        let fresh_labels = |j: &Journey| -> Vec<(String, Rect)> {
+            labels(j)
+                .into_iter()
+                .filter(|(label, rect)| {
+                    !before
+                        .iter()
+                        .any(|(l, r)| l == label && (r.min - rect.min).abs().max_elem() < 0.5)
+                })
+                .collect()
+        };
+        let mut last: Option<f32> = None;
+        let mut still = 0;
+        let mut turns = 0;
+        while turns < 120 && still < 2 && seen.iter().any(|s| !*s) {
+            j.wheel_at(sight.center(), 100.0);
+            turns += 1;
+            let now = fresh_labels(j);
+            items.iter().zip(seen.iter_mut()).for_each(|((label, _), s)| {
+                *s |= now.iter().any(|(l, r)| l == label && inside(r));
+            });
+            let tops: f32 = now.iter().map(|(_, r)| r.top()).sum();
+            still = match last {
+                Some(was) if (was - tops).abs() <= 0.5 => still + 1,
+                _ => 0,
+            };
+            last = Some(tops);
+        }
+    }
+    let cut: Vec<String> = items
+        .iter()
+        .zip(&seen)
+        .filter(|(_, s)| !**s)
+        .map(|((label, _), _)| short(label))
+        .collect();
     rows.push(Row {
         state,
         kind: "menu",

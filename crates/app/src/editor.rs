@@ -5789,15 +5789,28 @@ impl Editor {
         });
         self.fill.reference = reference;
         let f = &mut self.fill;
-        ui.add(egui::Slider::new(&mut f.gap, 0.0..=fill::MAX_GAP).text("close gaps px"))
-            .hint("openings in the lines up to this wide count as closed");
-        ui.add(egui::Slider::new(&mut f.tolerance, 0.0..=1.0).text("tolerance"))
-            .hint("how different a pixel may be from where you click and still fill");
-        ui.add(egui::Slider::new(&mut f.expand, 0.0..=fill::MAX_EXPAND).text("grow under lines px"))
-            .hint("the fill reaches this far under the lines, so no paper shows between line and colour");
-        ui.add(egui::Slider::new(&mut f.opacity, 0.05..=1.0).text("opacity"))
-            .hint("the fill's opacity");
-        ui.small("click inside lines to fill, drag a loop to lasso fill");
+        options::whole(ui, "close gaps px", |ui| {
+            ui.add(egui::Slider::new(&mut f.gap, 0.0..=fill::MAX_GAP).text("close gaps px"))
+        })
+        .hint("openings in the lines up to this wide count as closed");
+        options::whole(ui, "tolerance", |ui| {
+            ui.add(egui::Slider::new(&mut f.tolerance, 0.0..=1.0).text("tolerance"))
+        })
+        .hint("how different a pixel may be from where you click and still fill");
+        options::whole(ui, "grow under lines px", |ui| {
+            ui.add(egui::Slider::new(&mut f.expand, 0.0..=fill::MAX_EXPAND).text("grow under lines px"))
+        })
+        .hint("the fill reaches this far under the lines, so no paper shows between line and colour");
+        options::whole(ui, "opacity", |ui| {
+            ui.add(egui::Slider::new(&mut f.opacity, 0.05..=1.0).text("opacity"))
+        })
+        .hint("the fill's opacity");
+        options::note(
+            ui,
+            egui::RichText::new("click inside lines to fill, drag a loop to lasso fill")
+                .small()
+                .color(crate::theme::WEAK),
+        );
         ui.horizontal_wrapped(|ui| {
             self.command_button(ui, Cmd::Refill, Some("refill this drawing"));
             self.command_button(ui, Cmd::ShowGaps, Some("show gaps"));

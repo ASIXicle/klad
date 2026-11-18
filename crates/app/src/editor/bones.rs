@@ -1209,22 +1209,26 @@ impl Editor {
                 }
             }
             Mode::Weights if !self.bends() => {
-                ui.label(RichText::new("every layer follows a bone: nothing bends by weights").color(theme::WEAK))
+                super::options::note(ui, RichText::new("every layer follows a bone: nothing bends by weights").color(theme::WEAK))
                     .hint("weights are for a layer drawn in one piece across a joint; detach one (draw mode, the picked bone's layers menu, or the bone in its layers row) to paint its weights");
             }
             Mode::Weights => {
                 ui.spacing_mut().slider_width = 56.0;
-                ui.add(
-                    egui::Slider::new(&mut self.bones.radius, 4.0..=200.0)
-                        .logarithmic(true)
-                        .text("size"),
-                )
+                super::options::whole(ui, "weights size", |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut self.bones.radius, 4.0..=200.0)
+                            .logarithmic(true)
+                            .text("size"),
+                    )
+                })
                 .hint("the weight brush's radius in px");
-                ui.add(
-                    egui::Slider::new(&mut self.bones.strength, 0.0..=1.0)
-                        .fixed_decimals(2)
-                        .text("weight"),
-                )
+                super::options::whole(ui, "weights weight", |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut self.bones.strength, 0.0..=1.0)
+                            .fixed_decimals(2)
+                            .text("weight"),
+                    )
+                })
                 .hint("the weight a dab paints; alt paints 0");
                 if ui
                     .button("automatic")

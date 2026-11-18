@@ -623,6 +623,7 @@ impl Start {
 }
 
 fn row(ui: &mut egui::Ui, salt: &str, cards: impl FnOnce(&mut egui::Ui)) {
+    ui.spacing_mut().scroll = crate::theme::shown_scroll();
     egui::ScrollArea::horizontal()
         .id_salt(salt)
         .auto_shrink([false, true])

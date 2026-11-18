@@ -6191,7 +6191,7 @@ fn a_text_open_for_editing_is_never_saved_hidden() {
     h.key_press(Key::Escape);
     h.run_steps(2);
     let id = texts(&h)[0].0.clone();
-    let on = canvas_at(&h, 215.0, 175.0);
+    let on = canvas_at(&h, 215.0, 145.0);
     let on_disk = |path: &Path| Bundle::open(path).unwrap().doc;
     [
         (Cmd::NewPaintLayer, "a new layer"),
@@ -8478,6 +8478,171 @@ fn messages_lie_under_windows_wrap_and_a_press_on_an_error_paints_nothing() {
     assert!(
         covered.iter().all(|(_, at, window)| *at == Some(*window)),
         "where a window lies over a message, the window is on top: {covered:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+fn bar_cuts(h: &Harness<'static, Editor>) -> Vec<String> {
+    let canvas = h.state().canvas_rect;
+    theme::hint_parts(&h.ctx)
+        .into_iter()
+        .filter(|(rect, _, _)| rect.bottom() <= canvas.top() + 1.0 && rect.center().x > canvas.left())
+        .filter(|(rect, _, _)| rect.left() < canvas.right() - 1.0 && rect.top() > 20.0)
+        .filter(|(rect, seen, _)| seen.width() < rect.width() - 1.0)
+        .map(|(_, _, hint)| hint)
+        .collect()
+}
+
+#[test]
+fn a_tools_bar_moves_what_does_not_fit_to_its_next_row_and_keeps_its_hint_on_one_line() {
+    let painted = sample("bar-rows");
+    let pixels = pixel_sample("bar-rows-pixels");
+    [
+        (&painted, Cmd::Brush, ""),
+        (&painted, Cmd::Eraser, ""),
+        (&painted, Cmd::Fill, "click inside lines to fill"),
+        (&painted, Cmd::Strokes, "click or lasso strokes"),
+        (&pixels, Cmd::Brush, "draws whole pixels"),
+    ]
+    .into_iter()
+    .for_each(|(path, tool, hint)| {
+        let mut h = harness(editor(path), vec2(1280.0, 720.0));
+        h.state_mut().invoke(tool).unwrap();
+        h.run_steps(4);
+        let cut = bar_cuts(&h);
+        assert!(cut.is_empty(), "{tool:?}: cut off at the bar's edge: {cut:?}");
+        if hint.is_empty() {
+            return;
+        }
+        let canvas = h.state().canvas_rect;
+        let line = h.ctx.global_style().spacing.interact_size.y + 2.0;
+        let note = h
+            .query_all(By::new().predicate(move |n| {
+                n.label().is_some_and(|l| l.starts_with(hint)) || n.value().is_some_and(|v| v.starts_with(hint))
+            }))
+            .map(|n| n.rect())
+            .next()
+            .unwrap_or_else(|| panic!("{tool:?}: its hint is not in the bar"));
+        assert!(
+            note.height() <= line && note.bottom() <= canvas.top() + 1.0 && note.right() <= canvas.right() + 1.0,
+            "{tool:?}: its hint is not one line in the bar: {note:?}, bar ends at {:.0}, line {line:.0}",
+            canvas.top()
+        );
+    });
+    let _ = std::fs::remove_dir_all(&painted);
+    let _ = std::fs::remove_dir_all(&pixels);
+}
+
+fn window_rects(h: &Harness<'static, Editor>) -> Vec<Rect> {
+    h.ctx.memory(|m| {
+        m.layer_ids()
+            .filter(|l| l.order == egui::Order::Middle && m.areas().is_visible(l))
+            .filter_map(|l| m.area_rect(l.id))
+            .collect()
+    })
+}
+
+#[test]
+fn windows_fit_above_the_status_line_open_at_their_size_and_a_second_opens_beside_the_first() {
+    let path = sample("windows-fit");
+    let mut h = harness(editor(&path), vec2(1280.0, 720.0));
+    let before = window_rects(&h).len();
+    h.state_mut().invoke(Cmd::BrushWindow).unwrap();
+    let shown: Vec<Rect> = (0..10)
+        .filter_map(|_| {
+            h.run_steps(1);
+            let rects = window_rects(&h);
+            (rects.len() > before).then(|| rects[rects.len() - 1])
+        })
+        .collect();
+    let first = *shown.last().expect("the brush window opens");
+    let screen = h.ctx.content_rect();
+    let above = screen.bottom() - layout::STATUS;
+    assert!(
+        first.top() >= screen.top() && first.bottom() <= above + 0.5,
+        "the brush window {first:?} is not inside the window above the status line ({above:.0})"
+    );
+    let grew: Vec<f32> = shown.iter().map(|r| r.height().round()).collect();
+    assert!(
+        grew.iter().all(|g| (g - first.height().round()).abs() <= 1.0),
+        "the brush window unfolds while it opens: heights {grew:?}"
+    );
+    let cross = theme::hint_parts(&h.ctx)
+        .into_iter()
+        .find(|(_, _, hint)| hint.starts_with("close") && hint.contains("Brush"))
+        .expect("the brush window has a cross");
+    assert!(
+        cross.1.height() >= cross.0.height() - 1.0 && screen.contains_rect(cross.0),
+        "the brush window's cross is out of sight: {cross:?}"
+    );
+    h.state_mut().invoke(Cmd::About).unwrap();
+    h.run_steps(10);
+    let both = window_rects(&h);
+    assert_eq!(both.len(), before + 2, "two windows are open");
+    let second = both
+        .iter()
+        .find(|r| (r.min - first.min).length() > 0.5 || (r.max - first.max).length() > 0.5)
+        .copied()
+        .unwrap();
+    assert!(
+        (second.center() - first.center()).length() >= 24.0,
+        "the second window opens over the first: {first:?} and {second:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_menu_longer_than_the_window_scrolls_to_its_last_item() {
+    let path = sample("menu-scrolls");
+    let mut h = harness(editor(&path), vec2(1280.0, 420.0));
+    let labels = |h: &Harness<'static, Editor>| -> Vec<(String, Rect)> {
+        h.query_all(By::new().predicate(|n| matches!(n.role(), Role::Button | Role::CheckBox) && n.label().is_some()))
+            .map(|n| (n.accesskit_node().label().unwrap_or_default().to_string(), n.rect()))
+            .collect()
+    };
+    let before = labels(&h);
+    h.get_by_label("Layer").click();
+    h.run_steps(4);
+    let window = h.ctx.content_rect();
+    let items: Vec<(String, Rect)> = labels(&h)
+        .into_iter()
+        .filter(|(l, r)| !before.iter().any(|(b, br)| b == l && (br.min - r.min).length() < 0.5))
+        .collect();
+    let out: Vec<String> = items
+        .iter()
+        .filter(|(_, r)| !window.contains_rect(*r))
+        .map(|(l, _)| l.clone())
+        .collect();
+    assert!(
+        !out.is_empty(),
+        "the Layer menu fits a 420 point window: the test needs a shorter one"
+    );
+    let middle = items
+        .iter()
+        .map(|(_, r)| r.intersect(window))
+        .fold(Rect::NOTHING, Rect::union)
+        .center();
+    let mut reached: Vec<bool> = vec![false; out.len()];
+    (0..40).for_each(|_| {
+        h.event(egui::Event::PointerMoved(middle));
+        h.run_steps(1);
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -60.0),
+            modifiers: Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(2);
+        let now = labels(&h);
+        out.iter().zip(reached.iter_mut()).for_each(|(l, seen)| {
+            *seen |= now.iter().any(|(n, r)| n == l && window.contains_rect(*r));
+        });
+    });
+    let still: Vec<&String> = out.iter().zip(&reached).filter(|(_, s)| !**s).map(|(l, _)| l).collect();
+    assert!(
+        still.is_empty(),
+        "scrolling the menu does not bring these in: {still:?}"
     );
     let _ = std::fs::remove_dir_all(&path);
 }

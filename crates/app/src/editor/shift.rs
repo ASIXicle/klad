@@ -155,7 +155,7 @@ impl Editor {
         ui.checkbox(&mut s.every, "every drawing").on_hover_text(
             "on: every drawing on it moves (with its bones and poses); off: only the drawing shown here",
         );
-        ui.label(RichText::new("drag inside, a corner or outside; Esc: done").color(crate::theme::WEAK))
+        super::options::note(ui, RichText::new("drag inside, a corner or outside; Esc: done").color(crate::theme::WEAK))
             .on_hover_text("drag inside to move, a corner to scale, an edge to stretch, outside to turn; Esc, Return or a click outside ends it");
     }
 }

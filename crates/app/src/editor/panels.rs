@@ -11,6 +11,14 @@ use egui::{Align, Color32, Id, Key, Layout as Flow, Margin, Modifiers, RichText,
 use std::time::{Duration, Instant};
 
 const SETTLE: u8 = 12;
+const FINDER_CHROME: f32 = 200.0;
+const FINDER_LEAST: f32 = 120.0;
+const FINDER_MOST: f32 = 440.0;
+const MENU_CHROME: f32 = 72.0;
+const MENU_LEAST: f32 = 120.0;
+const WINDOW_GAP: f32 = 8.0;
+const WINDOW_LEAST: f32 = 160.0;
+const CASCADE: egui::Vec2 = vec2(32.0, 32.0);
 
 #[derive(Clone, Copy, Default)]
 struct Placing {
@@ -19,6 +27,21 @@ struct Placing {
     frames: u8,
     settled: bool,
     size: Option<egui::Vec2>,
+    offset: egui::Vec2,
+}
+
+fn open_windows() -> Id {
+    Id::unique("klad open windows")
+}
+
+fn window_area(ctx: &egui::Context) -> egui::Rect {
+    let screen = ctx.content_rect();
+    egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.max.y - layout::STATUS))
+}
+
+pub(super) fn window_room(ctx: &egui::Context) -> f32 {
+    let chrome = ctx.global_style().spacing.window_margin.sum().y + 2.0;
+    (window_area(ctx).height() - 2.0 * WINDOW_GAP - chrome).max(WINDOW_LEAST)
 }
 
 #[derive(Clone, Copy)]
@@ -301,11 +324,11 @@ impl Editor {
             true => other.y + 6.0 + gap,
             false => self.strip_foot[size],
         };
+        ui.spacing_mut().scroll = theme::shown_scroll();
         egui::ScrollArea::vertical()
             .id_salt("strip")
             .max_height((height - foot_now - gap).max(0.0))
             .auto_shrink([false, true])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .scroll_source(egui::scroll_area::ScrollSource {
                 drag: egui::scroll_area::DragScroll::Never,
                 ..egui::scroll_area::ScrollSource::default()
@@ -387,7 +410,7 @@ impl Editor {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         commands::MENUS.iter().for_each(|m| {
-            ui.menu_button(m.title, |ui| self.menu_items(ui, m.items))
+            ui.menu_button(m.title, |ui| scrolled_menu(ui, |ui| self.menu_items(ui, m.items)))
                 .response
                 .hint(commands::menu_hint(m));
         });
@@ -400,7 +423,7 @@ impl Editor {
             }
             commands::Item::Run(cmd) => self.menu_entry(ui, cmd),
             commands::Item::Sub(title, inner) => {
-                ui.menu_button(title, |ui| self.menu_items(ui, inner));
+                ui.menu_button(title, |ui| scrolled_menu(ui, |ui| self.menu_items(ui, inner)));
             }
             commands::Item::Recent => {
                 ui.menu_button("Open recent", |ui| {
@@ -586,10 +609,7 @@ impl Editor {
 
     fn dock(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
-        ui.spacing_mut().scroll = egui::style::ScrollStyle {
-            dormant_handle_opacity: 0.5,
-            ..egui::style::ScrollStyle::floating()
-        };
+        ui.spacing_mut().scroll = theme::shown_scroll();
         self.dock_room = ui.available_height();
         self.dock_fit.chosen = self.dock_kept;
         self.folded_for_room = self.settings.layout.folded_for_room(self.dock_room, &self.dock_fit);
@@ -797,6 +817,16 @@ impl Editor {
         let mut cancel = None;
         let mut open_log = false;
         ui.horizontal_centered(|ui| {
+            if self.settings.layout.hidden {
+                if ui
+                    .button(format!("{} show the panels (Tab)", icon::SIDEBAR))
+                    .hint("the panels are hidden: this or Tab brings them back")
+                    .clicked()
+                {
+                    self.queued.push(Cmd::HideAll);
+                }
+                ui.separator();
+            }
             let frames = self.scene.bundle.doc.timeline.frames;
             ui.label(RichText::new(format!("frame {} of {frames}", self.shown_frame())).strong());
             if self.timeline.player.is_some() {
@@ -892,6 +922,12 @@ impl Editor {
             work.push(format!("loading frame {}", self.scene.frame));
         }
         work.extend(self.preparing_text());
+        if self.maps.making {
+            work.push("making the light maps".to_string());
+        }
+        if self.depth.preparing {
+            work.push("preparing the planes".to_string());
+        }
         work
     }
 
@@ -905,27 +941,36 @@ impl Editor {
         let key = Id::unique(id);
         let frame = ctx.cumulative_frame_nr();
         let mut place = ctx.data(|d| d.get_temp::<Placing>(key)).unwrap_or_default();
+        let mut others: Vec<(Id, u64)> = ctx.data(|d| d.get_temp(open_windows())).unwrap_or_default();
+        others.retain(|(id, seen)| *id != key && seen + 1 >= frame);
         if place.seen + 1 < frame && matches!(spot, Spot::Middle) {
             place = Placing {
                 opened: place.opened + 1,
+                offset: CASCADE * others.len() as f32,
                 ..Placing::default()
             };
         }
+        let others_open = others.len();
+        others.push((key, frame));
+        ctx.data_mut(|d| d.insert_temp(open_windows(), others));
         let area = key.with(place.opened);
         let window = egui::Window::new(&title)
             .id(area)
             .title_bar(false)
             .resizable(true)
-            .default_width(360.0);
-        let middle = ctx.content_rect().center();
+            .default_width(360.0)
+            .max_height(window_room(ctx))
+            .constrain_to(window_area(ctx));
+        let middle = ctx.content_rect().center() + place.offset;
         let size = ctx.memory(|m| m.area_rect(area)).map(|r| r.size());
         let window = match (spot, size) {
             (Spot::At(at), _) => window.default_pos(at),
             (Spot::Middle, Some(size)) if !place.settled => {
+                place.offset = CASCADE * others_open as f32;
                 place.frames += 1;
                 place.settled = place.frames >= SETTLE || place.size.is_some_and(|was| (was - size).length() < 0.5);
                 place.size = Some(size);
-                window.current_pos(middle - size / 2.0)
+                window.current_pos(ctx.content_rect().center() + place.offset - size / 2.0)
             }
             (Spot::Middle, _) => window.default_pos(middle - vec2(180.0, 160.0)),
         };
@@ -1390,37 +1435,41 @@ impl Editor {
                 run = found.get(state.selected).copied();
             }
             ui.add_space(4.0);
-            egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
-                if found.is_empty() {
-                    ui.label("nothing matches");
-                }
-                found.iter().enumerate().for_each(|(i, cmd)| {
-                    let spec = cmd.spec();
-                    let reason = self.can_run(*cmd);
-                    let colour = if reason.is_some() { theme::WEAK } else { theme::TEXT };
-                    let row = ui
-                        .add(
-                            egui::Button::new(RichText::new(format!("{}  {}", spec.icon, spec.name)).color(colour))
-                                .right_text(RichText::new(self.bindings.label(*cmd)).color(theme::WEAK))
-                                .selected(i == state.selected)
-                                .min_size(vec2(ui.available_width(), theme::TARGET)),
-                        )
-                        .hint(self.command_hint(*cmd));
-                    if i == state.selected && (down || up) {
-                        row.scroll_to_me(None);
+            let room = (ui.ctx().content_rect().height() - FINDER_CHROME).clamp(FINDER_LEAST, FINDER_MOST);
+            egui::ScrollArea::vertical()
+                .max_height(room)
+                .min_scrolled_height(room)
+                .show(ui, |ui| {
+                    if found.is_empty() {
+                        ui.label("nothing matches");
                     }
-                    if let Some(reason) = reason.filter(|_| !spec.is_hold()) {
-                        ui.label(
-                            RichText::new(format!("    {}: {reason}", spec.group.name()))
-                                .small()
-                                .color(theme::WEAK),
-                        );
-                    }
-                    if row.clicked() {
-                        run = Some(*cmd);
-                    }
+                    found.iter().enumerate().for_each(|(i, cmd)| {
+                        let spec = cmd.spec();
+                        let reason = self.can_run(*cmd);
+                        let colour = if reason.is_some() { theme::WEAK } else { theme::TEXT };
+                        let row = ui
+                            .add(
+                                egui::Button::new(RichText::new(format!("{}  {}", spec.icon, spec.name)).color(colour))
+                                    .right_text(RichText::new(self.bindings.label(*cmd)).color(theme::WEAK))
+                                    .selected(i == state.selected)
+                                    .min_size(vec2(ui.available_width(), theme::TARGET)),
+                            )
+                            .hint(self.command_hint(*cmd));
+                        if i == state.selected && (down || up) {
+                            row.scroll_to_me(None);
+                        }
+                        if let Some(reason) = reason.filter(|_| !spec.is_hold()) {
+                            ui.label(
+                                RichText::new(format!("    {}: {reason}", spec.group.name()))
+                                    .small()
+                                    .color(theme::WEAK),
+                            );
+                        }
+                        if row.clicked() {
+                            run = Some(*cmd);
+                        }
+                    });
                 });
-            });
         });
         match run {
             Some(cmd) => self.queued.push(cmd),
@@ -1428,6 +1477,14 @@ impl Editor {
             None => {}
         }
     }
+}
+
+fn scrolled_menu(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let room = (ui.ctx().content_rect().height() - MENU_CHROME).max(MENU_LEAST);
+    egui::ScrollArea::vertical()
+        .max_height(room)
+        .min_scrolled_height(room)
+        .show(ui, add);
 }
 
 pub(super) fn real_image((w, h): (u32, u32), cols: usize, tiles: &[(usize, Vec<half::f16>)]) -> egui::ColorImage {

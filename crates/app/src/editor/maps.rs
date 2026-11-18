@@ -57,6 +57,7 @@ pub(super) struct MapsView {
     tracing: Option<Tracing>,
     auto_for: Option<(String, Map)>,
     parked: Option<Maps>,
+    pub(super) making: bool,
 }
 
 fn own_map(role: Role) -> (Map, &'static str) {
@@ -349,6 +350,7 @@ impl Editor {
     }
 
     pub(super) fn map_overlay(&mut self, ui: &egui::Ui, view: crate::view::View, rect: Rect) {
+        self.maps.making = false;
         self.follow_map_layer();
         let typing = ui.ctx().egui_wants_keyboard_input();
         let held = !typing && ui.input(|i| i.key_down(Key::L) && !i.modifiers.any());
@@ -433,13 +435,7 @@ impl Editor {
         });
         let painter = ui.painter().with_clip_rect(rect);
         let Some((_, _, _, texture)) = shown else {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "making the light maps...",
-                egui::FontId::proportional(16.0),
-                Color32::WHITE,
-            );
+            self.maps.making = true;
             ui.ctx().request_repaint();
             return;
         };
