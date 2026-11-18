@@ -6124,7 +6124,7 @@ fn someone_gives_an_arm_bones_and_poses_it() {
         .filter(|n| {
             j.h.ctx
                 .layer_id_at(n.rect().center())
-                .is_some_and(|layer| layer.order == egui::Order::Tooltip)
+                .is_none_or(|layer| layer.order != egui::Order::Foreground)
         })
         .filter_map(|n| super::testkit::written(&n.accesskit_node()))
         .collect();
@@ -6222,7 +6222,6 @@ fn someone_gives_an_arm_bones_and_poses_it() {
     j.finish(&[
         "a-pose-of-nothing-is-not-called-done",
         "a-pose-on-the-first-frame-is-kept-or-refused-plainly",
-        "messages-leave-open-menus-free",
         "posing-with-no-layer-attached-says-so",
         "the-rows-bone-button-is-in-reach",
     ]);

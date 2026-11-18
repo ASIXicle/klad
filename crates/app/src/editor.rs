@@ -739,6 +739,7 @@ pub(crate) struct Editor {
     pub(crate) wants: Option<Want>,
     view: Option<View>,
     canvas_rect: Rect,
+    held_messages: Vec<Rect>,
     navigating: bool,
     focused: bool,
     pen: Option<Pen>,
@@ -938,6 +939,7 @@ impl Editor {
             wants: None,
             view: None,
             canvas_rect: Rect::NOTHING,
+            held_messages: Vec::new(),
             navigating: false,
             focused: false,
             pen: if cfg!(test) { None } else { Pen::install() },
@@ -3155,6 +3157,7 @@ impl Editor {
         };
         let c = view.to_canvas(e.pos - rect.min, rect.size());
         let on_canvas = rect.contains(e.pos)
+            && !self.held_messages.iter().any(|m| m.contains(e.pos))
             && ctx
                 .layer_id_at(e.pos)
                 .is_none_or(|l| l.order == egui::Order::Background);

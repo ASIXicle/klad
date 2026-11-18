@@ -8297,3 +8297,66 @@ fn with_a_mask_picked_the_pen_the_shape_tool_and_the_text_tool_draw_on_a_new_lay
     assert_eq!(made, ["paths", "shapes", "text"]);
     let _ = std::fs::remove_dir_all(&path);
 }
+
+#[test]
+fn messages_lie_under_windows_wrap_and_a_press_on_an_error_paints_nothing() {
+    let path = sample("messages-under");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "colour");
+    h.state_mut().invoke(Cmd::Brush).unwrap();
+    let long = "exported to ~/game/art/creature.png and 3 more files beside it (note: the scene places the timeline's origin on the node's position; note: the sprite frames hold every clip with its own speed)";
+    h.state_mut().say(Tone::Error, "the first thing went wrong");
+    h.state_mut().say(Tone::Error, long);
+    h.run_steps(3);
+    let held: Vec<Rect> = ["the first thing went wrong", long]
+        .iter()
+        .filter_map(|text| h.query_by_label(text).map(|n| n.rect()))
+        .collect();
+    assert_eq!(held.len(), 2, "both errors are on the canvas");
+    assert!(
+        held.iter().all(|r| r.width() <= 380.0),
+        "a long message wraps instead of running across the window: {held:?}"
+    );
+    let before = h.state().scene.total_marks();
+    drag(&mut h, held[0].center(), held[0].center() + vec2(40.0, 0.0));
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.total_marks(),
+        before,
+        "a press on an error message paints nothing"
+    );
+    h.state_mut().invoke(Cmd::MessageLog).unwrap();
+    h.run_steps(4);
+    let windows: Vec<(egui::LayerId, Rect)> = h.ctx.memory(|m| {
+        m.layer_ids()
+            .filter(|l| l.order == egui::Order::Middle && m.areas().is_visible(l))
+            .filter_map(|l| m.area_rect(l.id).map(|r| (l, r)))
+            .collect()
+    });
+    let covered: Vec<(egui::Pos2, Option<egui::LayerId>, egui::LayerId)> = held
+        .iter()
+        .flat_map(|r| {
+            [
+                r.left_top() + vec2(8.0, 8.0),
+                r.center(),
+                r.right_bottom() - vec2(8.0, 8.0),
+            ]
+        })
+        .filter_map(|p| {
+            windows
+                .iter()
+                .rev()
+                .find(|(_, r)| r.contains(p))
+                .map(|(l, _)| (p, h.ctx.layer_id_at(p), *l))
+        })
+        .collect();
+    assert!(
+        !covered.is_empty(),
+        "the message log opens over the messages in this window"
+    );
+    assert!(
+        covered.iter().all(|(_, at, window)| *at == Some(*window)),
+        "where a window lies over a message, the window is on top: {covered:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}

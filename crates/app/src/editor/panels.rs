@@ -158,7 +158,10 @@ impl Editor {
         }
         let panels = ms(start);
         let drawing = Instant::now();
-        egui::CentralPanel::no_frame().show(ui, |ui| self.check(|e| e.canvas(ui)));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.check(|e| e.canvas(ui));
+            self.toasts(ui);
+        });
         lock(&self.stats).canvas_ms.push(ms(drawing) as f32);
         let after = Instant::now();
         self.windows(&ctx);
@@ -937,7 +940,6 @@ impl Editor {
             (above - 380.0).max(screen.top() + 16.0),
         ));
         self.palette_window(ctx);
-        self.toasts(ctx);
         self.upright_chip(ctx);
         if self.settings.layout.numbers && self.settings.developer {
             let mut open = true;
@@ -1249,37 +1251,46 @@ impl Editor {
         });
     }
 
-    fn toasts(&mut self, ctx: &egui::Context) {
-        let now = Instant::now();
-        let screen = ctx.content_rect();
-        let shown: Vec<Message> = self.messages.toasts(now).into_iter().cloned().collect();
+    fn toasts(&mut self, ui: &mut egui::Ui) {
+        const WIDTH: f32 = 380.0;
+        let shown: Vec<Message> = self.messages.toasts(Instant::now()).into_iter().cloned().collect();
+        let canvas = self.canvas_rect;
+        self.held_messages.clear();
+        if shown.is_empty() || canvas.width() <= 0.0 || canvas.height() <= 0.0 {
+            return;
+        }
         let mut dismiss = None;
-        let canvas = Some(self.canvas_rect).filter(|r| r.width() > 0.0 && r.height() > 0.0);
-        let left = canvas.map_or(screen.left(), |r| r.left()) + 12.0;
-        let mut bottom = canvas.map_or(screen.bottom() - layout::STATUS, |r| r.bottom()) - 12.0;
-        shown.iter().rev().for_each(|m| {
-            let (pos, pivot) = (egui::pos2(left, bottom), egui::Align2::LEFT_BOTTOM);
-            bottom -= 40.0;
-            let sticky = m.tone == Tone::Error;
-            egui::Area::new(Id::unique(("toast", m.id)))
-                .order(egui::Order::Tooltip)
-                .pivot(pivot)
-                .fixed_pos(pos)
-                .interactable(sticky)
-                .constrain(true)
-                .show(ctx, |ui| {
+        let mut held = Vec::new();
+        let room = canvas.shrink(12.0);
+        let stack = egui::UiBuilder::new()
+            .max_rect(room)
+            .layout(egui::Layout::bottom_up(egui::Align::Min));
+        ui.scope_builder(stack, |ui| {
+            ui.set_clip_rect(canvas);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            shown.iter().rev().for_each(|m| {
+                let sticky = m.tone == Tone::Error;
+                let sense = match sticky {
+                    true => Sense::click_and_drag(),
+                    false => Sense::hover(),
+                };
+                let toast = ui.scope_builder(egui::UiBuilder::new().id_salt(("toast", m.id)).sense(sense), |ui| {
                     egui::Frame::popup(ui.style())
                         .fill(Color32::from_gray(30))
                         .stroke(egui::Stroke::new(1.0, colour_of(m.tone)))
                         .show(ui, |ui| {
-                            ui.set_max_width(380.0);
+                            ui.set_max_width(WIDTH);
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(icon_of(m.tone))
                                         .color(colour_of(m.tone))
                                         .size(theme::ICON),
                                 );
-                                ui.label(&m.text);
+                                let words = WIDTH - theme::ICON - if sticky { theme::TARGET + 12.0 } else { 6.0 };
+                                ui.scope(|ui| {
+                                    ui.set_max_width(words);
+                                    ui.add(egui::Label::new(&m.text).wrap().selectable(false));
+                                });
                                 if sticky
                                     && ui
                                         .add(
@@ -1293,7 +1304,12 @@ impl Editor {
                             });
                         });
                 });
+                if sticky {
+                    held.push(toast.response.rect);
+                }
+            });
         });
+        self.held_messages = held;
         if let Some(id) = dismiss {
             self.messages.dismiss(id);
         }
