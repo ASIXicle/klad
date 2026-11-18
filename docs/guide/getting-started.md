@@ -1,4 +1,4 @@
-_Last updated: 2026-11-17 09:25_
+_Last updated: 2026-11-18 11:47_
 
 # Getting started
 
@@ -31,7 +31,7 @@ Every stroke stays editable like this, hours later too: see [Changing strokes](s
 
 ## Find your way around
 
-- **cmd K** finds any command: type a few letters of what you want to do.
+- **cmd K** finds any command: type a word for what you want to do.
 - **?** lists every key.
 - Hold **space** and drag to pan, pinch or hold **cmd** and scroll to zoom, and press **F** to see the whole canvas.
 - **R** and **shift R** turn the view, and so does a two-finger twist (hold **shift** for steps of 15 degrees). Click **upright** at the top of the canvas, or press **alt R**, to put it back.

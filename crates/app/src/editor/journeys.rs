@@ -3656,12 +3656,7 @@ fn someone_looks_for_help_and_finds_their_way_back() {
         "the drawing opens again from the recent row",
     );
 
-    j.finish(&[
-        "deselect-in-the-finder-does-not-delete",
-        "hidden-panels-leave-a-way-back-in-sight",
-        "the-finder-knows-the-words-people-bring",
-        "the-key-list-shows-its-rows",
-    ]);
+    j.finish(&["hidden-panels-leave-a-way-back-in-sight", "the-key-list-shows-its-rows"]);
 }
 
 fn ring(cx: f32, cy: f32, rx: f32, ry: f32, gap: f32) -> Vec<(f32, f32, f32)> {

@@ -1333,7 +1333,7 @@ impl Editor {
                         .desired_width(f32::INFINITY),
                 )
                 .labelled_by(label.id)
-                .hint("type a few letters; arrows pick, Return runs, Esc closes");
+                .hint("type a word for what you want to do; arrows pick, Return runs, Esc closes");
             if !state.opened {
                 edit.request_focus();
                 state.opened = true;

@@ -1973,7 +1973,7 @@ impl Cmd {
                 G::Panels,
                 T::Press(const { &[cmd(Key::K)] }),
                 R::No,
-                "type a few letters of what you want to do",
+                "type a word for what you want to do",
             ),
             Cmd::Keys => spec(
                 "panel.keys",
@@ -3295,9 +3295,46 @@ fn squash(text: &str) -> String {
     text.to_lowercase().chars().filter(|c| *c != '-').collect()
 }
 
-fn subsequence(needle: &str, hay: &str) -> bool {
-    let mut rest = hay.chars();
-    needle.chars().all(|n| rest.any(|h| h == n))
+fn words(text: &str) -> Vec<String> {
+    squash(text)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| match w {
+            "color" => "colour".to_string(),
+            "colors" => "colours".to_string(),
+            _ => w.to_string(),
+        })
+        .collect()
+}
+
+fn in_order(wanted: &[String], hay: &[String]) -> bool {
+    let mut rest = hay.iter();
+    wanted.iter().all(|w| rest.any(|h| h.starts_with(w.as_str())))
+}
+
+pub fn other_names(cmd: Cmd) -> &'static [&'static str] {
+    match cmd {
+        Cmd::Deselect => &["deselect", "select none", "unselect"],
+        Cmd::Settings => &["preferences", "options"],
+        Cmd::Keys => &["shortcuts", "keyboard shortcuts", "hotkeys", "key bindings"],
+        Cmd::TurnLeft90 | Cmd::TurnRight90 => &["rotate the selection"],
+        Cmd::TurnLeft | Cmd::TurnRight => &["rotate the view", "rotate the canvas"],
+        Cmd::FlipH | Cmd::FlipV => &["mirror the selection"],
+        Cmd::TransformLayer => &["free transform", "scale the layer", "rotate the layer"],
+        Cmd::FirstSteps => &["help", "tutorial", "getting started"],
+        Cmd::Guides => &["help", "manual", "documentation"],
+        Cmd::InspectorPane => &["opacity", "transparency", "blend mode", "layer properties"],
+        Cmd::Eyedropper => &["eyedropper", "colour picker", "sample colour"],
+        Cmd::Fill => &["bucket", "paint bucket", "flood fill"],
+        Cmd::Strokes => &["lasso"],
+        Cmd::TextTool => &["type"],
+        Cmd::Pan => &["hand"],
+        Cmd::Zoom => &["zoom in", "zoom out", "magnify"],
+        Cmd::AddMask => &["layer mask"],
+        Cmd::Duplicate => &["copy the frame"],
+        Cmd::Save => &["save as"],
+        _ => &[],
+    }
 }
 
 pub fn score(query: &str, cmd: Cmd) -> Option<u32> {
@@ -3305,9 +3342,12 @@ pub fn score(query: &str, cmd: Cmd) -> Option<u32> {
     if q.is_empty() {
         return Some(5);
     }
+    let wanted = words(&q);
+    if wanted.is_empty() {
+        return None;
+    }
     let s = cmd.spec();
     let name = squash(s.name);
-    let words: Vec<&str> = name.split_whitespace().collect();
     let key = s.key_label().to_lowercase();
     if name.starts_with(&q) {
         return Some(0);
@@ -3315,16 +3355,13 @@ pub fn score(query: &str, cmd: Cmd) -> Option<u32> {
     if key == q || key.split(" or ").any(|k| k == q) {
         return Some(1);
     }
-    if words.iter().any(|w| w.starts_with(&q)) {
+    if in_order(&wanted, &words(s.name)) || other_names(cmd).iter().any(|o| in_order(&wanted, &words(o))) {
         return Some(2);
     }
-    if name.contains(&q) {
-        return Some(3);
-    }
-    if subsequence(&q, &name) {
+    if in_order(&wanted, &words(s.about)) {
         return Some(4);
     }
-    squash(s.group.name()).contains(&q).then_some(6)
+    in_order(&wanted, &words(s.group.name())).then_some(6)
 }
 
 pub fn rank(query: &str, recent: &[Cmd]) -> Vec<Cmd> {
@@ -3657,6 +3694,25 @@ mod tests {
         assert_eq!(all[..2], [Cmd::ExportGodot, Cmd::Play]);
         assert_eq!(all.len(), Cmd::ALL.iter().collect::<BTreeSet<_>>().len());
         assert_eq!(rank("new", &[Cmd::NewClip])[0], Cmd::NewClip);
+    }
+
+    #[test]
+    fn the_finder_matches_whole_words_and_the_names_other_apps_use() {
+        let first = |q: &str| rank(q, &[]).first().copied();
+        assert_eq!(first("deselect"), Some(Cmd::Deselect));
+        assert_eq!(first("preferences"), Some(Cmd::Settings));
+        assert_eq!(first("shortcuts"), Some(Cmd::Keys));
+        assert_eq!(first("eyedropper"), Some(Cmd::Eyedropper));
+        assert_eq!(first("color picker"), Some(Cmd::Eyedropper));
+        assert_eq!(first("new layer"), Some(Cmd::NewPaintLayer));
+        assert_eq!(first("hide layer"), Some(Cmd::ToggleVisible));
+        assert_eq!(first("save as"), Some(Cmd::Save));
+        assert!(rank("rotate", &[]).contains(&Cmd::TurnLeft90));
+        assert!(rank("help", &[])[..2].contains(&Cmd::FirstSteps));
+        assert!(rank("png", &[]).contains(&Cmd::Export));
+        ["crop", "merge", "canvas size", "lete", "elect", "dslct"]
+            .into_iter()
+            .for_each(|q| assert_eq!(rank(q, &[]), Vec::<Cmd>::new(), "{q} finds nothing"));
     }
 
     #[test]
