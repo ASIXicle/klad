@@ -5961,6 +5961,90 @@ fn making_a_map_layer_is_one_step_to_undo_with_the_maps_it_turned_on() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
+#[test]
+fn the_editor_never_writes_over_what_was_changed_in_the_folder_a_moment_ago() {
+    let path = sample("stale");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    h.state_mut().watch = None;
+    let agent = |line: &str| {
+        Bundle::open(&path).unwrap().apply(&parse_lines(line).unwrap()).unwrap();
+    };
+    let on_disk = || Bundle::open(&path).map(|b| b.doc);
+    let lines = |doc: &Document| doc.layer("l6").map(|l| l.cels()[0].id.clone()).unwrap();
+    let marks = || {
+        let bundle = Bundle::open(&path).unwrap();
+        bundle.read_marks("l6", &lines(&bundle.doc)).unwrap().len()
+    };
+    let agrees = |h: &Harness<'static, Editor>, what: &str| {
+        let disk = on_disk().unwrap_or_else(|e| panic!("{what}: the drawing no longer opens: {e:#}"));
+        assert_eq!(
+            serde_json::to_value(&h.state().scene.bundle.doc).unwrap(),
+            serde_json::to_value(&disk).unwrap(),
+            "{what}: the editor and the folder hold the same drawing"
+        );
+    };
+    let before = marks();
+
+    agent(r#"{"op":"stroke","layer":"l6","path":"M10 10 L90 90","size":6}"#);
+    let (from, to) = (canvas_at(&h, 100.0, 300.0), canvas_at(&h, 300.0, 320.0));
+    drag(&mut h, from, to);
+    h.run_steps(4);
+    assert_eq!(
+        marks(),
+        before + 2,
+        "a stroke right after the agent's keeps both strokes"
+    );
+    agrees(&h, "a stroke");
+
+    agent(r#"{"op":"add","layer":{"kind":"paint","name":"from the agent","cels":[{"frame":0}]}}"#);
+    h.state_mut().invoke(Cmd::NewVectorLayer).unwrap();
+    h.run_steps(3);
+    let doc = on_disk().unwrap();
+    assert!(
+        doc.find_layer("from the agent").is_ok()
+            && doc.all_layers().len() == h.state().scene.bundle.doc.all_layers().len(),
+        "a new layer right after the agent's keeps both layers"
+    );
+    agrees(&h, "a new layer");
+
+    let count = on_disk().unwrap().all_layers().len();
+    agent(r#"{"op":"rm","id":"l2"}"#);
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    let doc = on_disk().unwrap_or_else(|e| panic!("an undo right after the agent removed a layer: {e:#}"));
+    assert_eq!(
+        doc.all_layers().len(),
+        count,
+        "the undo takes back the agent's step, once"
+    );
+    agrees(&h, "an undo");
+
+    agent(r#"{"op":"stroke","layer":"l6","path":"M20 10 L90 60","size":6}"#);
+    let address = klad_core::markedit::address(&lines(&h.state().scene.bundle.doc), 1);
+    h.state_mut()
+        .apply(parse_lines(&format!(r#"{{"op":"transform","ids":["{address}"],"x":5}}"#)).unwrap())
+        .unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        marks(),
+        before + 3,
+        "a change right after the agent's stroke keeps that stroke"
+    );
+    agrees(&h, "a change of a stroke");
+
+    agent(r#"{"op":"set","id":"l5","name":"renamed by the agent"}"#);
+    h.state_mut().invoke(Cmd::NewClip).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        on_disk().unwrap().layer("l5").unwrap().name,
+        "renamed by the agent",
+        "a timeline change right after the agent's rename keeps the name"
+    );
+    agrees(&h, "a new clip");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 fn text_shows(doc: &klad_core::doc::Document, id: &str) -> Option<bool> {
     match doc.item(id) {
         Some(klad_core::doc::Item::Node(_, _, n)) => Some(n.visible),

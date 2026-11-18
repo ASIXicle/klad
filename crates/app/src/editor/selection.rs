@@ -292,7 +292,7 @@ impl Editor {
                         })
                     })
                     .collect::<Result<Vec<Op>>>()?;
-                let applied = self.scene.apply_with(&ops, &self.brushes);
+                let applied = self.write(&ops);
                 match applied {
                     Ok((dirty, applied)) => {
                         self.dirty.extend(dirty);

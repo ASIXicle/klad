@@ -217,12 +217,10 @@ fn agent(h: &Harness<'static, Editor>, kind: u8) -> Option<String> {
         3 => (doc.layers.len() > 1)
             .then(|| ed.scene.active_id().map(|id| format!(r#"{{"op":"rm","id":"{id}"}}"#)))
             .flatten(),
-        _ => doc.layers.first().map(|l| {
-            format!(
-                r#"{{"op":"set","id":"{}","props":{{"name":"renamed by the agent"}}}}"#,
-                l.id
-            )
-        }),
+        _ => doc
+            .layers
+            .first()
+            .map(|l| format!(r#"{{"op":"set","id":"{}","name":"renamed by the agent"}}"#, l.id)),
     }
 }
 

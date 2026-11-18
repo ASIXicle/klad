@@ -214,7 +214,7 @@ impl Editor {
                 place: home.place(frame),
             }))
             .collect();
-        let (dirty, applied) = match self.scene.apply_with(&ops, &self.brushes) {
+        let (dirty, applied) = match self.write(&ops) {
             Ok(done) => done,
             Err(e) => {
                 self.say(Tone::Refused, format!("could not paste here: {e:#}"));
@@ -334,7 +334,7 @@ impl Editor {
             _ => return Ok(()),
         };
         let shapes = self.shapes();
-        let (dirty, applied) = match self.scene.apply_with(&ops, &self.brushes) {
+        let (dirty, applied) = match self.write(&ops) {
             Ok(done) => done,
             Err(e) => {
                 self.say(Tone::Refused, format!("could not move it to a new layer: {e:#}"));
@@ -441,7 +441,7 @@ impl Editor {
         let frame = self.scene.frame;
         let start = Instant::now();
         let ops: Vec<Op> = targets.iter().flat_map(|(p, to)| paste_ops(p, to)).collect();
-        let (dirty, applied) = match self.scene.apply_with(&ops, &self.brushes) {
+        let (dirty, applied) = match self.write(&ops) {
             Ok(done) => done,
             Err(e) => {
                 self.say(Tone::Refused, format!("could not {word} here: {e:#}"));

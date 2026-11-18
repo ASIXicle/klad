@@ -824,7 +824,7 @@ impl Editor {
             return Ok(None);
         }
         let start = Instant::now();
-        match self.scene.apply_with(&ops, &self.brushes) {
+        match self.write(&ops) {
             Ok((dirty, applied)) => {
                 self.dirty.extend(dirty);
                 self.forget_missing_selection();

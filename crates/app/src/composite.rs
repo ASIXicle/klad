@@ -1713,6 +1713,7 @@ impl Scene {
         blend: StrokeBlend,
     ) -> Result<Vec<usize>> {
         self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let cel = self.ensure_active_cel()?;
         let raster = self
             .rasters
@@ -1727,6 +1728,7 @@ impl Scene {
 
     pub fn commit_fill(&mut self, fill: Fill, brushes: &BrushSet) -> Result<Vec<usize>> {
         self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let cel = self.ensure_active_cel()?;
         let raster = self
             .rasters
@@ -1797,6 +1799,7 @@ impl Scene {
         brushes: &BrushSet,
     ) -> Result<Option<(String, Vec<usize>)>> {
         self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let touched = klad_core::history::peek(&self.bundle, stack)?
             .and_then(|(_, patch)| patch)
             .and_then(|patch| patch.touched_cels(&self.bundle.doc));
@@ -2332,6 +2335,7 @@ impl Scene {
 
     pub fn apply_with(&mut self, ops: &[Op], brushes: &BrushSet) -> Result<(Vec<usize>, Applied)> {
         self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let old = self.bundle.doc.clone();
         let applied = self.bundle.apply_as(ops, "editor")?;
         self.bundle.stamp("editor")?;
@@ -2379,6 +2383,7 @@ impl Scene {
         if self.end_previews()? {
             return self.apply(ops, brushes);
         }
+        self.bundle.ensure_unchanged()?;
         let old = self.bundle.doc.clone();
         self.bundle.apply_as(ops, "editor")?;
         self.bundle.stamp("editor")?;
@@ -3169,8 +3174,8 @@ mod tests {
     #[test]
     fn a_lean_scene_keeps_only_the_active_pixels_and_shows_and_edits_the_same() {
         let brushes = BrushSet::presets();
-        let dir = layered("lean");
-        let mut full = Scene::open(&dir).unwrap();
+        let (dir, beside) = (layered("lean"), layered("lean-beside"));
+        let mut full = Scene::open(&beside).unwrap();
         let mut lean = Scene::open_lazy(&dir).unwrap();
         lean.lean = true;
         catch_up(&mut lean, &brushes);
@@ -3197,12 +3202,14 @@ mod tests {
         catch_up(&mut lean, &brushes);
         assert_eq!(lean.rasters.len(), 1);
         assert_eq!(shown(&lean), shown(&full));
-        let mut outside = Bundle::open(&dir).unwrap();
-        outside
-            .apply(&ops(
-                r#"{"op":"stroke","layer":"p3","path":"M10 380 L590 20","size":20}"#,
-            ))
-            .unwrap();
+        [&dir, &beside].into_iter().for_each(|folder| {
+            Bundle::open(folder)
+                .unwrap()
+                .apply(&ops(
+                    r#"{"op":"stroke","layer":"p3","path":"M10 380 L590 20","size":20}"#,
+                ))
+                .unwrap();
+        });
         full.reload(&brushes).unwrap();
         lean.reload(&brushes).unwrap();
         assert!(
@@ -3213,6 +3220,7 @@ mod tests {
         assert_eq!(shown(&lean), shown(&full));
         assert_eq!(lean.cels["c3"].marks().len(), full.cels["c3"].marks().len());
         fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&beside).unwrap();
     }
 
     #[test]
@@ -3527,6 +3535,67 @@ mod tests {
         agrees(&scene);
         let redone = scene.step(klad_core::history::Stack::Redo, &brushes).unwrap().unwrap();
         assert_eq!(redone.1.len(), scene.all_tiles().len());
+        agrees(&scene);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_written_over_a_change_made_in_the_folder_meanwhile() {
+        let brushes = BrushSet::presets();
+        let dir = bundle("changed-meanwhile", Blend::Normal);
+        let mut scene = Scene::open(&dir).unwrap();
+        scene.set_active(vec![1, 0]).unwrap();
+        let rename =
+            |to: &str| klad_core::ops::parse_lines(&format!(r#"{{"op":"set","id":"b","name":"{to}"}}"#)).unwrap();
+        let changed = |e: anyhow::Error| e.downcast_ref::<klad_core::bundle::Changed>().is_some();
+        scene.apply(&rename("first"), &brushes).unwrap();
+        Bundle::open(&dir)
+            .unwrap()
+            .apply(&klad_core::ops::parse_lines(r#"{"op":"rm","id":"v"}"#).unwrap())
+            .unwrap();
+        assert!(scene.apply(&rename("second"), &brushes).is_err_and(changed));
+        assert!(
+            scene
+                .step(klad_core::history::Stack::Undo, &brushes)
+                .is_err_and(changed)
+        );
+        let raster = Raster::new(600, 300);
+        assert!(
+            scene
+                .apply_rendered(&rename("third"), ("cv".into(), 0, raster), &brushes)
+                .is_err_and(changed)
+        );
+        let seed = Seed {
+            x: 100.0,
+            y: 100.0,
+            tolerance: 0.1,
+            gap: 0.0,
+            expand: 0.0,
+        };
+        let reference = scene.fill_reference(&FillRef::Layer("a".into()), &brushes).unwrap();
+        let fill = Fill::new(
+            scene.next_mark_id(),
+            [0.9, 0.7, 0.2, 1.0],
+            FillSource::Seed {
+                seed,
+                reference: FillRef::Layer("a".into()),
+            },
+            klad_brush::flood(&reference, &seed),
+        );
+        assert!(scene.commit_fill(fill, &brushes).is_err_and(changed));
+        let disk = Bundle::open(&dir).unwrap().doc;
+        assert!(disk.layer("v").is_none(), "the change made meanwhile is still there");
+        assert_eq!(
+            disk.layer("b").unwrap().name,
+            "first",
+            "and nothing of ours was written over it"
+        );
+        scene.reload(&brushes).unwrap();
+        scene.apply(&rename("second"), &brushes).unwrap();
+        let undone = scene.step(klad_core::history::Stack::Undo, &brushes).unwrap().unwrap();
+        assert!(undone.0.contains("set"), "{}", undone.0);
+        let disk = Bundle::open(&dir).unwrap().doc;
+        assert!(disk.layer("v").is_none() && disk.layer("b").unwrap().name == "first");
         agrees(&scene);
         fs::remove_dir_all(&dir).unwrap();
     }

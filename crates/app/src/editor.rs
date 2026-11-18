@@ -1141,6 +1141,13 @@ impl Editor {
     }
 
     pub(crate) fn failed(&mut self, e: anyhow::Error) {
+        if e.downcast_ref::<klad_core::bundle::Changed>().is_some() {
+            self.say(
+                Tone::Refused,
+                "the drawing was changed from outside at that very moment, so nothing was done: do it again",
+            );
+            return;
+        }
         match crate::report::is_bug(&e) {
             true => self.say(Tone::Error, crate::report::bug_message(&e)),
             false => self.error(e),
@@ -1222,13 +1229,7 @@ impl Editor {
             self.external.get_or_insert(first);
             self.pins = notes::read(&self.scene.bundle);
         }
-        let committing = self.path_commit.is_some();
-        if self.live.is_some()
-            || self.drag.is_some()
-            || self.point_drag.is_some()
-            || committing
-            || self.external.is_none()
-        {
+        if self.in_the_middle() || self.external.is_none() {
             return Ok(());
         }
         if !self.scene.bundle.changed_on_disk() {
@@ -1236,6 +1237,29 @@ impl Editor {
             return Ok(());
         }
         self.reload()
+    }
+
+    fn in_the_middle(&self) -> bool {
+        self.live.is_some() || self.drag.is_some() || self.point_drag.is_some() || self.path_commit.is_some()
+    }
+
+    pub(super) fn follow_the_folder_between_acts(&mut self) -> Result<()> {
+        match self.in_the_middle() {
+            true => Ok(()),
+            false => self.follow_the_folder(),
+        }
+    }
+
+    pub(super) fn follow_the_folder(&mut self) -> Result<()> {
+        match self.scene.bundle.changed_on_disk() {
+            true => self.reload(),
+            false => Ok(()),
+        }
+    }
+
+    pub(super) fn write(&mut self, ops: &[Op]) -> Result<(Vec<usize>, klad_core::ops::Applied)> {
+        self.follow_the_folder()?;
+        self.scene.apply_with(ops, &self.brushes)
     }
 
     fn reload(&mut self) -> Result<()> {
@@ -1352,7 +1376,7 @@ impl Editor {
         }
         self.end_look_preview()?;
         let start = Instant::now();
-        let dirty = self.scene.apply(&ops, &self.brushes)?;
+        let (dirty, _) = self.write(&ops)?;
         self.measure(
             "edit",
             format!("edit applied, {} tiles refreshed in {:.0} ms", dirty.len(), ms(start)),
@@ -1375,6 +1399,7 @@ impl Editor {
         if self.live.is_some() || self.drag.is_some() || self.point_drag.is_some() || self.path_commit.is_some() {
             return Ok(());
         }
+        self.follow_the_folder()?;
         let start = Instant::now();
         let word = if stack == Stack::Undo { "undid" } else { "redid" };
         match self.scene.step(stack, &self.brushes)? {
@@ -3075,10 +3100,14 @@ impl Editor {
             return Ok(());
         };
         let start = Instant::now();
+        let stale = self.scene.bundle.changed_on_disk();
+        self.follow_the_folder()?;
         let dirty = match result {
-            Ok((hash, raster)) => self
-                .scene
-                .apply_rendered(&commit.ops, (commit.cel, hash, raster), &self.brushes)?,
+            Ok((hash, raster)) if !stale => {
+                self.scene
+                    .apply_rendered(&commit.ops, (commit.cel, hash, raster), &self.brushes)?
+            }
+            Ok(_) => self.scene.apply(&commit.ops, &self.brushes)?,
             Err(e) => {
                 self.failed(e.context("the edited path could not be drawn"));
                 self.scene.apply(&commit.ops, &self.brushes)?
@@ -3456,9 +3485,7 @@ impl Editor {
             }
         }
         let ended = ms(start);
-        if self.external.is_some() {
-            self.reload()?;
-        }
+        self.follow_the_folder()?;
         if self.scene.bundle.embed_brush(&live.stroke.brush, &live.brush.def)? {
             self.embedded.insert(live.stroke.brush.clone(), live.brush.def.clone());
         }
@@ -3734,9 +3761,7 @@ impl Editor {
             );
             return Ok(());
         }
-        if self.external.is_some() {
-            self.reload()?;
-        }
+        self.follow_the_folder()?;
         let pixels = coverage.pixels();
         let lassoed = matches!(source, FillSource::Polygon(_));
         let mut fill = Fill::new(self.scene.next_mark_id(), self.color, source, coverage);

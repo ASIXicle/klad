@@ -644,6 +644,7 @@ impl Editor {
     }
 
     pub(super) fn invoke(&mut self, cmd: Cmd) -> Result<()> {
+        self.follow_the_folder_between_acts()?;
         let cmd = self.for_focus(cmd);
         if let Some(reason) = self.can_run(cmd) {
             self.say(Tone::Refused, reason);
