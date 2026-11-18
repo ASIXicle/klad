@@ -375,7 +375,7 @@ fn the_first_ten_minutes_of_someone_who_draws() {
         "the drawing opens again from the recent list with everything in it",
     );
 
-    j.finish(&["cmd-x-cuts", "cmd-y-redoes", "layers-panel-shows-layers"]);
+    j.finish(&["cmd-x-cuts", "layers-panel-shows-layers"]);
 }
 
 fn spot(j: &Journey, pick: impl Fn(&klad_core::stroke::Mark) -> bool) -> Option<(u32, f32, f32)> {
@@ -1636,11 +1636,7 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
         "cmd Z brings the shape back as it was",
     );
 
-    j.finish(&[
-        "cmd-x-cuts",
-        "esc-closes-the-picker-first",
-        "picking-a-shape-goes-to-its-layer",
-    ]);
+    j.finish(&["cmd-x-cuts"]);
 }
 
 fn tree(j: &Journey) -> Vec<String> {
@@ -3935,7 +3931,7 @@ fn someone_sketches_inks_and_colours_a_picture() {
         "the eye hides the sketch layer",
     );
 
-    j.finish(&["a-fill-on-the-colour-layer-stops-at-the-ink-above"]);
+    j.finish(&[]);
 }
 
 fn view_of(j: &Journey) -> (f32, bool) {
@@ -5033,7 +5029,7 @@ fn someone_draws_a_small_sprite() {
         "the exported picture is the sprite enlarged by a whole number",
     );
 
-    j.finish(&["the-ramp-refusal-points-at-the-editor"]);
+    j.finish(&[]);
 }
 
 fn frame_now(j: &Journey) -> (u32, u32) {
@@ -5381,7 +5377,7 @@ fn someone_animates_a_sprite_and_exports_it() {
         "the bin removes the drawing on the frame and cmd Z brings it back",
     );
 
-    j.finish(&["a-new-clip-asks-its-name", "equals-and-minus-undo-each-other"]);
+    j.finish(&[]);
 }
 
 fn drawings(j: &Journey, layer: &str) -> Vec<(u32, Option<u32>, bool)> {

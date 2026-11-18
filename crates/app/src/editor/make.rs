@@ -113,6 +113,13 @@ impl Editor {
     }
 
     pub(super) fn new_vector_layer(&self, name: &str, frame: u32) -> Home {
+        let doc = &self.scene.bundle.doc;
+        let names: Vec<String> = doc.all_layers().iter().map(|l| l.name.clone()).collect();
+        let name = std::iter::once(name.to_string())
+            .chain((2..).map(|n| format!("{name} {n}")))
+            .find(|n| !names.contains(n))
+            .unwrap_or_else(|| name.to_string());
+        let name = name.as_str();
         let taken = self.scene.bundle.doc.ids();
         let layer = (1..)
             .map(|n| format!("l{n}"))

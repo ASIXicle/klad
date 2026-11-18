@@ -108,6 +108,7 @@ pub(super) struct Timeline {
     cache_rev: u64,
     pub clip: Option<String>,
     pub clip_name: (String, String),
+    pub name_clip: bool,
     pub clip_fps: u32,
     pub godot: (String, String),
     pub span: Option<Span>,
@@ -141,6 +142,7 @@ impl Default for Timeline {
             cache_rev: u64::MAX,
             clip: None,
             clip_name: (String::new(), String::new()),
+            name_clip: false,
             clip_fps: 0,
             godot: (String::new(), String::new()),
             span: None,
@@ -1098,7 +1100,7 @@ impl Editor {
         let reached_the_end = doc
             .layer(&layer)
             .and_then(|l| l.cels().last())
-            .is_some_and(|last| last.hold.is_some_and(|h| last.frame + h == frames));
+            .is_some_and(|last| last.hold.is_none_or(|h| last.frame + h == frames));
         let ops = match open {
             true if cells::free_at_the_end(doc) => vec![shorter(frames)],
             true => vec![Op::Set {

@@ -224,6 +224,11 @@ enum Command {
         sketch: bool,
         #[arg(
             long,
+            help = "Start with a palette of eight colour ramps of four (grey, red, orange, yellow, green, blue, purple, skin), the one the editor gives a new pixel drawing"
+        )]
+        palette: bool,
+        #[arg(
+            long,
             value_name = "WxH",
             help = "A pixel art drawing of that many pixels, for example 64x64: its layers are pixel layers"
         )]
@@ -2852,6 +2857,7 @@ fn run() -> Result<()> {
             fps,
             frames,
             sketch,
+            palette,
             pixel,
             wrap,
             tile,
@@ -2868,6 +2874,7 @@ fn run() -> Result<()> {
                     frames,
                     sketch,
                     pixel: size.is_some(),
+                    palette,
                 },
             )?;
             let cut = tile.as_deref().map(tile_size).transpose()?;

@@ -330,7 +330,7 @@ struct FillTool {
 impl Default for FillTool {
     fn default() -> Self {
         Self {
-            reference: FillRef::This,
+            reference: FillRef::All,
             tolerance: fill::TOLERANCE,
             gap: 4.0,
             expand: fill::EXPAND,
@@ -1113,12 +1113,17 @@ impl Editor {
             frames,
         };
         editor.use_defaults();
-        editor.heard_seq = Some(
-            klad_core::history::peek(&editor.scene.bundle, Stack::Undo)
-                .ok()
-                .flatten()
-                .map_or(0, |(entry, _)| entry.seq),
-        );
+        let newest = klad_core::history::peek(&editor.scene.bundle, Stack::Undo)
+            .ok()
+            .flatten();
+        editor.heard_seq = Some(newest.as_ref().map_or(0, |(entry, _)| entry.seq));
+        if newest.is_some_and(|(entry, _)| entry.author != "editor") {
+            editor.tool = Tool::Select;
+        }
+        if editor.scene.active_layer().is_none() && !editor.scene.bundle.doc.layers.is_empty() {
+            let top = editor.scene.bundle.doc.layers.len() - 1;
+            editor.scene.set_active_later(vec![top]);
+        }
         editor.request_canvas();
         editor.tend_canvas(timeline::OPEN_WAIT)?;
         Ok(editor)
@@ -1210,12 +1215,8 @@ impl Editor {
             return;
         }
         let text = format!("{e:#}");
-        if let Some(head) = text.strip_suffix(" (klad palette --ramp groups colours)") {
-            let words = self.refusal_words(head);
-            self.say(
-                Tone::Refused,
-                format!("{words} (the ramp button in the Colour panel makes one)"),
-            );
+        if text.contains(words::RAMP_CLI) {
+            self.say(Tone::Refused, self.refusal_words(&text));
             return;
         }
         match crate::report::is_bug(&e) {
@@ -1403,6 +1404,17 @@ impl Editor {
     }
 
     pub(super) fn select_shapes(&mut self, ids: Vec<String>) {
+        let doc = &self.scene.bundle.doc;
+        let home = ids.last().and_then(|id| match doc.item(id) {
+            Some(Item::Node(layer, _, _)) => match doc.locate(&layer.id) {
+                Some(Loc::Layer(path)) => Some(path),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some(path) = home.filter(|p| *p != self.scene.active && self.shifting.is_none()) {
+            let _ = self.activate(path);
+        }
         self.selection = ids.last().cloned();
         self.group = if ids.len() > 1 { ids } else { Vec::new() };
         self.refresh_box();
@@ -2171,9 +2183,9 @@ impl Editor {
             (Some(i), true) => hits.get((i + 1) % hits.len().max(1)),
             _ => hits.first(),
         };
-        self.selection = next.map(|(n, _)| n.clone());
+        let picked: Vec<String> = next.map(|(n, _)| n.clone()).into_iter().collect();
         self.group.clear();
-        self.refresh_box();
+        self.select_shapes(picked);
         Ok(())
     }
 
@@ -3824,7 +3836,7 @@ impl Editor {
             }
             Err(e) => {
                 let why = e.chain().last().map_or_else(|| format!("{e:#}"), ToString::to_string);
-                self.say(Tone::Refused, why);
+                self.say(Tone::Refused, self.refusal_words(&why));
             }
         }
         Ok(())
@@ -5047,7 +5059,9 @@ impl Editor {
             .filter(|p| !p.ids.is_empty())
             .collect();
         if let Some(cel) = self.scene.active_cel().filter(|_| !ids.is_empty() || !more.is_empty()) {
-            self.tool = Tool::Strokes;
+            if self.tool != Tool::Select {
+                self.tool = Tool::Strokes;
+            }
             self.picked = Some(Picked {
                 more,
                 ..Picked::whole(cel, ids)
@@ -6023,6 +6037,19 @@ impl Editor {
                         .text(format!("recorded {:.3}", curve.apply(raw))),
                 );
                 ui.label(egui::RichText::new(format!("heaviest press seen {peak:.3}")).color(crate::theme::WEAK));
+            });
+            ui.end_row();
+            prefs::row_label(ui, "Tilt");
+            let (tx, ty) = self.readout.tilt;
+            let lean = (tx * tx + ty * ty).sqrt().min(1.0);
+            ui.vertical(|ui| {
+                ui.add(egui::ProgressBar::new(lean).desired_width(280.0).text(format!("tilt {lean:.2}")));
+                ui.label(
+                    egui::RichText::new(
+                        "lean the pen while it touches: the bar follows when the pen sends tilt. The Pencil grows and lightens as it leans",
+                    )
+                    .color(crate::theme::WEAK),
+                );
             });
             ui.end_row();
             prefs::row_label(ui, "Lightest");

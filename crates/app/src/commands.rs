@@ -1093,7 +1093,7 @@ impl Cmd {
                 "redo",
                 icon::REDO,
                 G::Edit,
-                T::Press(const { &[keys(Key::Z, true, false, true)] }),
+                T::Press(const { &[keys(Key::Z, true, false, true), cmd(Key::Y)] }),
                 R::Yes,
                 "redo what was undone",
             ),
@@ -1651,7 +1651,7 @@ impl Cmd {
                 "first frame",
                 icon::PREVIOUS,
                 G::Frames,
-                T::Press(const { &[plain(Key::Home)] }),
+                T::Press(const { &[cmd(Key::ArrowLeft), plain(Key::Home)] }),
                 R::No,
                 "go to frame 0",
             ),
@@ -1660,7 +1660,7 @@ impl Cmd {
                 "last frame",
                 icon::NEXT,
                 G::Frames,
-                T::Press(const { &[plain(Key::End)] }),
+                T::Press(const { &[cmd(Key::ArrowRight), plain(Key::End)] }),
                 R::No,
                 "go to the timeline's last frame",
             ),
@@ -3743,7 +3743,7 @@ mod tests {
 
     #[test]
     fn keys_read_the_way_the_docs_write_them() {
-        assert_eq!(Cmd::Redo.spec().key_label(), "shift cmd Z");
+        assert_eq!(Cmd::Redo.spec().key_label(), "shift cmd Z or cmd Y");
         assert_eq!(Cmd::NextDrawing.spec().key_label(), "alt .");
         assert_eq!(Cmd::Delete.spec().key_label(), "Delete or Backspace");
         assert_eq!(Cmd::Play.spec().key_label(), "Return");

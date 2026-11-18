@@ -380,6 +380,7 @@ const KNOWN: [Known; 14] = [
             "locked vector",
             "hidden paint",
             "link",
+            "nothing active",
         ],
         gestures: &[Gesture::Drag, Gesture::Loop],
         places: NOWHERE,
@@ -914,6 +915,7 @@ impl Desk {
 
     fn labels(&self, keep: impl Fn(egui::Rect, Role) -> bool) -> Vec<String> {
         let said: BTreeSet<String> = self.ed().messages.log().map(|m| m.text.clone()).collect();
+        let canvas = self.ed().canvas_rect;
         let mut found: Vec<String> = self
             .h
             .query_all(By::new().predicate(|n| written(n).is_some()))
@@ -921,7 +923,8 @@ impl Desk {
             .filter_map(|n| {
                 let node = n.accesskit_node();
                 let text = written(&node)?;
-                (!said.contains(&text)).then(|| match node.role() {
+                let message = said.contains(&text) && n.rect().top() >= canvas.top();
+                (!message).then(|| match node.role() {
                     Role::Label => text,
                     role => format!("{role:?} {text}"),
                 })
@@ -1732,10 +1735,8 @@ const fn calm(cmd: &'static str, kind: Kind, why: &'static str) -> Calm {
 
 const IN_HAND: &str = "the tool is in hand already";
 const THERE: &str = "the playhead is on that frame already";
-const NO_DRAWING: &str = "the layer has no other drawing to go to, and nothing says so";
-const NO_WIDTH: &str = "pixel marks have no width to change, and nothing says so";
 
-const CALM: [Calm; 23] = [
+const CALM: [Calm; 20] = [
     calm("tool.brush", Kind::Idle, IN_HAND),
     calm("tool.strokes", Kind::Idle, IN_HAND),
     calm("tool.shapes", Kind::Idle, IN_HAND),
@@ -1754,30 +1755,19 @@ const CALM: [Calm; 23] = [
     calm("frame.next", Kind::Idle, THERE),
     calm("frame.last", Kind::Idle, THERE),
     calm("expose.twos", Kind::Idle, "new drawings are on twos already"),
+    calm("expose.ones", Kind::Idle, "new drawings are on ones already"),
     calm("view.upright", Kind::Idle, "the view is upright already"),
     calm("view.fit", Kind::Idle, "the canvas fits the window already"),
     calm("brush.smaller", Kind::Idle, "the pencil is one pixel already"),
     calm("numbers.reset", Kind::Idle, "the numbers are not on screen"),
-    calm("frame.next-drawing", Kind::Dead, NO_DRAWING),
-    calm("frame.previous-drawing", Kind::Dead, NO_DRAWING),
     calm(
         "span.redo",
         Kind::Dead,
         "no in-betweens are selected to make again, and nothing says so",
     ),
-    calm("edit.thinner", Kind::Dead, NO_WIDTH),
-    calm("edit.thicker", Kind::Dead, NO_WIDTH),
 ];
 
-const FAILS: [(&str, &str); 7] = [
-    ("a pixel layer", "colour.gaps"),
-    ("pixels selected", "colour.gaps"),
-    ("a mask", "colour.gaps"),
-    ("an empty frame", "colour.gaps"),
-    ("an empty frame", "colour.refill"),
-    ("frames selected", "colour.fill-like"),
-    ("a mask", "layer.clip"),
-];
+const FAILS: [(&str, &str); 0] = [];
 
 const DEAF: [&str; 2] = ["typing a text", "settings open"];
 

@@ -55,6 +55,7 @@ pub(super) fn editor(path: &Path) -> Editor {
     let mut editor = Editor::open(egui::Context::default(), path).unwrap();
     editor.settings = Settings::default();
     editor.settings_path = None;
+    editor.tool = Tool::Brush;
     editor
 }
 
@@ -3328,7 +3329,7 @@ fn a_shape_drawn_on_a_paint_layer_gets_a_vector_layer_of_its_own() {
     );
     assert_eq!(
         (made.kind(), made.name.as_str(), made.cels()[0].nodes.len()),
-        (klad_core::doc::Kind::Vector, "shapes", 1)
+        (klad_core::doc::Kind::Vector, "shapes 2", 1)
     );
     assert!(
         said(&h).contains("rectangle added on a new vector layer above colour"),
@@ -8440,7 +8441,7 @@ fn with_a_mask_picked_the_pen_the_shape_tool_and_the_text_tool_draw_on_a_new_lay
             above.name.clone()
         })
         .collect();
-    assert_eq!(made, ["paths", "shapes", "text"]);
+    assert_eq!(made, ["paths", "shapes 2", "text"]);
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -8848,4 +8849,51 @@ fn grouping_a_clipped_layer_away_from_its_base_says_so() {
         "{said:?}"
     );
     let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_drawing_the_agent_changed_last_opens_ready_to_pick_and_keys_a_laptop_has_reach_the_ends() {
+    let path = sample("opens-to-pick");
+    let mut bundle = Bundle::open(&path).unwrap();
+    bundle
+        .apply(&parse_lines(r#"{"op":"stroke","layer":"l6","path":"M40 300 L300 300","size":8}"#).unwrap())
+        .unwrap();
+    bundle.stamp("cli").unwrap();
+    let opened = Editor::open(egui::Context::default(), &path).unwrap();
+    assert_eq!(
+        opened.tool,
+        Tool::Select,
+        "the agent's drawing opens with select and move"
+    );
+    let mut h = harness(opened, vec2(1440.0, 1000.0));
+    h.state_mut().tool = Tool::Select;
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Select, "cmd A keeps select and move in hand");
+    h.state_mut().go_to(5).unwrap();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::ArrowLeft);
+    h.run_steps(2);
+    assert_eq!(h.state().scene.frame, 0, "cmd left goes to the first frame");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::ArrowRight);
+    h.run_steps(2);
+    assert_eq!(h.state().scene.frame, 23, "cmd right goes to the last frame");
+    let _ = std::fs::remove_dir_all(&path);
+
+    let shapes = std::env::temp_dir().join(format!("draw-ui-only-shapes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&shapes);
+    let mut doc = Document::new(256, 256);
+    doc.layers = vec![
+        Layer::vector("l1", "back", "c1", Vec::new()),
+        Layer::vector("l2", "front", "c2", Vec::new()),
+    ];
+    doc.next_id = 10;
+    Bundle::create(&shapes, doc).unwrap();
+    let ed = Editor::open(egui::Context::default(), &shapes).unwrap();
+    assert_eq!(
+        ed.scene.active_layer().map(|l| l.name.clone()).as_deref(),
+        Some("front"),
+        "a drawing of shapes opens with its top layer in hand"
+    );
+    let _ = std::fs::remove_dir_all(&shapes);
 }

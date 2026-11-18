@@ -1,4 +1,4 @@
-_Last updated: 2026-11-17 09:25_
+_Last updated: 2026-11-19 08:00_
 
 # Painting
 
@@ -16,7 +16,7 @@ An eraser stroke stays with the strokes it erased, like a mask that travels with
 
 ## Pick a brush and a colour
 
-Click a brush in the **Brush** pane: Inking pen, Pencil and Marker for lines, Oil, Loaded oil and the bristle brushes for paint. Hold **alt** and click the canvas to pick up a colour from it.
+Click a brush in the **Brush** pane: Inking pen, Pencil and Marker for lines, Oil, Loaded oil and the bristle brushes for paint. Lean the pen with the Pencil to shade: the line grows wider and lighter. Hold **alt** and click the canvas to pick up a colour from it.
 
 In the **Colour** pane, mix a colour on the wheel or with the sliders next to it. **HSV**, **HSL**, **RGB** and **Lab** above the sliders choose what they change: for the shadow of a colour, pick **Lab** and lower **L**.
 

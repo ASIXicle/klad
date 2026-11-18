@@ -1373,6 +1373,7 @@ impl Editor {
 
     pub(super) fn command_keys(&mut self, ui: &egui::Ui) -> Result<()> {
         let typing = self.text_edit.is_some();
+        let popup = egui::Popup::is_any_open(ui.ctx());
         if (ui.ctx().egui_wants_keyboard_input() || self.field_had_focus) && !typing {
             return Ok(());
         }
@@ -1386,6 +1387,7 @@ impl Editor {
             i.events
                 .iter()
                 .filter(|e| !typing || typing_passes(e))
+                .filter(|e| !(popup && matches!(e, egui::Event::Key { key: Key::Escape, .. })))
                 .filter_map(|e| match e {
                     egui::Event::Copy => Some((Some(Cmd::Copy), false, false)),
                     egui::Event::Paste(_) => Some((Some(Cmd::Paste), false, false)),

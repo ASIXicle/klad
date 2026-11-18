@@ -18,6 +18,9 @@ fn clip_base<'a>(layers: &'a [Layer], id: &str) -> Option<Option<&'a Layer>> {
     }
 }
 
+pub(super) const RAMP_CLI: &str = "(klad palette --ramp groups colours)";
+const RAMP_EDITOR: &str = "(the ramp button in the Colour panel makes one)";
+
 pub(super) fn clip_bases(doc: &Document) -> BTreeMap<String, Option<String>> {
     doc.all_layers()
         .iter()
@@ -109,7 +112,8 @@ impl Editor {
             Some(rest) => rest.split_once(": ").map_or(why, |(_, tail)| tail),
             None => why,
         };
-        self.plain(bare)
+        let bare = bare.replace(RAMP_CLI, RAMP_EDITOR);
+        self.plain(&bare)
     }
 
     pub(super) fn step_words(&self, summary: &str) -> String {

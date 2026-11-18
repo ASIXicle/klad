@@ -33,6 +33,18 @@
 - The bar of a selection sits above the turn knob when it goes above the selection, and its colour picker then opens upwards, away from the strokes; holding **shift** hides the bar, so a stroke under it can be added.
 - A clipped layer moved into a group without the layer it was clipped to says that it now shows something else or nothing.
 - With **V**, a press on a stroke of another layer switches to that layer and drags at once (it could be dropped with "still loading"); a loop that goes to another layer says which.
+- A drawing whose last change came from the agent opens with **V** (select and move) in hand, so a first click picks instead of painting; your own drawings keep the brush. A drawing of shape layers only opens with its top layer picked.
+- A click on a shape with **V** makes its layer the one in hand, as a click on a stroke does. **cmd A** with **V** keeps V in hand.
+- **Esc** with a colour picker open closes the picker only; a second Esc drops the selection.
+- New shape and text layers get names of their own: shapes, shapes 2, text 2.
+- **ctrl Y** (cmd Y on the Mac) redoes too.
+- The fill stops at the lines of every visible layer by default, so a first fill on a colour layer under the ink fills the shape, not the page.
+- A new pixel drawing starts with a palette of eight colour ramps (grey, red, orange, yellow, green, blue, purple, skin), four shades each, so the darker and lighter pencil work at once. From the command line: `klad new --pixel 64x64 --palette`.
+- **=** then **-** on the last drawing of a layer gives the timeline back its length.
+- A new clip opens its settings with the name selected, to type its name at once. Clip names above the frames are no longer cut at the top and bottom.
+- **cmd ←** and **cmd →** go to the first and the last frame (Home and End still do; a Mac laptop has neither).
+- In the start window a drawing with a transparent background shows its thumbnail on a checkerboard, as the canvas does.
+- The Pencil answers to the pen's tilt: it grows and lightens as the pen leans. Settings > Pen shows the tilt the pen sends.
 - `klad apply --steps` makes every line of a script an edit of its own, in order: each is a step in the history and shows in the open editor as it lands, so a drawing made by a script can be watched appearing mark by mark. `--delay 120` waits that many ms after each step, `{"pause":600}` on a line waits between two parts, and a line that is a list of ops is one step. A line that fails stops the run with the lines before it kept; `--from <line>` goes on from there.
 - The brush no longer tapers a stroke you draw by hand unless you ask for it: a click paints a dot at once and a line ends where you lift the pen or the mouse. For tapered ends set **taper in px** and **taper out px** under **more** in the brush bar. Brushes saved in a drawing and strokes painted from the command line keep their taper.
 - Keys follow what you are working in. Click a frame in the timeline and **cmd C**, **cmd V**, **cmd D**, **Delete** and **cmd A** copy, paste, repeat, delete and select frames (a blue line around the frames shows the timeline has the keys); press on the canvas and they act on strokes and shapes again. The keys that change timing (**=**, **-**, **I**, **shift I**, **alt left**, **alt right**) run only while the timeline has the keys and say so otherwise; the **Frame** menu runs them from anywhere.

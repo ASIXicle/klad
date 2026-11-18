@@ -641,6 +641,7 @@ mod tests {
                 width: 64,
                 height: 64,
                 pixel: true,
+                palette: true,
                 ..Blank::default()
             },
             "cli",

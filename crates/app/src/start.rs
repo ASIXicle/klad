@@ -129,6 +129,7 @@ impl Start {
                 background: self.paper.then(|| format!("#{r:02x}{g:02x}{b:02x}")),
                 fps: self.fps,
                 pixel: true,
+                palette: true,
                 ..Blank::default()
             };
         }
@@ -546,10 +547,9 @@ impl Start {
             .rect(rect, 6.0, fill, look.bg_stroke, egui::StrokeKind::Inside);
         let picture = egui::Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(THUMB, THUMB));
         if let Some(texture) = there.then(|| self.thumb(ui.ctx(), key, bundle, png)).flatten() {
-            egui::Image::new(&texture).paint_at(
-                ui,
-                egui::Rect::from_center_size(picture.center(), fit(texture.size_vec2())),
-            );
+            let at = egui::Rect::from_center_size(picture.center(), fit(texture.size_vec2()));
+            checks(ui.painter(), at);
+            egui::Image::new(&texture).paint_at(ui, at);
         }
         let colour = match there {
             true => look.text_color(),
@@ -633,6 +633,24 @@ fn row(ui: &mut egui::Ui, salt: &str, cards: impl FnOnce(&mut egui::Ui)) {
                 cards(ui);
             });
             ui.add_space(14.0);
+        });
+}
+
+const CHECK: f32 = 8.0;
+
+fn checks(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(240));
+    let (cols, rows) = (
+        (rect.width() / CHECK).ceil() as usize,
+        (rect.height() / CHECK).ceil() as usize,
+    );
+    (0..rows)
+        .flat_map(|r| (0..cols).map(move |c| (r, c)))
+        .filter(|(r, c)| (r + c) % 2 == 1)
+        .for_each(|(r, c)| {
+            let min = rect.min + vec2(c as f32 * CHECK, r as f32 * CHECK);
+            let cell = egui::Rect::from_min_size(min, vec2(CHECK, CHECK)).intersect(rect);
+            painter.rect_filled(cell, 0.0, egui::Color32::from_gray(205));
         });
 }
 

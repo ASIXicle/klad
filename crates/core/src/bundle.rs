@@ -34,6 +34,7 @@ pub struct Blank {
     pub frames: u32,
     pub sketch: bool,
     pub pixel: bool,
+    pub palette: bool,
 }
 
 impl Default for Blank {
@@ -47,6 +48,7 @@ impl Default for Blank {
             frames: 1,
             sketch: false,
             pixel: false,
+            palette: false,
         }
     }
 }
@@ -442,6 +444,9 @@ impl Bundle {
                 }
             })
             .collect();
+        if blank.palette {
+            doc.palette = crate::palettes::starter()?;
+        }
         if blank.sketch {
             let (layer, cel) = (doc.alloc_id('l'), doc.alloc_id('c'));
             doc.layers.push(Layer::vector(&layer, "sketch", &cel, Vec::new()));

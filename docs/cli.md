@@ -240,6 +240,9 @@ Options:
       --sketch
           Add a vector layer named sketch on top, for blocking in shapes
 
+      --palette
+          Start with a palette of eight colour ramps of four (grey, red, orange, yellow, green, blue, purple, skin), the one the editor gives a new pixel drawing
+
       --pixel <WxH>
           A pixel art drawing of that many pixels, for example 64x64: its layers are pixel layers
 

@@ -160,13 +160,15 @@ impl Strip {
                     .map_or(String::new(), |f| format!(", {f} fps")),
                 if c.looping { ", loops" } else { ", once" }
             );
-            painter.with_clip_rect(bar.shrink(3.0)).text(
-                pos2(bar.left() + 6.0, bar.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                FontId::proportional(10.5),
-                Color32::from_gray(240),
-            );
+            painter
+                .with_clip_rect(bar.shrink2(egui::vec2(3.0, 0.0)).expand2(egui::vec2(0.0, 2.0)))
+                .text(
+                    pos2(bar.left() + 6.0, bar.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(10.5),
+                    Color32::from_gray(240),
+                );
         });
     }
 
@@ -213,6 +215,8 @@ impl Editor {
         if self.timeline_apply(vec![Op::Clip(ClipEdit::Add(clip))])?.is_some() {
             self.timeline.clip = Some(name);
             self.timeline.clip_name = (String::new(), String::new());
+            self.timeline.name_clip = true;
+            self.windows.clip = true;
         }
         Ok(())
     }
@@ -284,6 +288,10 @@ impl Editor {
                         .add(egui::TextEdit::singleline(&mut self.timeline.clip_name.1).desired_width(90.0))
                         .labelled_by(label.id)
                         .hint("the clip's name, which exports use for the animation; Return keeps it");
+                    if std::mem::take(&mut self.timeline.name_clip) {
+                        name.request_focus();
+                        crate::theme::select_all(ui.ctx(), name.id, &self.timeline.clip_name.1);
+                    }
                     let typed = self.timeline.clip_name.1.trim().to_string();
                     if name.lost_focus() && typed != clip.name && !typed.is_empty() {
                         ops.push(set(Some(typed.clone()), None, None));
