@@ -2870,11 +2870,7 @@ fn someone_exports_an_agents_animation_for_a_game() {
     );
     shut(&mut j, "Export image");
 
-    j.finish(&[
-        "a-failed-export-speaks-plainly",
-        "a-later-export-leaves-the-earlier-file",
-        "a-new-export-window-starts-with-all-frames",
-    ]);
+    j.finish(&["a-failed-export-speaks-plainly"]);
 }
 
 fn start_error(j: &Journey) -> String {

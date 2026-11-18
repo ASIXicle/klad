@@ -93,6 +93,7 @@ pub(super) struct Form {
     pub shaders: Vec<Effect>,
     pub godot: Godot,
     pub last: Option<Written>,
+    pub typed: Vec<(What, String, String)>,
 }
 
 impl Default for Form {
@@ -115,7 +116,30 @@ impl Default for Form {
             shaders: Vec::new(),
             godot: Godot::Sprite,
             last: None,
+            typed: Vec::new(),
         }
+    }
+}
+
+impl Form {
+    fn switch_to(&mut self, what: What) {
+        if what == self.what {
+            return;
+        }
+        let was = (
+            self.what,
+            std::mem::take(&mut self.name),
+            std::mem::take(&mut self.range),
+        );
+        self.typed.retain(|(kind, ..)| *kind != was.0);
+        self.typed.push(was);
+        let (name, range) = self.typed.iter().find(|(kind, ..)| *kind == what).map_or_else(
+            || (String::new(), Form::default().range),
+            |(_, n, r)| (n.clone(), r.clone()),
+        );
+        self.what = what;
+        self.name = name;
+        self.range = range;
     }
 }
 
@@ -267,7 +291,7 @@ pub(super) fn godot_written(out: &str, err: &str) -> String {
 impl Editor {
     pub(super) fn open_export(&mut self, what: What) {
         let again = self.windows.export && self.export.what == what;
-        self.export.what = what;
+        self.export.switch_to(what);
         self.windows.export = !again;
     }
 
@@ -843,5 +867,25 @@ mod tests {
         };
         assert_eq!(godot_extras(&godot).join(" "), "--occluders --shaders fog,occlusion");
         assert!(godot_extras(&Form::default()).is_empty());
+    }
+
+    #[test]
+    fn each_kind_of_export_keeps_its_own_name_and_frames_and_shares_the_folder() {
+        let mut form = Form {
+            folder: "game".into(),
+            name: "shadow".into(),
+            ..Form::default()
+        };
+        form.switch_to(What::Sheet);
+        assert_eq!((form.name.as_str(), form.range.as_str()), ("", "all"));
+        form.range = "walk".into();
+        form.switch_to(What::Frames);
+        assert_eq!((form.name.as_str(), form.range.as_str()), ("", "all"));
+        form.switch_to(What::Sheet);
+        assert_eq!((form.name.as_str(), form.range.as_str()), ("", "walk"));
+        form.switch_to(What::Image);
+        assert_eq!((form.name.as_str(), form.folder.as_str()), ("shadow", "game"));
+        form.switch_to(What::Image);
+        assert_eq!(form.name, "shadow");
     }
 }
