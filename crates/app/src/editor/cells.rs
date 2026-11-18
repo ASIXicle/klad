@@ -165,7 +165,10 @@ impl Editor {
         self.timeline.cells = Some(copied);
         self.say(
             Tone::Done,
-            format!("copied {drawings} cells of frames {from} to {to}: paste them at the playhead as copies or links"),
+            format!(
+                "copied {drawings} drawing{} of frames {from} to {to}: paste them at the playhead as copies or links",
+                if drawings == 1 { "" } else { "s" }
+            ),
         );
     }
 
@@ -178,8 +181,9 @@ impl Editor {
             self.say(
                 Tone::Done,
                 format!(
-                    "pasted {} cells at frame {} as {}",
+                    "pasted {} drawing{} at frame {} as {}",
                     cells.len(),
+                    if cells.len() == 1 { "" } else { "s" },
                     self.scene.frame,
                     if links { "links" } else { "copies" }
                 ),
@@ -282,7 +286,7 @@ impl Editor {
                 .hint("retime the selected frames: on ones, twos, threes, fit, reverse, ping-pong");
             })
             .response
-            .on_disabled_hover_text("select frames first: drag over cells, or shift click");
+            .on_disabled_hover_text("select frames first: drag over them in the timeline");
             self.command_button(ui, Cmd::Inbetween, Some("in-between"));
             self.command_button(ui, Cmd::RedoInbetweens, None);
             self.command_button(ui, Cmd::FillLike, None);

@@ -1176,6 +1176,10 @@ impl Scene {
             .map_or(&[], |d| d.marks())
     }
 
+    pub fn knows_marks(&self, cel: &str) -> bool {
+        self.cels.contains_key(cel)
+    }
+
     pub fn marks_of(&self, cel: &str) -> &[Mark] {
         self.cels.get(cel).map_or(&[], |d| d.marks())
     }

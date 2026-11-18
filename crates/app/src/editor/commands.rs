@@ -49,6 +49,27 @@ impl Editor {
         self.here().and_then(|(_, c)| c)
     }
 
+    fn carries_no_floods(&self) -> bool {
+        let Some(span) = self.timeline.span.as_ref() else {
+            return false;
+        };
+        let doc = &self.scene.bundle.doc;
+        let cel = span
+            .rows
+            .first()
+            .and_then(|layer| doc.layer(layer))
+            .and_then(|l| l.cel_at(span.from))
+            .map(|c| c.id.clone());
+        cel.filter(|c| self.scene.knows_marks(c)).is_some_and(|c| {
+            !self
+                .scene
+                .marks_of(&c)
+                .iter()
+                .filter_map(klad_core::stroke::Mark::as_fill)
+                .any(|f| matches!(f.source, klad_core::fill::FillSource::Seed { .. }))
+        })
+    }
+
     pub(super) fn active_paint(&self) -> bool {
         self.scene.active_layer().is_some_and(|l| l.kind() == LayerKind::Paint)
     }
@@ -122,7 +143,7 @@ impl Editor {
         let span = self.timeline.span.as_ref();
         let need_span = || {
             span.is_none()
-                .then(|| "select frames first: shift click or shift drag over cells".to_string())
+                .then(|| "select frames first: drag over them in the timeline".to_string())
         };
         let clip = self.current_clip();
         let need_clip = || {
@@ -133,6 +154,12 @@ impl Editor {
         let spanned = matches!(cmd, Cmd::Duplicate | Cmd::DeleteDrawing) && span.is_some();
         if let Some(locked) = layer.filter(|l| l.locked && ON_THE_DRAWING.contains(&cmd) && !spanned) {
             return Some(super::lock::Locked(vec![locked.name.clone()]).to_string());
+        }
+        if matches!(cmd, Cmd::SelectAll | Cmd::TransformLayer)
+            && self.selected().is_none()
+            && let Some(why) = self.take_target()
+        {
+            return Some(why);
         }
         if crate::commands::DEVELOPER.contains(&cmd) && !self.settings.developer {
             return Some(
@@ -190,7 +217,14 @@ impl Editor {
             },
             Cmd::SelectAll => (!self.active_paint() || self.scene.active_marks().is_empty())
                 .then(|| "the active layer has no strokes on this frame".to_string()),
+            Cmd::Thinner | Cmd::Thicker if self.scene.on_grid() => {
+                Some("pixel marks have no width to change: the pencil's size sets it for new ones".to_string())
+            }
             Cmd::Recolour | Cmd::Thinner | Cmd::Thicker => need_strokes().or(editing),
+            Cmd::NextDrawing => (!self.drawing_starts().iter().any(|f| *f > self.scene.frame))
+                .then(|| "no later drawing on the active layer".to_string()),
+            Cmd::PrevDrawing => (!self.drawing_starts().iter().any(|f| *f < self.scene.frame))
+                .then(|| "no earlier drawing on the active layer".to_string()),
             Cmd::ShadeLighter | Cmd::ShadeDarker => match self.scene.on_grid() {
                 true => need_strokes().or(editing),
                 false => {
@@ -316,6 +350,9 @@ impl Editor {
                 Some(_) => None,
                 None => Some("pick a rect or ellipse with A first".into()),
             },
+            Cmd::ToggleClip if self.scene.active_is_mask() => {
+                Some("a mask cannot be clipped: clip the layer it masks".to_string())
+            }
             Cmd::ToggleVisible | Cmd::ToggleLocked | Cmd::ToggleClip => layer.is_none().then(pick_layer).flatten(),
             Cmd::ToggleLockAlpha => match layer {
                 None => pick_layer(),
@@ -342,10 +379,12 @@ impl Editor {
                 Some(_) => Some("only paint and vector layers have an onion".into()),
             },
             Cmd::NewDrawing | Cmd::NewDrawingAfter | Cmd::InsertFrame | Cmd::InsertFrameAll => {
-                self.timeline_edit().or_else(|| {
-                    self.here()
-                        .is_none()
-                        .then(|| "pick a paint or vector layer first".to_string())
+                self.timeline_edit().or_else(|| match self.here() {
+                    None => Some("pick a paint or vector layer first".to_string()),
+                    Some((_, Some((cel, _)))) if cmd == Cmd::NewDrawing && cel.frame == self.scene.frame => Some(
+                        "this frame has a drawing already: shift K makes the next one after it".to_string(),
+                    ),
+                    Some(_) => None,
                 })
             }
             Cmd::Duplicate | Cmd::DeleteDrawing => self.timeline_edit().or_else(|| {
@@ -438,7 +477,7 @@ impl Editor {
             Cmd::CopyCells => span.is_none().then_some(()).and_then(|_| {
                 self.drawing_here()
                     .is_none()
-                    .then(|| "select cells first: drag over them in the timeline".to_string())
+                    .then(|| "select frames first: drag over them in the timeline".to_string())
             }),
             Cmd::PasteCells | Cmd::PasteCellsLinked => match &self.timeline.cells {
                 None => Some("copy cells first: select them and copy the cells".into()),
@@ -473,6 +512,21 @@ impl Editor {
             Cmd::DeleteClip | Cmd::ClipLoops | Cmd::ClipOwnFps => need_clip(),
             Cmd::Refill | Cmd::ShowGaps if !self.active_paint() => {
                 Some("pick a paint layer with fills first".to_string())
+            }
+            Cmd::Refill | Cmd::ShowGaps if self.scene.active_is_mask() => {
+                Some("a mask has no lines or fills: pick the layer it masks".to_string())
+            }
+            Cmd::Refill | Cmd::ShowGaps if self.drawing_here().is_none() => {
+                Some("no drawing on this frame of the active layer".to_string())
+            }
+            Cmd::ShowGaps if self.scene.on_grid() => {
+                Some("a pixel layer has no painted lines to look for gaps in".to_string())
+            }
+            Cmd::ShowGaps if self.scene.active_marks().is_empty() && self.checks.gaps.is_none() => {
+                Some("this drawing has no lines yet to look for gaps in".to_string())
+            }
+            Cmd::FillLike if self.carries_no_floods() => {
+                Some("the first selected frame holds no flood fills to carry (lasso fills stay where they are drawn)".to_string())
             }
             Cmd::Refill => self
                 .jobs

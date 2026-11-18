@@ -102,7 +102,7 @@ impl Editor {
             Some((id, frame)) => {
                 self.go_to(frame)?;
                 self.open_pin(id);
-                self.say(Tone::Info, format!("note {id} on frame {frame}: Delete removes it"));
+                self.say(Tone::Info, format!("the note on frame {frame}: Delete removes it"));
             }
             None => {
                 self.note_open = None;
@@ -116,7 +116,7 @@ impl Editor {
         if let Some(id) = self.note_open.take() {
             notes::remove(&self.scene.bundle, id)?;
             self.reread_pins();
-            self.say(Tone::Done, format!("note {id} removed"));
+            self.say(Tone::Done, "note removed");
         }
         Ok(())
     }

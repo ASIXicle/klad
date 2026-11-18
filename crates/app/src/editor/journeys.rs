@@ -3172,10 +3172,7 @@ fn someone_keeps_their_drawings_in_order() {
         "the refusal says how a picture comes into klad",
     );
 
-    j.finish(&[
-        "a-damaged-drawing-is-explained",
-        "a-picture-given-to-open-says-how-to-bring-it-in",
-    ]);
+    j.finish(&[]);
 }
 
 #[test]
@@ -3943,10 +3940,7 @@ fn someone_sketches_inks_and_colours_a_picture() {
         "the eye hides the sketch layer",
     );
 
-    j.finish(&[
-        "a-fill-on-the-colour-layer-stops-at-the-ink-above",
-        "the-sketch-layer-takes-a-pencil",
-    ]);
+    j.finish(&["a-fill-on-the-colour-layer-stops-at-the-ink-above"]);
 }
 
 fn view_of(j: &Journey) -> (f32, bool) {
@@ -4287,21 +4281,31 @@ fn someone_paints_fast_with_brushes_sizes_and_opacity() {
     j.click("12");
 
     j.act("paint a line with every brush in the list, top to bottom");
-    let listed: Vec<(String, String)> = j.ed().map_or_else(Vec::new, |ed| {
+    let listed: Vec<(String, String, bool)> = j.ed().map_or_else(Vec::new, |ed| {
         ed.brushes
             .defs()
-            .map(|(id, def)| (id.to_string(), def.name.clone()))
+            .map(|(id, def)| {
+                let erases = ed
+                    .brushes
+                    .get(id)
+                    .is_ok_and(|b| b.blend == klad_brush::brush::StrokeBlend::Erase);
+                (id.to_string(), def.name.clone(), erases)
+            })
             .collect()
     });
     let mut wrong = Vec::new();
-    listed.iter().enumerate().for_each(|(i, (id, name))| {
+    listed.iter().enumerate().for_each(|(i, (id, name, erases))| {
         let before = count_on(&j, "paint 1");
         let picked = j.pick_in_list("the brush; the brush panel shows them with a sample stroke", name);
         let y = 220.0 + (i % 12) as f32 * 62.0;
         let x = 100.0 + (i / 12) as f32 * 460.0;
         j.pen_stroke(&[(x, y, 0.4), (x + 180.0, y + 12.0, 0.9), (x + 360.0, y, 0.5)]);
         let used = last_stroke(&j, "paint 1").map(|s| s.brush);
-        if !picked || count_on(&j, "paint 1") != before + 1 || used.as_deref() != Some(id.as_str()) {
+        let kept = match erases {
+            true => count_on(&j, "paint 1") == before,
+            false => count_on(&j, "paint 1") == before + 1 && used.as_deref() == Some(id.as_str()),
+        };
+        if !picked || !kept {
             wrong.push(format!(
                 "{name}: picked {picked}, marks {} to {}, used {used:?}",
                 before,
@@ -4317,7 +4321,7 @@ fn someone_paints_fast_with_brushes_sizes_and_opacity() {
     j.expect(
         "every-brush-in-the-list-paints",
         listed.len() > 20 && wrong.is_empty(),
-        "each brush of the list can be picked and leaves its own stroke",
+        "each brush of the list can be picked and leaves its own stroke; an eraser over empty paper leaves none",
     );
 
     j.act("press lightly and then hard with the Inking pen");
@@ -5391,7 +5395,6 @@ fn someone_animates_a_sprite_and_exports_it() {
         "a-new-clip-asks-its-name",
         "a-shift-drag-over-frames-selects-them",
         "equals-and-minus-undo-each-other",
-        "stopping-says-nothing-or-something-plain",
     ]);
 }
 
@@ -5728,7 +5731,6 @@ fn someone_animates_frame_by_frame() {
 
     j.finish(&[
         "a-new-layer-shows-on-every-frame",
-        "a-refused-link-speaks-plainly",
         "the-link-window-does-what-it-offers",
     ]);
 }
@@ -6148,8 +6150,8 @@ fn someone_gives_an_arm_bones_and_poses_it() {
     j.note(format!("frame {} of {}; it said: {}", at.0, at.1, j.heard()));
     j.expect(
         "shift-i-makes-a-second-frame",
-        at == (1, 2),
-        "shift I makes the timeline a frame longer and the full stop key goes there",
+        at.0 == 1 && at.1 >= 2,
+        "shift I makes the timeline a frame longer and the full stop key goes there (the first pose may have made frame 1 already)",
     );
 
     j.act("the pose again on this frame: the bones layer, J, pose, a drag of the hand, make this pose a drawing");
@@ -6216,11 +6218,7 @@ fn someone_gives_an_arm_bones_and_poses_it() {
         "the export writes a scene with a Skeleton2D and the two bones",
     );
 
-    j.finish(&[
-        "a-pose-of-nothing-is-not-called-done",
-        "a-pose-on-the-first-frame-is-kept-or-refused-plainly",
-        "posing-with-no-layer-attached-says-so",
-    ]);
+    j.finish(&[]);
 }
 
 fn maps_on(j: &Journey) -> bool {

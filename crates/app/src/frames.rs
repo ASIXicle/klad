@@ -307,6 +307,10 @@ impl Player {
         at.saturating_duration_since(now)
     }
 
+    pub fn dropped(&self) -> u32 {
+        self.drops.iter().sum()
+    }
+
     pub fn summary(&self) -> String {
         let total: u32 = self.drops.iter().sum();
         let recent: Vec<String> = self

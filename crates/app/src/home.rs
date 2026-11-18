@@ -111,7 +111,7 @@ impl Home {
         if let Err(e) = self.open(ctx, path) {
             let mut start = Start::new(&self.settings, Section::Open);
             start.path = path.display().to_string();
-            start.error = Some(format!("opening {}: {e:#}", path.display()));
+            start.error = Some(open_words(path, &e));
             start.repair = used_twice(&e).then(|| path.to_path_buf());
             self.start = Some(start);
         }
@@ -163,8 +163,13 @@ impl Home {
                 editor.settings_dirty = true;
             }
             None => {
-                if let Some(path) = &self.settings_path {
-                    let _ = self.settings.save(path);
+                if let Some(path) = &self.settings_path
+                    && let Err(e) = self.settings.save(path)
+                    && let Some(start) = self.start.as_mut()
+                {
+                    start.error = Some(format!(
+                        "your settings could not be saved ({e:#}); they apply until klad closes"
+                    ));
                 }
             }
         }
@@ -378,7 +383,7 @@ impl Home {
                 }
             })
         {
-            let message = format!("opening {}: {e:#}", path.display());
+            let message = open_words(&path, &e);
             match (self.start.as_mut(), self.editor.as_mut()) {
                 (Some(start), _) => {
                     start.error = Some(message);
@@ -444,6 +449,21 @@ impl eframe::App for Home {
             editor.take_tabs(ctx, raw_input);
         }
     }
+}
+
+fn open_words(path: &Path, e: &anyhow::Error) -> String {
+    let name = path
+        .file_name()
+        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string());
+    if crate::start::is_picture(path) {
+        return crate::start::picture_words(&name);
+    }
+    if e.chain().any(|c| c.downcast_ref::<serde_json::Error>().is_some()) {
+        return format!(
+            "{name} cannot be opened: its doc.json is damaged (cut short, or changed by hand). The strokes are still in the folder: put doc.json back from a backup or from git if you keep one, or send the drawing with Help > Report a problem"
+        );
+    }
+    format!("opening {}: {e:#}", path.display())
 }
 
 #[cfg(test)]

@@ -661,8 +661,17 @@ impl Editor {
             return;
         };
         let played = format!("played {}: {}", self.timeline.playing, player.summary());
-        self.measure("last play", played.clone());
-        self.say(Tone::Done, played);
+        self.measure("last play", played);
+        let dropped = player.dropped();
+        if dropped > 0 {
+            self.say(
+                Tone::Info,
+                format!(
+                    "{dropped} frame{} skipped while playing: prepare the frames (the bolt in the timeline's bar) to play them all",
+                    if dropped == 1 { " was" } else { "s were" }
+                ),
+            );
+        }
         if let Some(frame) = player.shown() {
             if frame != self.scene.frame {
                 self.scene.move_to(frame);
@@ -829,12 +838,18 @@ impl Editor {
                 self.dirty.extend(dirty);
                 self.forget_missing_selection();
                 let text = format!("{} in {:.0} ms", klad_core::bundle::summarize(&ops), ms(start));
-                self.measure("timeline edit", text.clone());
-                self.say(Tone::Info, text);
+                self.measure("timeline edit", text);
+                if let Some(words) = self.edit_words(&ops) {
+                    self.say(Tone::Info, words);
+                }
                 Ok(Some(applied))
             }
+            Err(e) if e.downcast_ref::<super::lock::Locked>().is_some() => {
+                self.failed(e);
+                Ok(None)
+            }
             Err(e) => {
-                self.say(Tone::Refused, format!("{e:#}"));
+                self.say(Tone::Refused, self.refusal_words(&format!("{e:#}")));
                 Ok(None)
             }
         }

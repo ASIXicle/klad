@@ -882,7 +882,11 @@ fn every_command_answers_whether_it_can_run_and_toggles_say_their_state() {
     activate(&mut h, "lines");
     let ed = h.state();
     let runnable: Vec<Cmd> = Cmd::ALL.into_iter().filter(|c| ed.can_run(*c).is_none()).collect();
-    assert!(runnable.contains(&Cmd::NewDrawing) && runnable.contains(&Cmd::Play));
+    assert!(runnable.contains(&Cmd::NewDrawingAfter) && runnable.contains(&Cmd::Play));
+    assert_eq!(
+        ed.can_run(Cmd::NewDrawing).as_deref(),
+        Some("this frame has a drawing already: shift K makes the next one after it")
+    );
     assert!(ed.can_run(Cmd::Copy).is_some() && ed.can_run(Cmd::Pan).is_some());
     assert_eq!(ed.is_on(Cmd::Brush), Some(true));
     assert_eq!(ed.is_on(Cmd::LayersPane), Some(true));
@@ -4053,6 +4057,11 @@ fn the_eraser_has_a_feather_slider_that_stays_and_reaches_its_strokes() {
         "it stays when the eraser comes back"
     );
     let c = h.state().canvas_rect.center();
+    h.key_press(Key::B);
+    h.run_steps(2);
+    pen_line(&mut h, c + vec2(-60.0, 0.0), c + vec2(60.0, 0.0));
+    h.key_press(Key::E);
+    h.run_steps(2);
     pen_line(&mut h, c + vec2(-40.0, 0.0), c + vec2(40.0, 0.0));
     let marks = h.state().scene.active_marks().to_vec();
     let brush = marks
@@ -8645,4 +8654,83 @@ fn a_menu_longer_than_the_window_scrolls_to_its_last_item() {
         "scrolling the menu does not bring these in: {still:?}"
     );
     let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_editor_says_why_a_command_cannot_run_in_plain_words() {
+    let path = sample("plain-words");
+    Bundle::open(&path)
+        .unwrap()
+        .apply(
+            &parse_lines(
+                r#"{"op":"add","layer":{"kind":"vector","name":"photo","reference":true,"cels":[{"frame":0}]}}
+{"op":"add","mask":{"id":"m1"},"in":"l1"}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    let no_ids = |text: &str| {
+        !text.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| {
+            w.len() > 1 && matches!(w.as_bytes()[0], b'c' | b'l' | b'n') && w[1..].chars().all(|c| c.is_ascii_digit())
+        }) && !text.contains(" ms")
+    };
+    let reasons: Vec<(Cmd, Option<String>)> = [Cmd::NewDrawing, Cmd::NextDrawing, Cmd::PrevDrawing]
+        .into_iter()
+        .map(|cmd| (cmd, h.state().can_run(cmd)))
+        .collect();
+    reasons.iter().for_each(|(cmd, why)| {
+        let why = why
+            .as_deref()
+            .unwrap_or_else(|| panic!("{cmd:?} on one drawing runs and does nothing"));
+        assert!(no_ids(why), "{cmd:?}: {why}");
+    });
+    h.state_mut().invoke(Cmd::NewPaintLayer).unwrap();
+    h.run_steps(2);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert_eq!(said, "added a paint layer");
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert!(said.starts_with("undid: ") && no_ids(&said), "{said}");
+    let mask = {
+        let doc = &h.state().scene.bundle.doc;
+        let Some(klad_core::doc::Loc::Layer(at)) = doc.locate("l1") else {
+            panic!("no l1");
+        };
+        [at, vec![klad_core::doc::MASK]].concat()
+    };
+    h.state_mut().activate(mask).unwrap();
+    h.run_steps(2);
+    [Cmd::ToggleClip, Cmd::ShowGaps, Cmd::Refill]
+        .into_iter()
+        .for_each(|cmd| {
+            let why = h.state().can_run(cmd);
+            assert!(why.as_deref().is_some_and(no_ids), "{cmd:?} on a mask: {why:?}");
+        });
+    activate(&mut h, "photo");
+    h.state_mut().invoke(Cmd::ShapeTool).unwrap();
+    h.run_steps(2);
+    let (a, b) = (canvas_at(&h, 100.0, 100.0), canvas_at(&h, 180.0, 160.0));
+    drag(&mut h, a, b);
+    h.run_steps(3);
+    let doc = &h.state().scene.bundle.doc;
+    let photo = doc.find_layer("photo").unwrap();
+    assert!(
+        photo.cels()[0].nodes.is_empty(),
+        "a reference picture takes no shapes: it is left out of exports"
+    );
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert!(said.contains("on a new vector layer above photo"), "{said}");
+    let _ = std::fs::remove_dir_all(&path);
+
+    let pixels = pixel_sample("plain-words-pixels");
+    let mut h = harness(editor(&pixels), vec2(1440.0, 900.0));
+    h.state_mut().picked = None;
+    [Cmd::ShowGaps].into_iter().for_each(|cmd| {
+        let why = h.state().can_run(cmd);
+        assert!(why.as_deref().is_some_and(no_ids), "{cmd:?} on pixels: {why:?}");
+    });
+    let _ = std::fs::remove_dir_all(&pixels);
 }

@@ -43,7 +43,7 @@ pub(super) fn tally(found: &[klad_core::pixelcheck::Finding]) -> String {
         n => format!(" ({n} small ones, likely details, are not marked)"),
     };
     match parts.is_empty() {
-        true => format!("nothing to look at on this layer{small}"),
+        true => format!("no faults found on this layer{small}"),
         false => format!("to look at, marked on the canvas: {}{small}", parts.join(", ")),
     }
 }
@@ -242,7 +242,8 @@ impl Editor {
         let layer = self.active_paint_id()?;
         let frame = self.scene.frame;
         let args = refill_args(&self.bundle_arg(), &layer, frame);
-        self.run_job(Tag::Edit, format!("refill {layer} at frame {frame}"), args, last_line);
+        let name = self.layer_name(&layer);
+        self.run_job(Tag::Edit, format!("refill {name} at frame {frame}"), args, last_line);
         Ok(())
     }
 
@@ -251,7 +252,7 @@ impl Editor {
             .timeline
             .span
             .clone()
-            .ok_or_else(|| anyhow!("select frames first: shift click or shift drag over cells"))?;
+            .ok_or_else(|| anyhow!("select frames first: drag over them in the timeline"))?;
         let layer = span
             .rows
             .first()
@@ -268,7 +269,7 @@ impl Editor {
         let args = fill_like_args(&self.bundle_arg(), &layer, &cel, (span.from, span.to));
         self.run_job(
             Tag::Edit,
-            format!("fill frames {} to {} like {cel}", span.from, span.to),
+            format!("fill frames {} to {} like frame {}", span.from, span.to, span.from),
             args,
             last_line,
         );
@@ -295,7 +296,8 @@ impl Editor {
             .filter(|s| s.rows.contains(&layer))
             .map_or((self.scene.frame, self.scene.frame), |s| (s.from, s.to));
         let args = gaps_args(&self.bundle_arg(), &layer, frames);
-        self.run_job(Tag::Gaps, format!("gaps on {layer}"), args, quiet);
+        let name = self.layer_name(&layer);
+        self.run_job(Tag::Gaps, format!("look for gaps on {name}"), args, quiet);
         Ok(())
     }
 
@@ -334,7 +336,7 @@ impl Editor {
             None => (0, self.scene.bundle.doc.timeline.frames.saturating_sub(1)),
         };
         let args = arcs_args(&self.bundle_arg(), &track, frames);
-        self.run_job(Tag::Arcs, format!("arcs of {track}"), args, quiet);
+        self.run_job(Tag::Arcs, "show the arcs".to_string(), args, quiet);
         Ok(())
     }
 
@@ -649,9 +651,9 @@ mod tests {
         );
         assert_eq!(
             tally(&[finding(Kind::Stray, true)]),
-            "nothing to look at on this layer (1 small one, likely a detail, is not marked)"
+            "no faults found on this layer (1 small one, likely a detail, is not marked)"
         );
-        assert_eq!(tally(&[]), "nothing to look at on this layer");
+        assert_eq!(tally(&[]), "no faults found on this layer");
     }
 
     #[test]

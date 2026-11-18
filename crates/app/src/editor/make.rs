@@ -69,7 +69,7 @@ fn on_vector(editor: &Editor) -> Option<String> {
     editor
         .scene
         .active_layer()
-        .filter(|l| l.kind() == Kind::Vector && !l.locked && !editor.scene.active_is_mask())
+        .filter(|l| l.kind() == Kind::Vector && !l.locked && !l.reference && !editor.scene.active_is_mask())
         .map(|l| l.id.clone())
 }
 
@@ -154,8 +154,9 @@ impl Editor {
 
     pub(super) fn shape_down(&mut self, c: Vec2) {
         if self.scene.on_grid() {
-            if self.scene.can_paint() {
-                self.shapes.drag = Some((c, c));
+            match self.paint_target(false) {
+                super::Target::Refused(why) => self.say(crate::messages::Tone::Refused, why),
+                _ => self.shapes.drag = Some((c, c)),
             }
             return;
         }

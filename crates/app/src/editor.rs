@@ -26,9 +26,12 @@ mod pixels;
 mod prefs;
 mod selection;
 mod shift;
+mod target;
 mod text;
 mod timeline;
 mod tweens;
+mod words;
+
 #[cfg(test)]
 pub(crate) use commands::install_job;
 #[cfg(test)]
@@ -89,6 +92,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use target::Target;
 
 const HANDLE: f32 = 12.0;
 const DROPPER: f32 = 22.0;
@@ -1179,6 +1183,15 @@ impl Editor {
             );
             return;
         }
+        let text = format!("{e:#}");
+        if let Some(head) = text.strip_suffix(" (klad palette --ramp groups colours)") {
+            let words = self.refusal_words(head);
+            self.say(
+                Tone::Refused,
+                format!("{words} (the ramp button in the Colour panel makes one)"),
+            );
+            return;
+        }
         match crate::report::is_bug(&e) {
             true => self.say(Tone::Error, crate::report::bug_message(&e)),
             false => self.error(e),
@@ -1437,7 +1450,7 @@ impl Editor {
         match self.scene.step(stack, &self.brushes)? {
             Some((summary, dirty)) => {
                 self.measure("undo", format!("{word} {summary} in {:.0} ms", ms(start)));
-                self.say(Tone::Info, format!("{word} {}", self.plain(&summary)));
+                self.say(Tone::Info, format!("{word}: {}", self.step_words(&summary)));
                 self.dirty.extend(dirty);
                 self.forget_missing_selection();
             }
@@ -1460,8 +1473,8 @@ impl Editor {
             _ => None,
         };
         let word = |w: &str| -> Option<String> {
-            if let Some((cel, id)) = klad_core::markedit::parse_address(w) {
-                return Some(drawing(cel).map_or(format!("mark {id}"), |d| format!("mark {id} of {d}")));
+            if let Some((cel, _)) = klad_core::markedit::parse_address(w) {
+                return Some(drawing(cel).map_or("a mark".to_string(), |d| format!("a mark of {d}")));
             }
             let digits = w.len() > 1 && w[1..].chars().all(|c| c.is_ascii_digit());
             match w.chars().next() {
@@ -2345,7 +2358,12 @@ impl Editor {
             self.activate(path)?;
         }
         let Some(cel) = self.scene.active_cel() else {
-            self.say(Tone::Refused, "make a paint layer active to select its strokes");
+            let why = match self.scene.active_layer() {
+                Some(l) if l.kind() == Kind::Paint => format!("{} has no drawing on this frame: K makes one", l.name),
+                Some(l) if l.kind() == Kind::Bones => "bones are picked with the bone tool (J)".to_string(),
+                _ => "a loop selects strokes of the active layer: pick a paint layer in the layers panel".to_string(),
+            };
+            self.say(Tone::Refused, why);
             return Ok(());
         };
         let at = lasso.points[0];
@@ -2711,6 +2729,10 @@ impl Editor {
                     }
                     on_stroke = true;
                 }
+                (Some(false), _) if self.scene.on_grid() => self.say(
+                    Tone::Info,
+                    "pixels have no points to reshape: S selects them to move; A reshapes strokes and vector shapes",
+                ),
                 (Some(false), _) => self.say(Tone::Info, "that is a fill: A reshapes strokes and vector shapes"),
                 _ => {}
             }
@@ -3209,6 +3231,48 @@ impl Editor {
         if pressing && self.holding_frame_keys() {
             return Ok(());
         }
+        if pressing && !picking && matches!(self.tool, Tool::Brush | Tool::Fill) {
+            let erasing = self.tool == Tool::Brush && (e.eraser || self.is_on(Cmd::Eraser) == Some(true));
+            match self.paint_target(erasing) {
+                Target::Here => {}
+                Target::NewLayer => {
+                    let under = self.scene.active_layer().map(|l| l.name.clone());
+                    self.add_layer("paint")?;
+                    self.scene.rebuild_caches(None)?;
+                    self.say(
+                        Tone::Done,
+                        match under {
+                            Some(name) => format!("on a new paint layer above {name}"),
+                            None => "on a new paint layer".to_string(),
+                        },
+                    );
+                }
+                Target::Refused(why) => {
+                    self.say(Tone::Refused, why);
+                    return Ok(());
+                }
+            }
+        }
+        let this_layer = match self.tool {
+            Tool::Strokes | Tool::Direct => true,
+            Tool::Select => !self.settings.pick_all_layers,
+            _ => false,
+        };
+        if pressing
+            && this_layer
+            && matches!(self.tool, Tool::Select | Tool::Direct)
+            && self.scene.active_layer().is_some_and(|l| l.kind() == Kind::Bones)
+        {
+            self.say(Tone::Refused, "bones are picked and moved with the bone tool (J)");
+            return Ok(());
+        }
+        if pressing
+            && this_layer
+            && let Some(why) = self.take_target()
+        {
+            self.say(Tone::Refused, why);
+            return Ok(());
+        }
         let needs_canvas = matches!(self.tool, Tool::Brush | Tool::Fill | Tool::Strokes | Tool::Select);
         if pressing && !needs_canvas {
             self.hold_still();
@@ -3335,8 +3399,16 @@ impl Editor {
             (Tool::Select, Phase::Up) if self.lasso.is_some() => match self.scene.active_cel() {
                 Some(_) => self.finish_pick()?,
                 None => {
-                    self.lasso = None;
+                    let far = self.lasso.take().is_some_and(|l| l.far);
                     self.picked = None;
+                    if self.scene.active_layer().is_some_and(|l| l.kind() == Kind::Bones) {
+                        self.say(Tone::Refused, "bones are picked and moved with the bone tool (J)");
+                    } else if far {
+                        self.say(
+                            Tone::Info,
+                            "a loop takes strokes of the active layer: pick a paint layer, or click a shape to take it",
+                        );
+                    }
                 }
             },
             (Tool::Select, Phase::Up) => self.finish_drag()?,
@@ -3518,6 +3590,17 @@ impl Editor {
             }
         }
         let ended = ms(start);
+        if live.brush.blend == klad_brush::brush::StrokeBlend::Erase
+            && !erases_any(&self.buffer, self.scene.active_raster())
+            && !erases_any(&self.mirror_buffer, self.scene.active_raster())
+        {
+            self.dirty.extend(self.buffer.touched().iter().copied());
+            self.dirty.extend(self.mirror_buffer.touched().iter().copied());
+            self.buffer.reset();
+            self.mirror_buffer.reset();
+            self.say(Tone::Info, "nothing there to erase");
+            return Ok(());
+        }
         self.follow_the_folder()?;
         if self.scene.bundle.embed_brush(&live.stroke.brush, &live.brush.def)? {
             self.embedded.insert(live.stroke.brush.clone(), live.brush.def.clone());
@@ -5449,9 +5532,9 @@ impl Editor {
 
     fn mask_hint(&self) -> &'static str {
         if self.brush == "eraser" {
-            "the eraser is on: it shows the layer again where the mask hid it (E switches back to the brush)"
+            "the eraser shows the layer again where the mask hid it (E switches back to the brush)"
         } else {
-            "the brush hides the layer where you paint (any colour); the eraser (E) shows it again"
+            "the brush hides the layer where you paint (any colour), the red marks what is hidden; the eraser (E) shows it again; untick show the mask in red, in Layer settings, to see the layer without it"
         }
     }
 
@@ -5767,7 +5850,7 @@ impl Editor {
             FillRef::Layer(id) => layers
                 .iter()
                 .find(|(l, _)| l == id)
-                .map_or(id.clone(), |(_, name)| format!("{name} ({id})")),
+                .map_or_else(|| "a layer that is gone".to_string(), |(_, name)| name.clone()),
         };
         let mut reference = self.fill.reference.clone();
         ui.horizontal_wrapped(|ui| {
@@ -5815,9 +5898,7 @@ impl Editor {
             self.command_button(ui, Cmd::Refill, Some("refill this drawing"));
             self.command_button(ui, Cmd::ShowGaps, Some("show gaps"));
         });
-        if !self.scene.can_paint() {
-            ui.colored_label(Color32::LIGHT_YELLOW, "pick a paint layer to fill on");
-        }
+        self.paint_note(ui);
     }
 
     fn pen_panel(&mut self, ui: &mut egui::Ui) {
@@ -5922,6 +6003,20 @@ impl Editor {
             self.tabs.extend(crate::layout::take_tabs(raw_input));
         }
     }
+}
+
+fn erases_any(buffer: &StrokeBuffer, raster: Option<&Raster>) -> bool {
+    let Some(raster) = raster else {
+        return false;
+    };
+    buffer.touched().iter().any(|&i| {
+        buffer.grid().at(i).zip(raster.at(i)).is_some_and(|(cover, px)| {
+            cover
+                .iter()
+                .zip(px.as_chunks::<4>().0)
+                .any(|(c, p)| *c > 0.0 && f32::from(p[3]) > 0.0)
+        })
+    })
 }
 
 #[cfg(test)]

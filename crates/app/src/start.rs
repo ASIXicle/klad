@@ -703,6 +703,20 @@ pub fn brought_in(path: &Path) -> Result<(PathBuf, Option<String>)> {
     Ok((made, Some(told)))
 }
 
+const PICTURES: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+pub fn is_picture(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| PICTURES.iter().any(|p| x.eq_ignore_ascii_case(p)))
+}
+
+pub fn picture_words(name: &str) -> String {
+    format!(
+        "{name} is a picture, not a klad drawing: make a drawing, then bring the picture in with File > Import picture… or drop it on the window"
+    )
+}
+
 pub fn openable(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         bail!("paste the path of a .klad drawing");
@@ -711,6 +725,9 @@ pub fn openable(path: &Path) -> Result<()> {
         bail!("{} does not exist", path.display());
     }
     if !path.is_dir() {
+        if is_picture(path) {
+            bail!("{}", picture_words(&path.display().to_string()));
+        }
         bail!("{} is not a klad drawing", path.display());
     }
     if !path.join("doc.json").is_file() {

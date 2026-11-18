@@ -285,7 +285,7 @@ impl Editor {
                     let detail = if text.is_empty() {
                         String::new()
                     } else {
-                        format!(": {text}")
+                        format!(": {}", self.job_words(&text))
                     };
                     self.measure("last job", format!("{} in {took:.1} s{detail}", e.name));
                     if e.tag == Tag::Export {
@@ -293,14 +293,15 @@ impl Editor {
                     }
                     match e.tag == Tag::Export && !text.is_empty() {
                         true => self.say_job(Tone::Done, text),
-                        false => self.say_job(Tone::Done, format!("{} done in {took:.1} s{detail}", e.name)),
+                        false => self.say_job(Tone::Done, format!("{} done{detail}", e.name)),
                     }
                 }
                 Outcome::Failed(text) => {
                     if e.tag == Tag::Inbetween {
                         self.between.report = super::between::report(&e.output);
                     }
-                    self.say_job(Tone::Error, crate::report::job_failed(&e.name, &text))
+                    let why = self.job_words(&text);
+                    self.say_job(Tone::Error, crate::report::job_failed(&e.name, &why))
                 }
                 Outcome::Cancelled => self.say_job(Tone::Info, format!("{} cancelled", e.name)),
             }

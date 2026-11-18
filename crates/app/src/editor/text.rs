@@ -291,7 +291,7 @@ impl Editor {
         let layer = self
             .scene
             .active_layer()
-            .filter(|l| l.kind() == Kind::Vector && !l.locked && !self.scene.active_is_mask())
+            .filter(|l| l.kind() == Kind::Vector && !l.locked && !l.reference && !self.scene.active_is_mask())
             .map(|l| l.id.clone());
         self.text_edit = Some(Typing {
             id: None,
@@ -409,11 +409,12 @@ impl Editor {
                 node["type"] = json!("text");
                 node["id"] = json!(id);
                 node["fill"] = json!(color::hex(typing.fill));
-                let (mut ops, layer, made) = match typing.layer {
-                    Some(layer) => (Vec::new(), layer, false),
+                let (mut ops, layer, made, said) = match typing.layer {
+                    Some(layer) => (Vec::new(), layer, false, String::new()),
                     None => {
                         let home = self.new_vector_layer("text", typing.frame);
-                        (home.ops, home.layer, true)
+                        let said = home.said();
+                        (home.ops, home.layer, true, said)
                     }
                 };
                 ops.push(Op::AddNode {
@@ -432,7 +433,9 @@ impl Editor {
                 self.used_colour();
                 self.say(
                     Tone::Done,
-                    "text added: T and a click on it types more, V moves it, layer settings change its font",
+                    format!(
+                        "text added{said}: T and a click on it types more, V moves it, layer settings change its font"
+                    ),
                 );
             }
         }

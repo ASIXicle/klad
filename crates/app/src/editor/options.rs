@@ -391,9 +391,7 @@ impl Editor {
                     self.pixel_inks(ui);
                     note(ui, RichText::new("draws whole pixels in the palette colour; shift click: a straight line from the last pixel")
                             .color(theme::WEAK));
-                    if !self.scene.can_paint() {
-                        note(ui, RichText::new("this layer is locked: unlock it to draw on it").color(theme::REFUSED));
-                    }
+                    self.paint_note(ui);
                 }
                 Tool::Brush => {
                     self.brush_main(ui);
@@ -412,17 +410,9 @@ impl Editor {
                         note(ui, RichText::new("edited, not saved").color(theme::WEAK));
                     }
                     if self.scene.active_is_mask() {
-                        note(ui, RichText::new(self.mask_hint()).color(Color32::from_rgb(255, 150, 150)));
+                        note(ui, RichText::new(self.mask_hint()).color(theme::WEAK));
                     }
-                    let vector = self
-                        .scene
-                        .active_layer()
-                        .is_some_and(|l| l.kind() == klad_core::doc::Kind::Vector);
-                    if vector {
-                        note(ui, RichText::new("this is a vector layer: P draws paths on it; brushes paint on paint layers").color(theme::REFUSED));
-                    } else if !self.scene.can_paint() {
-                        note(ui, RichText::new("pick a paint layer to draw on").color(theme::REFUSED));
-                    }
+                    self.paint_note(ui);
                 }
                 Tool::Fill if self.scene.on_grid() => {
                     ui.checkbox(&mut self.pixel_diagonal, "across corners")
@@ -432,9 +422,7 @@ impl Editor {
                     self.pixel_inks(ui);
                     note(ui, RichText::new("click a pixel: every pixel joined to it with exactly its colour takes the current colour")
                             .color(theme::WEAK));
-                    if !self.scene.can_paint() {
-                        note(ui, RichText::new("this layer is locked: unlock it to fill on it").color(theme::REFUSED));
-                    }
+                    self.paint_note(ui);
                 }
                 Tool::Fill => self.fill_panel(ui),
                 Tool::Strokes if self.scene.on_grid() => {
@@ -579,6 +567,23 @@ impl Editor {
             }
         });
         Ok(())
+    }
+
+    pub(super) fn paint_note(&self, ui: &mut egui::Ui) {
+        let erasing = self.tool == Tool::Brush && self.is_on(Cmd::Eraser) == Some(true);
+        match self.paint_target(erasing) {
+            super::Target::Here => {}
+            super::Target::NewLayer => {
+                let words = match self.scene.active_layer() {
+                    Some(layer) => format!("paints on a new paint layer above {}", layer.name),
+                    None => "paints on a new paint layer".to_string(),
+                };
+                note(ui, RichText::new(words).color(theme::WEAK));
+            }
+            super::Target::Refused(why) => {
+                note(ui, RichText::new(why).color(theme::REFUSED));
+            }
+        }
     }
 
     fn pick_scope(&mut self, ui: &mut egui::Ui) {
