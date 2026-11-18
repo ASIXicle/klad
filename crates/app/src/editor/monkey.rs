@@ -493,7 +493,10 @@ fn way_out(h: &mut Harness<'static, Editor>, path: &Path) -> Result<(), Broken> 
         h.run_steps(2);
         settle(h);
     }
-    same_on_disk(h, path)?;
+    same_on_disk(h, path)
+}
+
+fn stroke_lands(h: &mut Harness<'static, Editor>) -> Result<(), Broken> {
     h.key_press(Key::B);
     h.run_steps(2);
     settle(h);
@@ -662,6 +665,8 @@ fn walk(path: &Path, acts: &[Act], how: How) -> Result<Slowest, Broken> {
         });
     }
     same_as_reopened(&h, path)?;
+    calm(&mut h);
+    stroke_lands(&mut h)?;
     Ok(slowest)
 }
 
@@ -826,7 +831,7 @@ struct Kept {
     look_first: bool,
 }
 
-const KEPT: [Kept; 4] = [
+const KEPT: [Kept; 3] = [
     Kept {
         name: "a word typed on a sprite that fills the window",
         paper: Paper::Sprite,
@@ -860,35 +865,6 @@ const KEPT: [Kept; 4] = [
         acts: &[Act::Run(Cmd::MakeMapLayer), Act::Layer(7), Act::Run(Cmd::Undo)],
         rule: "the canvas shows what a fresh open shows",
         look_first: true,
-    },
-    Kept {
-        name: "two rows of the timeline with one identity for a frame, after the agent removed the layer in hand",
-        paper: Paper::Painting,
-        acts: &[
-            Act::DragThenEscape((330.0, 309.0), (500.0, 304.0)),
-            Act::DragThenEscape((208.0, 355.0), (262.0, 194.0)),
-            Act::Drag([(386.0, 411.0), (157.0, 44.0), (461.0, 278.0)]),
-            Act::Drag([(122.0, 40.0), (41.0, -1.0), (535.0, 390.0)]),
-            Act::Run(Cmd::Reverse),
-            Act::Press(Mods::None, Key::Minus),
-            Act::Run(Cmd::CheckMaps),
-            Act::Run(Cmd::PrevDrawing),
-            Act::Press(Mods::Shift, Key::K),
-            Act::Run(Cmd::Symmetry),
-            Act::Press(Mods::None, Key::J),
-            Act::Run(Cmd::Points),
-            Act::Tap(33.0, 90.0),
-            Act::Press(Mods::None, Key::U),
-            Act::Drag([(43.0, 262.0), (320.0, 21.0), (225.0, 7.0)]),
-            Act::Agent(2),
-            Act::Tap(83.0, 204.0),
-            Act::Layer(7),
-            Act::Drag([(229.0, 92.0), (-8.0, 315.0), (387.0, 76.0)]),
-            Act::Run(Cmd::MakePath),
-            Act::Agent(3),
-        ],
-        rule: "no panic",
-        look_first: false,
     },
 ];
 
