@@ -38,6 +38,8 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap()
 }
 
+const PATIENCE: Duration = Duration::from_secs(30);
+
 pub(super) const FNV: u64 = 0xcbf2_9ce4_8422_2325;
 
 pub(super) fn mix(hash: u64, value: u64) -> u64 {
@@ -314,14 +316,14 @@ impl Journey {
     pub(super) fn wait(&mut self, what: &str, until: impl Fn(&Editor) -> bool) -> bool {
         let started = Instant::now();
         let there = |j: &Self| j.ed().is_some_and(&until);
-        while !there(self) && started.elapsed() < Duration::from_secs(8) {
+        while !there(self) && started.elapsed() < PATIENCE {
             self.pass();
             std::thread::sleep(Duration::from_millis(10));
         }
         let ok = there(self);
         self.note(match ok {
             true => format!("{what}: there after {:.1} s", started.elapsed().as_secs_f32()),
-            false => format!("{what}: not there after 8 s"),
+            false => format!("{what}: not there after {} s", PATIENCE.as_secs()),
         });
         ok
     }

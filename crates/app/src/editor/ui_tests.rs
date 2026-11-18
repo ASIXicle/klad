@@ -5756,6 +5756,42 @@ fn a_drawing_put_back_as_another_folder_stays_open_and_one_that_is_gone_asks_to_
     let _ = std::fs::remove_dir_all(&shelf);
 }
 
+#[test]
+fn making_a_map_layer_is_one_step_to_undo_with_the_maps_it_turned_on() {
+    let path = sample("map-one-undo");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    let maps_on = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.maps.is_some();
+    let role = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.find_layer("lines").unwrap().map;
+    let layers = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.all_layers().len();
+    let count = layers(&h);
+    assert!(!maps_on(&h));
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
+    h.run_steps(3);
+    assert!(maps_on(&h) && role(&h).is_some(), "the command turns the maps on too");
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert!(
+        !maps_on(&h) && role(&h).is_none(),
+        "one undo takes back the whole command"
+    );
+    h.state_mut().invoke(Cmd::Redo).unwrap();
+    h.run_steps(3);
+    assert!(maps_on(&h) && role(&h).is_some());
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    h.state_mut().invoke(Cmd::NewMapLayer).unwrap();
+    h.run_steps(3);
+    assert!(maps_on(&h) && layers(&h) == count + 1);
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert!(
+        !maps_on(&h) && layers(&h) == count,
+        "and so does one undo of a new map layer"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 fn text_shows(doc: &klad_core::doc::Document, id: &str) -> Option<bool> {
     match doc.item(id) {
         Some(klad_core::doc::Item::Node(_, _, n)) => Some(n.visible),

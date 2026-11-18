@@ -980,20 +980,22 @@ impl Editor {
         }
     }
 
-    fn maps_on(&mut self) -> Result<()> {
+    fn maps_on(&mut self) -> Vec<Op> {
         if self.scene.bundle.doc.maps.is_some() {
-            return Ok(());
+            return Vec::new();
         }
         let back = self.maps.parked.take().unwrap_or_default();
-        self.set_maps(Some(back))?;
         self.say(Tone::Info, "turned the light maps on: a map layer shapes them");
-        Ok(())
+        vec![Op::Maps(Some(back))]
     }
 
     pub(super) fn new_map_layer(&mut self) -> Result<()> {
-        self.maps_on()?;
+        let first = self.maps_on();
         let frame = self.scene.frame;
-        self.add_layer_value(json!({"kind": "paint", "name": "height", "map": "height", "cels": [{"frame": frame}]}))?;
+        self.add_layer_after(
+            first,
+            json!({"kind": "paint", "name": "height", "map": "height", "cels": [{"frame": frame}]}),
+        )?;
         self.pick_new_colour([1.0; 4]);
         Ok(())
     }
@@ -1002,13 +1004,17 @@ impl Editor {
         let Some(id) = self.scene.active_id() else {
             return Ok(());
         };
-        self.maps_on()?;
         let props = ["surface", "depth", "shine", "specular", "emissive", "glows", "z"]
             .into_iter()
             .map(|key| (key.to_string(), Value::Null))
             .chain(std::iter::once(("map".to_string(), json!("height"))))
             .collect();
-        self.set(&id, props)?;
+        let ops = self
+            .maps_on()
+            .into_iter()
+            .chain(std::iter::once(Op::Set { id, props }))
+            .collect();
+        self.apply(ops)?;
         self.pick_new_colour([1.0; 4]);
         Ok(())
     }

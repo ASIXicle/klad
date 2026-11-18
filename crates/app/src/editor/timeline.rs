@@ -1081,6 +1081,10 @@ impl Editor {
     }
 
     pub(super) fn add_layer_value(&mut self, layer: serde_json::Value) -> Result<()> {
+        self.add_layer_after(Vec::new(), layer)
+    }
+
+    pub(super) fn add_layer_after(&mut self, first: Vec<Op>, layer: serde_json::Value) -> Result<()> {
         let above = self.scene.active.clone();
         let owner = match above.last() {
             Some(&MASK) => above[..above.len() - 1].to_vec(),
@@ -1093,7 +1097,11 @@ impl Editor {
             },
             None => Place::default(),
         };
-        let Some(applied) = self.timeline_apply(vec![Op::AddLayer { layer, place }])? else {
+        let ops = first
+            .into_iter()
+            .chain(std::iter::once(Op::AddLayer { layer, place }))
+            .collect();
+        let Some(applied) = self.timeline_apply(ops)? else {
             return Ok(());
         };
         if let Some(Loc::Layer(path)) = applied.added.first().and_then(|id| self.scene.bundle.doc.locate(id)) {

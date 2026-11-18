@@ -964,6 +964,7 @@ fn structure(doc: &Document, frame: u32) -> u64 {
             out.extend(serde_json::to_vec(&l.effects).unwrap_or_default());
             out.extend(l.depth.unwrap_or(-1.0).to_le_bytes());
             out.push(l.reference as u8);
+            out.push(l.map.is_some() as u8);
             if let Some(adjust) = l.adjustment() {
                 out.extend(serde_json::to_vec(adjust).unwrap_or_default());
             }
@@ -3505,6 +3506,29 @@ mod tests {
         let fresh = rasterize_nodes(&nodes_of(&scene.bundle.doc, "cv"), 600, 300).unwrap();
         assert_eq!(fresh.hash(), after);
         agrees(&scene);
+    }
+
+    #[test]
+    fn a_layer_that_becomes_a_map_layer_or_a_colour_layer_again_redraws_the_canvas() {
+        let brushes = BrushSet::presets();
+        let dir = bundle("map-and-back", Blend::Normal);
+        let mut scene = Scene::open(&dir).unwrap();
+        scene.set_active(vec![2]).unwrap();
+        let map = klad_core::ops::parse_lines(r#"{"op":"set","id":"b","map":"height"}"#).unwrap();
+        scene.apply(&map, &brushes).unwrap();
+        scene.set_active(vec![0]).unwrap();
+        agrees(&scene);
+        let undone = scene.step(klad_core::history::Stack::Undo, &brushes).unwrap().unwrap();
+        assert_eq!(
+            undone.1.len(),
+            scene.all_tiles().len(),
+            "the whole canvas is drawn again"
+        );
+        agrees(&scene);
+        let redone = scene.step(klad_core::history::Stack::Redo, &brushes).unwrap().unwrap();
+        assert_eq!(redone.1.len(), scene.all_tiles().len());
+        agrees(&scene);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
