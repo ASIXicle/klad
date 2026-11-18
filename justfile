@@ -89,6 +89,10 @@ journeys out="":
     cargo build -p klad-cli
     KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- journeys
 
+monkey out="":
+    cargo build -p klad-cli
+    KLAD_STAMP="$(date '+%Y-%m-%d %H:%M')" KLAD_MONKEY_OUT={{out}} cargo test -p klad-app -- --ignored monkey::random_use --nocapture
+
 sizes out="":
     KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- --ignored sizes::
 

@@ -37,6 +37,8 @@ mod inventory;
 #[cfg(test)]
 mod journeys;
 #[cfg(test)]
+mod monkey;
+#[cfg(test)]
 mod sizes;
 #[cfg(test)]
 mod sweep;
