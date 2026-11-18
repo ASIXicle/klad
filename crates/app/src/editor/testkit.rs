@@ -86,10 +86,15 @@ pub(super) struct Journey {
     heard: u64,
     lines: Vec<String>,
     misses: Vec<String>,
+    pictures: bool,
 }
 
 impl Journey {
     pub(super) fn begin(name: &str, size: Vec2, open: Option<&str>) -> Self {
+        Self::begin_scaled(name, size, open, 1.0)
+    }
+
+    pub(super) fn begin_scaled(name: &str, size: Vec2, open: Option<&str>, scale: f32) -> Self {
         let folder = scratch(name);
         let out = std::env::var_os("KLAD_JOURNEY_OUT")
             .filter(|dir| !dir.is_empty())
@@ -107,6 +112,7 @@ impl Journey {
         let settings = Settings {
             drawings: Some(folder.display().to_string()),
             check_updates: false,
+            ui_scale: scale,
             ..Settings::default()
         };
         let mut home = Home::with(settings, None, gpu.clone());
@@ -130,9 +136,35 @@ impl Journey {
             heard: 0,
             lines: vec![format!("# {name}"), String::new()],
             misses: Vec::new(),
+            pictures: true,
         };
         journey.h.run_steps(4);
         journey
+    }
+
+    pub(super) fn pictures(&mut self, on: bool) {
+        self.pictures = on;
+    }
+
+    pub(super) fn out(&self) -> Option<&Path> {
+        self.out.as_deref()
+    }
+
+    pub(super) fn window(&self) -> egui::Rect {
+        self.h.ctx.content_rect()
+    }
+
+    pub(super) fn wheel_at(&mut self, at: Pos2, down: f32) {
+        self.h.event(egui::Event::PointerMoved(at));
+        self.h.run_steps(1);
+        self.h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -down),
+            modifiers: Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        self.h.run_steps(2);
     }
 
     pub(super) fn ed(&self) -> Option<&Editor> {
@@ -160,7 +192,14 @@ impl Journey {
 
     pub(super) fn settle(&mut self) {
         let started = Instant::now();
-        let waiting = |ed: &Editor| !ed.canvas_current() || !ed.jobs.is_empty() || ed.preview.is_some();
+        let waiting = |ed: &Editor| {
+            !ed.canvas_current()
+                || !ed.jobs.is_empty()
+                || ed
+                    .preview
+                    .as_ref()
+                    .is_some_and(|p| p.posed.is_none() || p.job.is_some())
+        };
         self.pass();
         while self.ed().is_some_and(waiting) && started.elapsed() < Duration::from_secs(60) {
             self.pass();
@@ -241,7 +280,7 @@ impl Journey {
         }
     }
 
-    fn screen(&self) -> Vec<String> {
+    pub(super) fn screen(&self) -> Vec<String> {
         let mut seen = BTreeSet::new();
         self.h
             .query_all(egui_kittest::kittest::By::new().predicate(|n| written(n).is_some()))
@@ -415,18 +454,7 @@ impl Journey {
             else {
                 break;
             };
-            let over = egui::pos2(r.center().x, (body + floor) / 2.0);
-            let down = r.bottom() > floor;
-            self.h.event(egui::Event::PointerMoved(over));
-            self.h.run_steps(1);
-            self.h.event(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: vec2(0.0, if down { -40.0 } else { 40.0 }),
-                modifiers: Modifiers::NONE,
-                phase: egui::TouchPhase::Move,
-                source: egui::MouseWheelSource::Wheel,
-            });
-            self.h.run_steps(3);
+            self.wheel_pane(r, body, floor);
             turns += 1;
         }
         let seen = self.in_sight(label);
@@ -434,6 +462,43 @@ impl Journey {
             (true, 0) => format!("\"{label}\" is in sight"),
             (true, n) => format!("scrolled its panel {n} times to bring \"{label}\" in sight"),
             (false, _) => format!("looked for \"{label}\": it could not be brought in sight"),
+        });
+        seen
+    }
+
+    fn wheel_pane(&mut self, r: egui::Rect, body: f32, floor: f32) {
+        let over = egui::pos2(r.center().x, (body + floor) / 2.0);
+        let down = r.bottom() > floor;
+        self.h.event(egui::Event::PointerMoved(over));
+        self.h.run_steps(1);
+        self.h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, if down { -40.0 } else { 40.0 }),
+            modifiers: Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        self.h.run_steps(3);
+    }
+
+    pub(super) fn scroll_to_hinted(&mut self, hint: &str) -> bool {
+        let mut turns = 0;
+        while turns < 24 && !self.hint_in_sight(hint) {
+            let Some((r, body, floor)) = crate::theme::hints(&self.h.ctx)
+                .into_iter()
+                .filter(|(_, text)| text.starts_with(hint))
+                .find_map(|(r, _)| self.pane_of(r).map(|(body, floor)| (r, body, floor)))
+            else {
+                break;
+            };
+            self.wheel_pane(r, body, floor);
+            turns += 1;
+        }
+        let seen = self.hint_in_sight(hint);
+        self.note(match (seen, turns) {
+            (true, 0) => format!("the control \"{hint}\" is in sight"),
+            (true, n) => format!("scrolled its panel {n} times to bring the control \"{hint}\" in sight"),
+            (false, _) => format!("looked for the control \"{hint}\": it could not be brought in sight"),
         });
         seen
     }
@@ -580,7 +645,7 @@ impl Journey {
             .for_each(|m| self.lines.push(format!("- said {m}")));
         let state = self.state();
         self.lines.push(format!("- now: {state}"));
-        if let Some(out) = self.out.clone() {
+        if let Some(out) = self.out.clone().filter(|_| self.pictures) {
             let screen = self.screen().join(" | ");
             self.lines.push(format!("- on screen: {screen}"));
             let file = format!("{:02}-{name}.png", self.step);
@@ -654,7 +719,10 @@ impl Journey {
             .filter(|(_, n)| keep(n.accesskit_node().role()))
             .map(|(i, n)| (i, n.rect(), hinted(n.rect())))
             .collect();
-        match nodes.iter().find(|(_, r, hinted)| *hinted && self.visible(*r)) {
+        let on_top = nodes
+            .iter()
+            .find(|(_, r, _)| self.h.ctx.content_rect().contains(r.center()) && self.raised(r.center()));
+        match on_top.or_else(|| nodes.iter().find(|(_, r, hinted)| *hinted && self.visible(*r))) {
             Some((i, _, _)) => Ok(*i),
             None if nodes.iter().any(|(_, _, hinted)| *hinted) => Err(true),
             None => nodes.first().map(|(i, _, _)| *i).ok_or(false),
@@ -1092,6 +1160,7 @@ impl Journey {
     }
 
     pub(super) fn tap_with(&mut self, x: f32, y: f32, button: egui::PointerButton, modifiers: Modifiers) {
+        self.ready();
         let at = self.at(x, y);
         self.note(format!(
             "{} the canvas at {x:.0},{y:.0}",
@@ -1143,24 +1212,76 @@ impl Journey {
     }
 
     pub(super) fn drag_frames(&mut self, layer: &str, from: u32, to: u32) -> bool {
-        let (Some(a), Some(b)) = (self.cell(layer, from), self.cell(layer, to)) else {
+        self.drag_frames_with(layer, from, to, Modifiers::NONE)
+    }
+
+    pub(super) fn drag_frames_with(&mut self, layer: &str, from: u32, to: u32, modifiers: Modifiers) -> bool {
+        self.drag_frames_off(layer, from, to, egui::Vec2::ZERO, modifiers)
+    }
+
+    pub(super) fn click_clip(&mut self, name: &str) -> bool {
+        let spot = self.ed().and_then(|ed| {
+            let clips = &ed.scene.bundle.doc.timeline.clips;
+            let at = clips.iter().position(|c| c.name == name)?;
+            let lane = *super::clips::lanes(clips).get(at)?;
+            let g = ed.timeline.geom?;
+            let (first, last) = (g.cell_centre(clips[at].from, 0), g.cell_centre(clips[at].to, 0));
+            let rows_top = first.y - crate::theme::ROW / 2.0 - 18.0;
+            Some(egui::pos2(
+                (first.x + last.x) / 2.0,
+                rows_top - super::clips::band_height(clips) + (lane as f32 + 0.5) * super::clips::LANE,
+            ))
+        });
+        match spot {
+            Some(at) => {
+                self.note(format!("clicked the bar of the clip {name} above the frames"));
+                self.poke(at);
+                true
+            }
+            None => {
+                self.note(format!("looked for the bar of the clip {name}: there is none"));
+                false
+            }
+        }
+    }
+
+    pub(super) fn drag_frames_off(
+        &mut self,
+        layer: &str,
+        from: u32,
+        to: u32,
+        off: egui::Vec2,
+        modifiers: Modifiers,
+    ) -> bool {
+        let cells = (self.cell(layer, from), self.cell(layer, to));
+        let (Some(a), Some(b)) = (cells.0.map(|p| p + off), cells.1.map(|p| p + off)) else {
             self.note(format!(
                 "looked for frames {from} to {to} of {layer} in the timeline: not in sight"
             ));
             return false;
         };
+        let held = if modifiers.shift { " with shift held" } else { "" };
+        let place = match off == egui::Vec2::ZERO {
+            true => String::new(),
+            false => format!(
+                ", pressing {} px right and {} px down of the middle of the frame",
+                off.x, off.y
+            ),
+        };
         self.note(match from == to {
-            true => format!("clicked frame {from} of {layer} in the timeline"),
-            false => format!("dragged over frames {from} to {to} of {layer} in the timeline"),
+            true => format!("clicked frame {from} of {layer} in the timeline{held}{place}"),
+            false => format!("dragged over frames {from} to {to} of {layer} in the timeline{held}{place}"),
         });
+        self.h.event(egui::Event::ModifiersChanged(modifiers));
         self.h.hover_at(a);
         self.h.run_steps(1);
-        self.press(a, egui::PointerButton::Primary, true, Modifiers::NONE);
+        self.press(a, egui::PointerButton::Primary, true, modifiers);
         (1..=6).for_each(|i| {
             self.h.hover_at(a + (b - a) * (i as f32 / 6.0));
             self.h.run_steps(1);
         });
-        self.press(b, egui::PointerButton::Primary, false, Modifiers::NONE);
+        self.press(b, egui::PointerButton::Primary, false, modifiers);
+        self.h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
         self.h.run_steps(3);
         true
     }

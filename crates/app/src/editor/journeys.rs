@@ -4687,3 +4687,1679 @@ fn someone_draws_shapes_and_text() {
 
     j.finish(&[]);
 }
+
+fn pixels(drawing: &str, layer: &str, frame: u32) -> (Vec<String>, String) {
+    let text = crate::start::draw_binary()
+        .and_then(|klad| {
+            std::process::Command::new(klad)
+                .args(["pixels", drawing, layer, "--frame", &frame.to_string()])
+                .output()
+                .ok()
+        })
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let rows = text
+        .lines()
+        .filter(|l| {
+            let mut words = l.split_whitespace();
+            words.next().is_some_and(|w| w.parse::<u32>().is_ok()) && words.next().is_some()
+        })
+        .filter_map(|l| l.split_whitespace().nth(1).map(str::to_string))
+        .filter(|row| row.len() > 10)
+        .collect();
+    (rows, text)
+}
+
+fn painted(rows: &[String]) -> usize {
+    rows.iter().map(|r| r.chars().filter(|c| *c != '.').count()).sum()
+}
+
+fn cell_of(rows: &[String], x: usize, y: usize) -> char {
+    rows.get(y).and_then(|r| r.chars().nth(x)).unwrap_or('?')
+}
+
+fn png_size(path: &std::path::Path) -> Option<(u32, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    let word = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    Some((word(16)?, word(20)?))
+}
+
+fn layer_id(j: &Journey) -> String {
+    j.ed().and_then(|ed| ed.scene.active_id()).unwrap_or_default()
+}
+
+#[test]
+fn someone_draws_a_small_sprite() {
+    let mut j = Journey::begin("pixel-sprite", WINDOW, None);
+
+    j.act("klad starts: Pixel art, the small sprite size, the name knight");
+    j.click("Pixel art");
+    j.click("Size");
+    j.click("32 x 32  small sprite");
+    j.retype("Name", "knight");
+    if j.ed().is_none() {
+        j.click("Create");
+    }
+    j.settle();
+    j.look("new-sprite");
+    if j.ed().is_none() {
+        return j.finish(&[]);
+    }
+    let drawing = j.drawing();
+    let layer = layer_id(&j);
+    let colours = |j: &Journey| j.ed().map_or(0, |ed| ed.scene.bundle.doc.palette.len());
+    j.note(format!(
+        "the sprite is {:?} px, on {}; the palette holds {} colours",
+        j.ed().map(|ed| ed.scene.size()),
+        active_name(&j),
+        colours(&j)
+    ));
+    j.expect(
+        "a-small-sprite-is-made",
+        j.ed().is_some_and(|ed| ed.scene.size() == (32, 32)),
+        "the sprite is 32 by 32",
+    );
+
+    j.act("take a ready palette: the palettes button of the Colour panel, then PICO-8");
+    let button = j.hint_in_sight("load a palette");
+    j.expect(
+        "the-palettes-button-is-in-sight",
+        button,
+        "the Colour panel's palettes button is in sight on a new sprite",
+    );
+    let opened = match button {
+        true => j.press_hinted("load a palette"),
+        false => {
+            j.click("Tools");
+            j.click_containing("Load a palette")
+        }
+    };
+    j.look("palettes");
+    j.click("PICO-8");
+    j.look("palette-loaded");
+    j.note(format!(
+        "the palette holds {} colours; it said: {}",
+        colours(&j),
+        j.heard()
+    ));
+    j.expect(
+        "a-ready-palette-loads",
+        opened && colours(&j) >= 16,
+        "the palette takes the sixteen colours",
+    );
+    if j.shown("or a palette file") {
+        j.key(Key::Escape);
+    }
+    let hexes: Vec<String> = j.ed().map_or_else(Vec::new, |ed| {
+        ed.scene.bundle.doc.palette.iter().map(|c| c.color.clone()).collect()
+    });
+    let reachable = hexes.iter().filter(|hex| j.in_sight(hex)).count();
+    j.note(format!(
+        "{reachable} of the {} palette colours are in sight in the Colour panel",
+        hexes.len()
+    ));
+    j.expect(
+        "the-whole-palette-is-in-sight",
+        reachable == hexes.len(),
+        "every colour of a sixteen colour palette is in sight",
+    );
+
+    j.act("the body's outline with the rectangle of U");
+    j.key(Key::U);
+    j.drag(&[(8.5, 10.5), (22.5, 26.5)]);
+    j.look("outline");
+    let (rows, _) = pixels(&drawing, &layer, 0);
+    j.note(format!("{} pixels are painted", painted(&rows)));
+    j.expect(
+        "u-draws-a-rectangle-of-pixels",
+        painted(&rows) == 60 && cell_of(&rows, 8, 10) != '.' && cell_of(&rows, 15, 18) == '.',
+        "the rectangle is a one pixel outline from 8,10 to 22,26",
+    );
+
+    j.act("fill it with orange from the palette: its square, G, a click inside");
+    let orange = j.click("#ffa300");
+    j.key(Key::G);
+    j.tap(15.5, 18.5);
+    j.look("filled");
+    let (rows, _) = pixels(&drawing, &layer, 0);
+    j.note(format!("{} pixels are painted", painted(&rows)));
+    j.expect(
+        "g-fills-inside-the-outline",
+        orange && painted(&rows) == 255 && cell_of(&rows, 15, 18) != cell_of(&rows, 8, 10),
+        "the fill covers the inside and stops at the outline",
+    );
+
+    j.act("two eyes at once: the pencil in black with mirror on, one click");
+    j.key(Key::B);
+    j.click("#000000");
+    let mirror = j.click("mirror");
+    j.tap(12.5, 15.5);
+    j.look("eyes");
+    let (rows, _) = pixels(&drawing, &layer, 0);
+    let eyes = (cell_of(&rows, 12, 15), cell_of(&rows, 19, 15), cell_of(&rows, 15, 18));
+    j.note(format!(
+        "the pixels at 12,15 and 19,15 are {:?} and {:?}; the body is {:?}",
+        eyes.0, eyes.1, eyes.2
+    ));
+    j.expect(
+        "mirror-draws-the-other-eye",
+        mirror && eyes.0 == eyes.1 && eyes.0 != eyes.2,
+        "one click with mirror on draws the pixel and its mirror image",
+    );
+    j.click("mirror");
+
+    j.act("the ground: a line with the line button of U");
+    j.key(Key::U);
+    let line = j.click("line");
+    j.drag(&[(6.5, 28.5), (24.5, 28.5)]);
+    j.look("ground");
+    let (rows, _) = pixels(&drawing, &layer, 0);
+    let ground = rows.get(28).map_or(0, |r| r.chars().filter(|c| *c != '.').count());
+    j.expect(
+        "u-draws-a-line-of-pixels",
+        line && ground == 19,
+        "the line is nineteen pixels long on row 28",
+    );
+    j.click("rectangle");
+
+    j.act("shade the body's lower rows: the pencil's darker button, a drag across");
+    j.key(Key::B);
+    let darker = j.click("darker");
+    let before = pixels(&drawing, &layer, 0).0;
+    j.drag(&[(9.5, 25.5), (21.5, 25.5)]);
+    j.look("shaded");
+    let after = pixels(&drawing, &layer, 0).0;
+    j.note(format!(
+        "row 25 went from {:?} to {:?}; it said: {}",
+        before.get(25),
+        after.get(25),
+        j.heard()
+    ));
+    j.expect(
+        "darker-shades-or-says-what-it-needs",
+        darker && (before.get(25) != after.get(25) || j.heard().contains("ramp")),
+        "the darker pencil shades the pixels, or says that it needs a ramp",
+    );
+    j.expect(
+        "the-ramp-refusal-points-at-the-editor",
+        !j.heard().contains("klad palette"),
+        "the refusal names the ramp button, not a command line option",
+    );
+    j.click("colour");
+
+    j.act("move the whole knight two pixels to the right: S, a box around it, the right arrow twice");
+    j.key(Key::S);
+    j.drag(&[(5.5, 8.5), (26.5, 30.5)]);
+    j.key(Key::ArrowRight);
+    j.key(Key::ArrowRight);
+    j.look("moved");
+    let moved = pixels(&drawing, &layer, 0).0;
+    j.note(format!(
+        "the pixel at 8,10 is {:?} and at 10,10 {:?}",
+        cell_of(&moved, 8, 10),
+        cell_of(&moved, 10, 10)
+    ));
+    j.expect(
+        "a-box-and-the-arrows-move-pixels",
+        cell_of(&moved, 8, 10) == '.' && cell_of(&moved, 10, 10) != '.' && painted(&moved) == painted(&after),
+        "the selected pixels move two pixels and none is lost",
+    );
+    j.key(Key::Escape);
+
+    j.act("a dark line around it: Layer > Outline the pixels");
+    let before = painted(&pixels(&drawing, &layer, 0).0);
+    j.click("Layer");
+    let outlined = j.click("Outline the pixels");
+    j.look("outlined");
+    let after = painted(&pixels(&drawing, &layer, 0).0);
+    j.note(format!("{before} pixels before, {after} after; it said: {}", j.heard()));
+    j.expect(
+        "outline-the-pixels-adds-an-outline",
+        outlined && after > before,
+        "Outline the pixels draws a line of pixels around the sprite",
+    );
+
+    j.act("have klad look it over: Layer > Check the pixels");
+    j.click("Layer");
+    let checked = j.click("Check the pixels");
+    j.look("checked");
+    j.note(format!("it said: {}", j.heard()));
+    j.expect(
+        "check-the-pixels-answers",
+        checked && !j.heard().is_empty(),
+        "Check the pixels says what it found",
+    );
+    j.expect(
+        "a-clean-check-says-so",
+        !j.heard().contains("nothing to look at"),
+        "a check that finds no fault says that the sprite is clean, in words that do not read as an empty layer",
+    );
+
+    j.act("export it enlarged: File > Export > Image…, the size slider to the right, Export");
+    j.menu("File", "Export", "Image… cmd E");
+    j.look("export-window");
+    j.click_inside("times real size", 0.5, 0.5);
+    j.look("export-size");
+    j.click("Export");
+    j.look("exported");
+    let made = pngs(&j.folder)
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("knight")));
+    let size = made.as_deref().and_then(png_size);
+    j.note(format!(
+        "{:?} is {size:?} px; it said: {}",
+        made.as_ref().and_then(|p| p.file_name()),
+        j.heard().replace(&j.folder.display().to_string(), "")
+    ));
+    j.expect(
+        "a-sprite-exports-in-whole-steps",
+        size.is_some_and(|(w, h)| w == h && w % 32 == 0 && w > 32),
+        "the exported picture is the sprite enlarged by a whole number",
+    );
+
+    j.finish(&[
+        "the-palettes-button-is-in-sight",
+        "the-ramp-refusal-points-at-the-editor",
+        "the-whole-palette-is-in-sight",
+    ]);
+}
+
+fn frame_now(j: &Journey) -> (u32, u32) {
+    j.ed()
+        .map_or((0, 0), |ed| (ed.scene.frame, ed.scene.bundle.doc.timeline.frames))
+}
+
+fn clip_names(j: &Journey) -> Vec<String> {
+    j.ed().map_or_else(Vec::new, |ed| {
+        ed.scene
+            .bundle
+            .doc
+            .timeline
+            .clips
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    })
+}
+
+#[test]
+fn someone_animates_a_sprite_and_exports_it() {
+    let mut j = Journey::begin("pixel-animate", WINDOW, Some("sprout.klad"));
+
+    j.act("open a sprite with two clips and play it with Return, then stop");
+    j.look("opened");
+    if j.ed().is_none() {
+        return j.finish(&[]);
+    }
+    let drawing = j.drawing();
+    j.note(format!(
+        "frame {} of {}; clips {:?}; layers {:?}",
+        frame_now(&j).0,
+        frame_now(&j).1,
+        clip_names(&j),
+        names(&j)
+    ));
+    j.key(Key::Enter);
+    j.h.run_steps(8);
+    let playing = j.ed().is_some_and(|ed| ed.timeline.player.is_some());
+    j.look("playing");
+    j.key(Key::Enter);
+    let stopped = j.ed().is_some_and(|ed| ed.timeline.player.is_none());
+    j.expect(
+        "return-plays-and-stops",
+        playing && stopped,
+        "Return plays and Return stops",
+    );
+    j.h.run_steps(3);
+    j.note(format!("after stopping it said: {}", j.heard()));
+    j.expect(
+        "stopping-says-nothing-or-something-plain",
+        !j.heard().contains("dropped"),
+        "stopping the playback says nothing, or something a person who animates can read",
+    );
+
+    j.act("step to the third frame with the full stop key, and turn the onion skin on with O");
+    j.key(Key::Home);
+    j.key(Key::Period);
+    j.key(Key::Period);
+    j.key(Key::O);
+    j.look("onion");
+    j.expect(
+        "the-keys-step-and-o-shows-the-onion",
+        frame_now(&j).0 == 2 && j.ed().is_some_and(|ed| ed.scene.onion_on),
+        "the full stop steps a frame and O turns the onion skin on",
+    );
+
+    j.act("draw one pixel on the body on this frame and see which frames it shows on");
+    j.click("body");
+    j.key(Key::B);
+    let body = layer_id(&j);
+    j.tap(3.5, 3.5);
+    j.look("one-pixel");
+    let on: Vec<u32> = (0..frame_now(&j).1)
+        .filter(|f| cell_of(&pixels(&drawing, &body, *f).0, 3, 3) != '.')
+        .collect();
+    let told =
+        j.h.query_all_by_label_contains("draws on body")
+            .next()
+            .and_then(|n| super::testkit::written(&n.accesskit_node()))
+            .unwrap_or_default();
+    j.note(format!(
+        "the pixel shows on frames {on:?}; the status line reads \"{told}\""
+    ));
+    j.expect(
+        "the-status-line-says-which-frames-a-drawing-shows-on",
+        !on.is_empty() && (on.len() == 1 || told.contains(&format!("frames {} to {}", on[0], on[on.len() - 1]))),
+        "the status line names the frames the drawing in hand shows on",
+    );
+    j.chord(CMD, Key::Z);
+
+    j.act("copy this drawing to the next frame: a click on its frame in the timeline, cmd D");
+    let before = frame_now(&j);
+    j.drag_frames("body", before.0, before.0);
+    j.chord(CMD, Key::D);
+    j.look("copied-frame");
+    let after = frame_now(&j);
+    let same = pixels(&drawing, &body, before.0).0 == pixels(&drawing, &body, after.0).0;
+    j.note(format!(
+        "frame {} of {} before, frame {} of {} after; the two frames hold the same pixels: {same}; it said: {}",
+        before.0,
+        before.1,
+        after.0,
+        after.1,
+        j.heard()
+    ));
+    j.expect(
+        "cmd-d-copies-a-frame",
+        after.1 > before.1 && same,
+        "cmd D with the timeline in use makes a copy of the drawing on the next frame",
+    );
+
+    j.act("change the copy: one pixel, and the frame before stays as it was");
+    let was = pixels(&drawing, &body, before.0).0;
+    j.tap(3.5, 3.5);
+    j.look("copy-changed");
+    let here = frame_now(&j).0;
+    j.expect(
+        "a-copied-frame-is-its-own-drawing",
+        pixels(&drawing, &body, before.0).0 == was && cell_of(&pixels(&drawing, &body, here).0, 3, 3) != '.',
+        "a pixel drawn on the copy leaves the frame it was copied from alone",
+    );
+
+    j.act("hold the drawing a frame longer with = and take that back with -");
+    let length = frame_now(&j).1;
+    let rows = |j: &Journey| -> Vec<String> {
+        j.ed().map_or_else(Vec::new, |ed| {
+            ed.scene
+                .bundle
+                .doc
+                .all_layers()
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{}: {:?}",
+                        l.name,
+                        l.cels().iter().map(|c| (c.frame, c.hold)).collect::<Vec<_>>()
+                    )
+                })
+                .collect()
+        })
+    };
+    let was_rows = rows(&j);
+    j.drag_frames("body", here, here);
+    j.key(Key::Equals);
+    let longer = frame_now(&j).1;
+    let long_rows = rows(&j);
+    j.key(Key::Minus);
+    j.look("held");
+    j.note(format!(
+        "the timeline was {length} frames, {longer} after =, {} after -",
+        frame_now(&j).1
+    ));
+    j.note(format!("drawings and holds before: {was_rows:?}"));
+    j.note(format!("after =: {long_rows:?}"));
+    j.note(format!("after -: {:?}", rows(&j)));
+    j.expect(
+        "equals-and-minus-undo-each-other",
+        longer == length + 1 && frame_now(&j).1 == length,
+        "= holds the drawing one frame longer and - takes it back",
+    );
+
+    j.act("select the last three frames of the body by dragging over them in the timeline");
+    let end = frame_now(&j).1 - 2;
+    let was_rows = rows(&j);
+    let body_row = |j: &Journey| rows(j).into_iter().find(|r| r.starts_with("body")).unwrap_or_default();
+    j.drag_frames("body", end - 2, end);
+    j.look("dragged-over-frames");
+    let selected = j.ed().is_some_and(|ed| ed.timeline.span.is_some());
+    j.note(format!(
+        "frames selected: {selected}; the body's drawings were {:?} and are {:?}; it said: {}",
+        was_rows.iter().find(|r| r.starts_with("body")),
+        body_row(&j),
+        j.heard()
+    ));
+    j.expect(
+        "a-drag-over-frames-selects-them",
+        selected && rows(&j) == was_rows,
+        "a drag over frames selects them and moves nothing",
+    );
+    if rows(&j) != was_rows {
+        j.chord(CMD, Key::Z);
+    }
+
+    j.act("the same drag, pressing a little left of the middle of the first frame");
+    j.drag_frames_off("body", end - 2, end, egui::vec2(-5.0, 0.0), Modifiers::NONE);
+    j.look("dragged-left-of-the-middle");
+    let selected = j.ed().is_some_and(|ed| ed.timeline.span.is_some());
+    j.note(format!(
+        "frames selected: {selected}; the body's drawings are {:?}; it said: {}",
+        body_row(&j),
+        j.heard()
+    ));
+    j.expect(
+        "a-drag-from-the-left-of-a-frame-selects",
+        selected && rows(&j) == was_rows,
+        "a drag that starts left of the middle of a frame selects frames and changes no drawing",
+    );
+    if rows(&j) != was_rows {
+        j.chord(CMD, Key::Z);
+    }
+
+    j.act("the same drag, pressing near the top edge of the row");
+    j.drag_frames_off("body", end - 2, end, egui::vec2(0.0, -10.0), Modifiers::NONE);
+    j.look("dragged-along-the-top");
+    let span = j.ed().and_then(|ed| ed.timeline.span.as_ref().map(|s| (s.from, s.to)));
+    j.note(format!(
+        "the selection is {span:?}; the body's drawings are {:?}",
+        body_row(&j)
+    ));
+    j.expect(
+        "a-drag-along-the-top-of-the-row-selects",
+        span == Some((end - 2, end)) && rows(&j) == was_rows,
+        "a drag that starts in the top few pixels of the row selects the frames",
+    );
+    if rows(&j) != was_rows {
+        j.chord(CMD, Key::Z);
+    }
+
+    j.act("the same drag with shift held, as the hint of the retime button says");
+    j.drag_frames_with("body", end - 2, end, Modifiers::SHIFT);
+    j.look("shift-dragged-over-frames");
+    let selected = j.ed().is_some_and(|ed| ed.timeline.span.is_some());
+    j.note(format!(
+        "frames selected: {selected}; the body's drawings are {:?}; it said: {}",
+        body_row(&j),
+        j.heard()
+    ));
+    j.expect(
+        "a-shift-drag-over-frames-selects-them",
+        selected && rows(&j) == was_rows,
+        "a drag over frames with shift held selects them and moves nothing",
+    );
+    if rows(&j) != was_rows {
+        j.chord(CMD, Key::Z);
+    }
+
+    j.act("a click on the first and a shift click on the last, then the clip button");
+    j.drag_frames("body", end - 2, end - 2);
+    j.drag_frames_with("body", end, end, Modifiers::SHIFT);
+    j.look("shift-clicked-frames");
+    let span = j.ed().and_then(|ed| ed.timeline.span.as_ref().map(|s| (s.from, s.to)));
+    j.note(format!(
+        "the selection is {span:?}; frames {} to {end} were meant",
+        end - 2
+    ));
+    j.expect(
+        "a-click-and-a-shift-click-select-frames",
+        span == Some((end - 2, end)),
+        "a click and a shift click select the frames between them",
+    );
+    let before = clip_names(&j);
+    let clip = j.press_hinted("new clip from the selection");
+    j.look("clip-made");
+    let made = clip_names(&j)
+        .into_iter()
+        .find(|c| !before.contains(c))
+        .unwrap_or_default();
+    j.note(format!("clips: {:?}; it said: {}", clip_names(&j), j.heard()));
+    j.expect(
+        "selected-frames-become-a-clip",
+        clip && !made.is_empty(),
+        "the selected frames become a clip",
+    );
+    j.expect(
+        "a-new-clip-asks-its-name",
+        j.shown("clip")
+            && j.h
+                .query_all_by_label("clip")
+                .any(|n| n.accesskit_node().role() == egui::accesskit::Role::TextInput),
+        "a new clip offers its name to type, where it is made",
+    );
+
+    j.act("name it hop: a click on its bar above the frames, the name field");
+    j.click_clip(&made);
+    j.look("clip-window");
+    j.retype("clip", "hop");
+    j.look("clip-named");
+    j.note(format!("clips: {:?}", clip_names(&j)));
+    j.expect(
+        "a-click-on-a-clips-bar-opens-its-name",
+        clip_names(&j).iter().any(|c| c == "hop"),
+        "a click on the clip's bar opens its settings, where the name is typed",
+    );
+    j.key(Key::Escape);
+
+    j.act("export the walk as a GIF: File > Export > GIF…, the walk button, Export");
+    j.menu("File", "Export", "GIF…");
+    j.click("walk");
+    j.look("gif-ready");
+    j.click("Export");
+    j.look("gif-exported");
+    let gifs: Vec<String> = files_in(&j.folder)
+        .into_iter()
+        .filter(|f| f.ends_with(".gif"))
+        .collect();
+    j.note(format!(
+        "GIFs: {gifs:?}; it said: {}",
+        j.heard().replace(&j.folder.display().to_string(), "")
+    ));
+    j.expect(
+        "a-clip-exports-as-a-gif",
+        gifs.len() == 1,
+        "the walk is written as a GIF",
+    );
+    j.press_hinted(&format!("close {} Export GIF", crate::theme::icon::EXPORT));
+
+    j.act("and everything as a sprite sheet with its JSON");
+    j.menu("File", "Export", "Sprite sheet…");
+    j.retype("frames", "all");
+    j.click("Export");
+    j.look("sheet-exported");
+    let json = files_in(&j.folder)
+        .into_iter()
+        .find(|f| f.ends_with(".json"))
+        .and_then(|f| std::fs::read_to_string(j.folder.join(f)).ok())
+        .unwrap_or_default();
+    j.note(format!(
+        "the JSON beside the sheet names {:?}",
+        clip_names(&j)
+            .into_iter()
+            .filter(|c| json.contains(&format!("\"{c}\"")))
+            .collect::<Vec<_>>()
+    ));
+    j.expect(
+        "the-sheet-names-every-clip",
+        !json.is_empty() && clip_names(&j).iter().all(|c| json.contains(&format!("\"{c}\""))),
+        "the sheet's JSON has a tag for each clip",
+    );
+    j.press_hinted(&format!("close {} Export sprite sheet", crate::theme::icon::EXPORT));
+
+    j.act("throw one drawing away with the timeline's bin and bring it back");
+    j.drag_frames("body", 1, 1);
+    let was = pixels(&drawing, &body, 1).0;
+    let binned = j.press_hinted("delete the drawing on this frame");
+    j.look("binned");
+    let gone = pixels(&drawing, &body, 1).0;
+    j.note(format!("it said: {}", j.heard()));
+    j.chord(CMD, Key::Z);
+    j.look("back");
+    j.expect(
+        "the-bin-takes-a-drawing-and-undo-brings-it-back",
+        binned && gone != was && pixels(&drawing, &body, 1).0 == was,
+        "the bin removes the drawing on the frame and cmd Z brings it back",
+    );
+
+    j.finish(&[
+        "a-drag-from-the-left-of-a-frame-selects",
+        "a-drag-over-frames-selects-them",
+        "a-new-clip-asks-its-name",
+        "a-shift-drag-over-frames-selects-them",
+        "equals-and-minus-undo-each-other",
+        "stopping-says-nothing-or-something-plain",
+    ]);
+}
+
+fn drawings(j: &Journey, layer: &str) -> Vec<(u32, Option<u32>, bool)> {
+    layer_of(j, layer).map_or_else(Vec::new, |l| {
+        l.cels().iter().map(|c| (c.frame, c.hold, c.link.is_some())).collect()
+    })
+}
+
+fn box_at(j: &mut Journey, layer: &str, frame: u32) -> Option<[f32; 4]> {
+    let back = frame_now(j).0;
+    if let Some(ed) = j.ed_mut() {
+        let _ = ed.go_to(frame);
+    }
+    j.settle();
+    let found = layer_box(j, layer);
+    if let Some(ed) = j.ed_mut() {
+        let _ = ed.go_to(back);
+    }
+    j.settle();
+    found
+}
+
+#[test]
+fn someone_animates_frame_by_frame() {
+    let mut j = Journey::begin("animate-frame-by-frame", WINDOW, None);
+
+    j.act("a new painting called bounce, and a ball near the top with the brush");
+    if !new_drawing(&mut j, "bounce") {
+        j.look("no-drawing");
+        return j.finish(&[]);
+    }
+    let layer = active_name(&j);
+    j.key(Key::B);
+    j.drag(&[
+        (470.0, 200.0),
+        (512.0, 160.0),
+        (554.0, 200.0),
+        (512.0, 240.0),
+        (470.0, 200.0),
+    ]);
+    j.look("first-key");
+    let first = layer_box(&j, &layer);
+    j.note(format!(
+        "layers {:?}; drawings on {layer}: {:?}; the ball is at {first:?}; frame {} of {}",
+        names(&j),
+        drawings(&j, &layer),
+        frame_now(&j).0,
+        frame_now(&j).1
+    ));
+    j.expect(
+        "the-first-drawing-is-there",
+        first.is_some(),
+        "the stroke is on the first frame",
+    );
+
+    j.act("the second key from the first: a click on its frame in the timeline, cmd D");
+    j.drag_frames(&layer, 0, 0);
+    j.chord(CMD, Key::D);
+    j.look("second-key");
+    let copy = frame_now(&j).0;
+    j.note(format!(
+        "drawings on {layer}: {:?}; the playhead is on frame {copy} of {}; it said: {}",
+        drawings(&j, &layer),
+        frame_now(&j).1,
+        j.heard()
+    ));
+    j.expect(
+        "cmd-d-makes-the-next-key",
+        drawings(&j, &layer).len() == 2 && copy > 0 && layer_box(&j, &layer).is_some(),
+        "cmd D makes a copy of the drawing on the next frame and goes there",
+    );
+
+    j.act("move the copy down to the floor: V, a drag on the ball");
+    j.key(Key::V);
+    j.drag(&[(512.0, 160.0), (512.0, 400.0), (512.0, 700.0)]);
+    j.look("second-key-moved");
+    let second = layer_box(&j, &layer);
+    let stays = box_at(&mut j, &layer, 0);
+    j.note(format!(
+        "the ball on this frame is at {second:?}; on the first frame it is at {stays:?}"
+    ));
+    j.expect(
+        "the-copy-moves-alone",
+        shifted(first, second).is_some_and(|(_, dy)| dy > 400.0) && near(stays, first, 2.0),
+        "the copy moves down and the first drawing stays",
+    );
+    j.key(Key::Escape);
+
+    j.act("room between the keys: a click on the first frame, = three times");
+    j.drag_frames(&layer, 0, 0);
+    j.key(Key::Equals);
+    j.key(Key::Equals);
+    j.key(Key::Equals);
+    j.look("room");
+    let keys = drawings(&j, &layer);
+    let last = keys.last().map_or(0, |k| k.0);
+    j.note(format!(
+        "drawings on {layer}: {keys:?}; the timeline has {} frames",
+        frame_now(&j).1
+    ));
+    j.expect(
+        "equals-makes-room-between-keys",
+        last >= 4,
+        "= holds the first key longer and pushes the second later",
+    );
+
+    j.act("in-betweens: a click on the first key, a shift click on the second, the in-between button, make");
+    j.drag_frames(&layer, 0, 0);
+    j.drag_frames_with(&layer, last, last, Modifiers::SHIFT);
+    j.look("keys-selected");
+    let asked = j.press_hinted("in-between the selection");
+    j.look("in-between-window");
+    let shape = |j: &mut Journey, frame: u32| -> (Option<[f32; 4]>, usize) {
+        let found = box_at(j, &layer, frame);
+        let back = frame_now(j).0;
+        if let Some(ed) = j.ed_mut() {
+            let _ = ed.go_to(frame);
+        }
+        let samples = last_stroke(j, &layer).map_or(0, |s| s.samples.len());
+        if let Some(ed) = j.ed_mut() {
+            let _ = ed.go_to(back);
+        }
+        j.settle();
+        (found, samples)
+    };
+    let keys_before = (shape(&mut j, 0), shape(&mut j, last));
+    let made = j.click("make the in-betweens");
+    let done = j.wait("the in-betweens", |ed| {
+        ed.scene.bundle.doc.find_layer(&layer).is_ok_and(|l| l.cels().len() > 2)
+            && !ed.jobs.busy(crate::jobs::Tag::Inbetween)
+    });
+    j.look("in-betweens");
+    let between: Vec<Option<[f32; 4]>> = (1..last).map(|f| box_at(&mut j, &layer, f)).collect();
+    let tops: Vec<f32> = between.iter().flatten().map(|b| b[1]).collect();
+    j.note(format!(
+        "drawings on {layer}: {:?}; the ball's top on the frames between: {tops:?}; it said: {}",
+        drawings(&j, &layer),
+        j.heard()
+    ));
+    j.expect(
+        "the-in-betweens-lie-between-the-keys",
+        asked
+            && made
+            && done
+            && tops.len() as u32 == last - 1
+            && tops.windows(2).all(|w| w[0] < w[1])
+            && tops.first().is_some_and(|t| first.is_some_and(|f| *t > f[1]))
+            && tops.last().is_some_and(|t| second.is_some_and(|s| *t < s[1])),
+        "each frame between the keys gets a drawing, each lower than the one before",
+    );
+    let keys_after = (shape(&mut j, 0), shape(&mut j, last));
+    j.note(format!(
+        "the two keys (box, points of the stroke) before: {keys_before:?}; after: {keys_after:?}"
+    ));
+    j.expect(
+        "making-in-betweens-leaves-the-keys-as-drawn",
+        keys_before == keys_after,
+        "the two keys are the strokes they were before the in-betweens were made",
+    );
+    j.press_hinted(&format!("close {} In-betweens", crate::theme::icon::INBETWEEN));
+
+    j.act("see the neighbours while drawing: O, on a frame in the middle, and O again");
+    j.drag_frames(&layer, 2, 2);
+    let plain = j.picture();
+    j.key(Key::O);
+    j.look("onion");
+    let on = j.ed().is_some_and(|ed| ed.scene.onion_on);
+    let with_onion = j.picture();
+    j.key(Key::O);
+    let back = j.picture();
+    j.expect(
+        "o-shows-the-neighbouring-frames",
+        on && with_onion != plain && back == plain,
+        "O shows the frames before and after, and O again shows the drawing alone",
+    );
+
+    j.act("play it with Return, then stop");
+    j.key(Key::Enter);
+    j.h.run_steps(10);
+    let playing = j.ed().is_some_and(|ed| ed.timeline.player.is_some());
+    j.look("playing");
+    j.key(Key::Enter);
+    j.expect(
+        "return-plays-the-painting",
+        playing && j.ed().is_some_and(|ed| ed.timeline.player.is_none()),
+        "Return plays and stops",
+    );
+
+    j.act("a floor behind the ball, added while looking at the last frame: Layer > New paint layer, one stroke");
+    j.key(Key::End);
+    let at = frame_now(&j).0;
+    j.click("Layer");
+    j.click("New paint layer");
+    let ground = active_name(&j);
+    j.key(Key::B);
+    j.drag(&[(150.0, 900.0), (500.0, 910.0), (880.0, 900.0)]);
+    j.look("floor-made-on-the-last-frame");
+    let total = frame_now(&j).1;
+    let on: Vec<u32> = (0..total).filter(|f| box_at(&mut j, &ground, *f).is_some()).collect();
+    j.note(format!(
+        "made on frame {at}; layers {:?}; the stroke on {ground} shows on frames {on:?} of {total}; drawings on {ground}: {:?}",
+        names(&j),
+        drawings(&j, &ground)
+    ));
+    j.expect(
+        "a-new-layer-shows-on-every-frame",
+        on.len() as u32 == total,
+        "a layer added on a later frame shows what is drawn on it on every frame",
+    );
+
+    j.act("take both back, go to the first frame with Home and make the floor again");
+    j.chord(CMD, Key::Z);
+    j.chord(CMD, Key::Z);
+    j.key(Key::Home);
+    j.click("Layer");
+    j.click("New paint layer");
+    let ground = active_name(&j);
+    j.key(Key::B);
+    j.drag(&[(150.0, 900.0), (500.0, 910.0), (880.0, 900.0)]);
+    j.look("floor-made-on-the-first-frame");
+    let on: Vec<u32> = (0..total).filter(|f| box_at(&mut j, &ground, *f).is_some()).collect();
+    j.note(format!(
+        "layers {:?}; the stroke on {ground} shows on frames {on:?} of {total}",
+        names(&j)
+    ));
+    j.expect(
+        "a-layer-made-on-the-first-frame-holds-across-the-timeline",
+        on.len() as u32 == total,
+        "a stroke on a layer made on the first frame shows on every frame",
+    );
+
+    j.act("the ball back up at the end: the ball's layer, End, shift K for a new frame, the link button, the first drawing");
+    j.click(&layer);
+    j.drag_frames(&layer, last, last);
+    j.key(Key::End);
+    j.chord(Modifiers::SHIFT, Key::K);
+    let here = frame_now(&j).0;
+    let opened = j.press_hinted("show a drawing here (link)");
+    j.look("link-window");
+    let offered = j.in_sight_containing(&format!("frame {here} will show the drawing you pick"));
+    let picked = j.click("frame 0");
+    j.look("link-on-a-new-frame");
+    j.note(format!(
+        "frame {here} of {}; the window offered this frame: {offered}; drawings on {layer}: {:?}; it said: {}",
+        frame_now(&j).1,
+        drawings(&j, &layer),
+        j.heard()
+    ));
+    j.expect(
+        "the-link-window-does-what-it-offers",
+        opened && picked && drawings(&j, &layer).iter().any(|d| d.2),
+        "the window that says this frame will show the picked drawing makes the link, also on a frame shift K just made",
+    );
+    j.expect(
+        "a-refused-link-speaks-plainly",
+        !j.heard().starts_with("op ") && !j.heard().contains(" c1"),
+        "a refusal says what is in the way in words, without internal ids",
+    );
+
+    j.act("the other way: take the new frame back, hold the last key a frame longer with =, End, the link button");
+    if !drawings(&j, &layer).iter().any(|d| d.2) {
+        j.chord(CMD, Key::Z);
+        j.drag_frames(&layer, last, last);
+        j.key(Key::Equals);
+        j.key(Key::End);
+        if !j.in_sight_containing("will show the drawing you pick") {
+            j.press_hinted("show a drawing here (link)");
+        }
+        j.look("link-window-again");
+        j.click("frame 0");
+    }
+    j.look("linked");
+    let here = frame_now(&j).0;
+    let up = layer_box(&j, &layer);
+    j.note(format!(
+        "frame {here} of {}; drawings on {layer}: {:?}; the ball here is at {up:?}; it said: {}",
+        frame_now(&j).1,
+        drawings(&j, &layer),
+        j.heard()
+    ));
+    j.expect(
+        "a-link-shows-the-first-drawing-again",
+        drawings(&j, &layer).iter().any(|d| d.2) && near(up, keys_after.0.0, 2.0),
+        "on a held frame the link shows the first drawing again",
+    );
+
+    j.act("a dot on the linked frame, and a look at the first frame");
+    let before = box_at(&mut j, &layer, 0);
+    j.key(Key::B);
+    j.tap(800.0, 300.0);
+    j.look("dot-on-the-link");
+    let after = box_at(&mut j, &layer, 0);
+    j.note(format!(
+        "the first frame's drawing reached {before:?} and now reaches {after:?}; it said: {}",
+        j.heard()
+    ));
+    j.expect(
+        "drawing-on-a-link-changes-both",
+        after != before,
+        "a mark on the linked frame shows on the first frame too, as the button's hint says",
+    );
+    j.act("export it as a GIF: File > Export > GIF…, Export");
+    j.menu("File", "Export", "GIF…");
+    j.look("gif-window");
+    j.click("Export");
+    let folder = j.folder.clone();
+    let written = j.wait("the GIF", |_| files_in(&folder).iter().any(|f| f.ends_with(".gif")));
+    j.look("gif-exported");
+    j.note(format!(
+        "it said: {}",
+        j.heard().replace(&j.folder.display().to_string(), "")
+    ));
+    j.expect(
+        "a-painted-animation-exports-as-a-gif",
+        written,
+        "the animation is written as a GIF",
+    );
+
+    j.finish(&[
+        "a-new-layer-shows-on-every-frame",
+        "a-refused-link-speaks-plainly",
+        "the-link-window-does-what-it-offers",
+    ]);
+}
+
+const GODOT_TILES: &str = r#"extends SceneTree
+
+func _init() -> void:
+	var path := ""
+	var dir := DirAccess.open("res://FOLDER")
+	if dir:
+		for name in dir.get_files():
+			if name.ends_with(".tres"):
+				path = "res://FOLDER/" + name
+	var set = load(path) if path != "" else null
+	if set == null or not (set is TileSet):
+		print("FAILED no TileSet loads from ", path)
+		quit(1)
+		return
+	var source: TileSetAtlasSource = set.get_source(set.get_source_id(0))
+	print("TILESET ", path.get_file(), " tile size ", set.tile_size, " tiles ", source.get_tiles_count(), " texture ", source.texture.get_size())
+	quit(0)
+"#;
+
+fn godot_tiles(j: &mut Journey, project: &std::path::Path, folder: &str) -> Option<String> {
+    let godot = std::env::var_os("KLAD_GODOT").filter(|g| !g.is_empty())?;
+    std::fs::write(
+        project.join("project.godot"),
+        "config_version=5\n\n[application]\nconfig/name=\"check\"\n",
+    )
+    .ok()?;
+    std::fs::write(project.join("tiles.gd"), GODOT_TILES.replace("FOLDER", folder)).ok()?;
+    let run = |args: &[&str]| {
+        std::process::Command::new(&godot)
+            .arg("--headless")
+            .arg("--path")
+            .arg(project)
+            .args(args)
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+            .unwrap_or_default()
+    };
+    run(&["--import"]);
+    let said = run(&["--script", "res://tiles.gd"]);
+    j.note("opened the folder as a Godot project and loaded the tile set there");
+    said.lines()
+        .filter(|l| l.starts_with("TILESET") || l.starts_with("FAILED"))
+        .for_each(|l| j.note(format!("Godot: {l}")));
+    Some(said)
+}
+
+fn tile_of(j: &Journey) -> Option<[u32; 2]> {
+    j.ed().and_then(|ed| ed.scene.bundle.doc.canvas.tile)
+}
+
+#[test]
+fn someone_makes_a_tileset_for_a_game() {
+    let mut j = Journey::begin("pixel-tileset", WINDOW, None);
+
+    j.act("klad starts: Pixel art, the 64 px sprite size, the name ground");
+    j.click("Pixel art");
+    j.click("Size");
+    j.click("64 x 64  sprite");
+    j.retype("Name", "ground");
+    if j.ed().is_none() {
+        j.click("Create");
+    }
+    j.settle();
+    j.look("new-drawing");
+    if j.ed().is_none() {
+        return j.finish(&[]);
+    }
+    let drawing = j.drawing();
+    let layer = layer_id(&j);
+
+    j.act("cut it into tiles of 16 px: View > Tileset: cut into tiles…, the cut button");
+    j.click("View");
+    let asked = j.click("Tileset: cut into tiles…");
+    j.look("tileset-window");
+    let cut = j.click("cut into tiles");
+    j.look("cut");
+    j.note(format!(
+        "the drawing's tile size is {:?}; it said: {}",
+        tile_of(&j),
+        j.heard()
+    ));
+    j.expect(
+        "a-drawing-cuts-into-tiles",
+        asked && cut && tile_of(&j) == Some([16, 16]),
+        "the drawing is cut into tiles of 16 by 16",
+    );
+    j.press_hinted(&format!("close {} Tileset", crate::theme::icon::PIXELS));
+
+    j.act("a grass tile and a stone tile: a palette, then two filled squares with U and G");
+    j.click("Tools");
+    j.click_containing("Load a palette");
+    j.click("PICO-8");
+    if j.shown("or a palette file") {
+        j.key(Key::Escape);
+    }
+    j.click("#008751");
+    j.key(Key::U);
+    j.drag(&[(0.5, 0.5), (15.5, 15.5)]);
+    j.key(Key::G);
+    j.tap(8.5, 8.5);
+    j.click("#5f574f");
+    j.key(Key::U);
+    j.drag(&[(16.5, 0.5), (31.5, 15.5)]);
+    j.key(Key::G);
+    j.tap(24.5, 8.5);
+    j.look("two-tiles");
+    let (rows, _) = pixels(&drawing, &layer, 0);
+    j.note(format!(
+        "{} pixels are painted; row 8 reads {:?}",
+        painted(&rows),
+        rows.get(8)
+    ));
+    j.expect(
+        "two-tiles-are-drawn",
+        painted(&rows) == 512 && cell_of(&rows, 8, 8) != cell_of(&rows, 24, 8) && cell_of(&rows, 40, 8) == '.',
+        "the first two tiles are filled, each in its colour, and the third is empty",
+    );
+
+    j.act("a fill in an empty tile: G, a click in the third tile");
+    j.click("#29adff");
+    j.key(Key::G);
+    j.tap(40.5, 8.5);
+    j.look("fill-in-a-tile");
+    let (rows, _) = pixels(&drawing, &layer, 0);
+    let filled = painted(&rows) - 512;
+    j.note(format!("the fill painted {filled} pixels; a tile holds 256"));
+    j.expect(
+        "a-fill-stays-in-its-tile",
+        filled == 256,
+        "in a drawing cut into tiles a fill in an empty tile fills that tile",
+    );
+    if filled != 256 {
+        j.chord(CMD, Key::Z);
+    }
+
+    j.act("make a tile that repeats: View > Tile: wrap at the edges, a pencil line past the right edge");
+    j.click("View");
+    let wrap = j.click("Tile: wrap at the edges");
+    j.key(Key::B);
+    j.click("#ffec27");
+    j.drag(&[(58.5, 40.5), (62.5, 40.5), (66.5, 40.5), (69.5, 40.5)]);
+    j.look("wrapped-line");
+    let (rows, _) = pixels(&drawing, &layer, 0);
+    let row = rows.get(40).cloned().unwrap_or_default();
+    j.note(format!("row 40 reads {row:?}"));
+    j.expect(
+        "a-line-past-the-edge-comes-back-in",
+        wrap && cell_of(&rows, 62, 40) != '.' && cell_of(&rows, 2, 40) != '.',
+        "with wrap on, a line drawn past the right edge goes on from the left edge",
+    );
+    j.click("View");
+    j.click("Tile: wrap at the edges");
+
+    j.act("export the tiles for Godot: File > Export > Godot…, a tile set, the folder game, Export");
+    j.menu("File", "Export", "Godot…");
+    j.look("godot-window");
+    let offered = j.click("a tile set");
+    j.retype("Godot folder", "game");
+    j.look("godot-ready");
+    j.click("Export");
+    let project = j.folder.join("game");
+    let folder = project.clone();
+    let written = j.wait("the tile set", |_| {
+        files_in(&folder).iter().any(|f| f.ends_with(".tres"))
+    });
+    j.look("godot-exported");
+    let files = files_in(&project);
+    j.note(format!(
+        "files in game: {files:?}; it said: {}",
+        j.heard().replace(&j.folder.display().to_string(), "")
+    ));
+    let tres = files
+        .iter()
+        .find(|f| f.ends_with(".tres"))
+        .and_then(|f| std::fs::read_to_string(project.join(f)).ok())
+        .unwrap_or_default();
+    let tiles = tres.lines().filter(|l| l.ends_with("/0 = 0")).count();
+    j.note(format!("the tile set lists {tiles} tiles"));
+    j.expect(
+        "the-tile-set-holds-the-drawn-tiles",
+        offered && written && tres.contains("type=\"TileSet\"") && tiles >= 3,
+        "the export writes a Godot TileSet with a tile for each tile drawn on",
+    );
+    let root = j.folder.clone();
+    if let Some(said) = godot_tiles(&mut j, &root, "game") {
+        j.expect(
+            "godot-loads-the-tile-set",
+            said.contains("TILESET") && said.contains("tile size (16, 16)") && said.contains(&format!("tiles {tiles}")),
+            "Godot loads the tile set with its tile size and its tiles",
+        );
+    }
+    j.press_hinted(&format!("close {} Export for Godot", crate::theme::icon::EXPORT));
+
+    j.act("one picture again: View > Tileset: cut into tiles…, no tiles");
+    j.click("View");
+    j.click("Tileset: cut into tiles…");
+    let whole = j.click("no tiles");
+    j.look("no-tiles");
+    j.expect(
+        "no-tiles-makes-it-one-picture",
+        whole && tile_of(&j).is_none(),
+        "no tiles makes the drawing one picture again",
+    );
+
+    j.finish(&["a-fill-stays-in-its-tile"]);
+}
+
+fn bones_of(j: &Journey) -> Vec<(String, Option<String>)> {
+    j.ed().map_or_else(Vec::new, |ed| {
+        klad_core::rig::skeletons(&ed.scene.bundle.doc)
+            .first()
+            .map_or_else(Vec::new, |l| {
+                l.bones.iter().map(|b| (b.name.clone(), b.parent.clone())).collect()
+            })
+    })
+}
+
+fn rig_of(j: &Journey, layer: &str) -> Option<Option<String>> {
+    layer_of(j, layer).and_then(|l| l.rig.map(|link| link.bone))
+}
+
+#[test]
+fn someone_gives_an_arm_bones_and_poses_it() {
+    let mut j = Journey::begin("bones-pose", WINDOW, None);
+
+    j.act("a new painting called arm, and a thick line for the arm");
+    if !new_drawing(&mut j, "arm") {
+        j.look("no-drawing");
+        return j.finish(&[]);
+    }
+    let layer = active_name(&j);
+    j.key(Key::B);
+    j.click("64");
+    j.drag(&[(300.0, 500.0), (500.0, 500.0), (700.0, 500.0)]);
+    j.look("arm");
+    let rest = layer_box(&j, &layer);
+    j.note(format!("layers {:?}; the arm on {layer} is at {rest:?}", names(&j)));
+    j.expect("the-arm-is-drawn", rest.is_some(), "the line is on the canvas");
+
+    j.act("bones: J, a drag along the upper arm, a click at the hand, Esc");
+    j.key(Key::J);
+    j.look("bone-tool");
+    j.drag(&[(300.0, 500.0), (500.0, 500.0)]);
+    j.tap(700.0, 500.0);
+    j.key(Key::Escape);
+    j.look("two-bones");
+    j.note(format!(
+        "bones {:?}; layers {:?}; the layer in hand is {}; it said: {}",
+        bones_of(&j),
+        names(&j),
+        active_name(&j),
+        j.heard()
+    ));
+    j.expect(
+        "a-drag-and-a-click-draw-a-chain-of-two-bones",
+        bones_of(&j).len() == 2 && bones_of(&j)[1].1.as_deref() == Some(bones_of(&j)[0].0.as_str()),
+        "the drag makes a bone and the click a second one that hangs from it",
+    );
+
+    j.act("pose it right away: the pose button, a drag of the hand upwards");
+    let pose = j.click("pose");
+    j.drag(&[(700.0, 500.0), (690.0, 420.0), (650.0, 340.0)]);
+    j.h.run_steps(20);
+    j.look("posed-with-nothing-attached");
+    let turns = |j: &Journey| -> Vec<(String, f32)> {
+        j.ed().map_or_else(Vec::new, |ed| {
+            ed.bones.pose.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        })
+    };
+    let words = j.screen().join(" | ");
+    j.note(format!("turns {:?}; it said: {}", turns(&j), j.heard()));
+    j.expect(
+        "a-drag-of-the-hand-turns-the-forearm",
+        pose && turns(&j).iter().any(|(_, t)| t.abs() > 15.0),
+        "dragging the end of the second bone turns it",
+    );
+    j.expect(
+        "posing-with-no-layer-attached-says-so",
+        ["attach", "no layer", "follows"]
+            .iter()
+            .any(|w| words.contains(*w) || j.heard().contains(*w)),
+        "posing a skeleton that no layer follows says that nothing is attached yet, and where to attach",
+    );
+
+    j.act("keep it anyway: make this pose a drawing");
+    j.click("make this pose a drawing");
+    j.wait("the pose as a drawing", |ed| !ed.jobs.busy(crate::jobs::Tag::Edit));
+    j.settle();
+    j.look("pose-made-of-nothing");
+    j.note(format!("it said: {}", j.heard()));
+    j.expect(
+        "a-pose-of-nothing-is-not-called-done",
+        !j.heard().contains("posed 0 drawings"),
+        "with nothing attached the button says what is missing, not that it is done",
+    );
+    j.click("back to rest");
+
+    j.act("let the arm bend with the bones: the bone button on the arm's row in the Layers panel");
+    let hint = format!("{layer} is not rigged");
+    let row = j.hint_in_sight(&hint);
+    j.expect(
+        "the-rows-bone-button-is-in-reach",
+        row,
+        "the bone button on the arm's row in the Layers panel is in sight",
+    );
+    if !row && !j.scroll_to_hinted(&hint) {
+        j.note("the row lies under the timeline; folding the Colour and Brush panels to make room");
+        j.press_hinted("fold Colour to its title");
+        j.press_hinted("fold Brush to its title");
+        j.scroll_to_hinted(&hint);
+    }
+    let pressed = j.press_hinted(&hint);
+    j.look("rig-menu");
+    let bends = pressed && j.click("bends with bones");
+    j.look("attached");
+    j.note(format!(
+        "{layer} is rigged as {:?}; it said: {}",
+        rig_of(&j, &layer),
+        j.heard()
+    ));
+    j.expect(
+        "the-arm-bends-with-the-bones",
+        bends && rig_of(&j, &layer) == Some(None),
+        "the row's bone button attaches the arm so that it bends with the skeleton",
+    );
+
+    j.act("pose again: a drag of the hand upwards");
+    j.click("bones");
+    j.key(Key::J);
+    j.click("pose");
+    j.drag(&[(700.0, 500.0), (690.0, 420.0), (650.0, 340.0)]);
+    let shown = j.wait("the posed drawing", |ed| {
+        ed.preview
+            .as_ref()
+            .is_some_and(|p| p.posed.is_some() && p.job.is_none() && p.done.is_some())
+    });
+    j.look("posed");
+    j.note(format!("turns {:?}; it said: {}", turns(&j), j.heard()));
+    j.expect(
+        "the-drawing-bends-while-posing",
+        shown,
+        "the arm is shown bent while the bone is dragged",
+    );
+
+    j.act("keep it: make this pose a drawing");
+    j.click("make this pose a drawing");
+    j.wait("the pose as a drawing", |ed| !ed.jobs.busy(crate::jobs::Tag::Edit));
+    j.settle();
+    j.look("pose-on-the-rest-frame");
+    j.note(format!(
+        "drawings on {layer}: {:?}; it said: {}",
+        drawings(&j, &layer),
+        j.heard()
+    ));
+    j.expect(
+        "a-pose-on-the-first-frame-is-kept-or-refused-plainly",
+        drawings(&j, &layer).len() > 1 || (!j.heard().contains("op 1") && !j.heard().contains(" c2")),
+        "the first pose is kept, or the refusal says in plain words to go to another frame first",
+    );
+
+    j.act("try the button once more, then look for the export in the File menu while the two messages are there");
+    j.click("make this pose a drawing");
+    j.wait("the pose as a drawing", |ed| !ed.jobs.busy(crate::jobs::Tag::Edit));
+    j.settle();
+    j.click("File");
+    j.click("Export");
+    j.look("menu-under-the-messages");
+    let covered: Vec<String> =
+        j.h.query_all(egui_kittest::kittest::By::new().predicate(|n| {
+            super::testkit::written(n).is_some_and(|label| {
+                [
+                    "Godot…",
+                    "Aseprite…",
+                    "GIF…",
+                    "Quit klad",
+                    "Install the klad command",
+                    "Copy path",
+                ]
+                .iter()
+                .any(|item| label.starts_with(item))
+            })
+        }))
+        .filter(|n| {
+            j.h.ctx
+                .layer_id_at(n.rect().center())
+                .is_some_and(|layer| layer.order == egui::Order::Tooltip)
+        })
+        .filter_map(|n| super::testkit::written(&n.accesskit_node()))
+        .collect();
+    j.note(format!("menu items lying under a message: {covered:?}"));
+    j.expect(
+        "messages-leave-open-menus-free",
+        covered.is_empty(),
+        "a message on the canvas does not lie over the items of an open menu",
+    );
+    j.key(Key::Escape);
+    j.key(Key::Escape);
+
+    j.act("close the messages with their crosses; then, as they say, another frame: a click on the arm's frame in the timeline, shift I for a frame more, the full stop key");
+    (0..3).for_each(|_| {
+        if j.hint_in_sight("dismiss; the message log keeps it") {
+            j.press_hinted("dismiss; the message log keeps it");
+        }
+    });
+    j.click("back to rest");
+    j.drag_frames(&layer, 0, 0);
+    j.chord(Modifiers::SHIFT, Key::I);
+    j.key(Key::Period);
+    let at = frame_now(&j);
+    j.note(format!("frame {} of {}; it said: {}", at.0, at.1, j.heard()));
+    j.expect(
+        "shift-i-makes-a-second-frame",
+        at == (1, 2),
+        "shift I makes the timeline a frame longer and the full stop key goes there",
+    );
+
+    j.act("the pose again on this frame: the bones layer, J, pose, a drag of the hand, make this pose a drawing");
+    j.click("bones");
+    j.key(Key::J);
+    j.click("pose");
+    j.drag(&[(700.0, 500.0), (690.0, 420.0), (650.0, 340.0)]);
+    j.wait("the posed drawing", |ed| {
+        ed.preview
+            .as_ref()
+            .is_some_and(|p| p.posed.is_some() && p.job.is_none() && p.done.is_some())
+    });
+    let made = j.click("make this pose a drawing");
+    j.wait("the pose as a drawing", |ed| !ed.jobs.busy(crate::jobs::Tag::Edit));
+    j.settle();
+    j.look("pose-made");
+    let bent = layer_box(&j, &layer);
+    j.note(format!(
+        "frame {} of {}; the arm was at {rest:?} and is at {bent:?} here; drawings on {layer}: {:?}; it said: {}",
+        at.0,
+        at.1,
+        drawings(&j, &layer),
+        j.heard()
+    ));
+    j.expect(
+        "the-pose-becomes-a-drawing",
+        made && rest.zip(bent).is_some_and(|(a, b)| b[1] < a[1] - 40.0),
+        "on another frame the arm's drawing is bent upwards as the bones were",
+    );
+
+    j.act("play the two poses with Return, then stop");
+    j.key(Key::Enter);
+    j.h.run_steps(10);
+    let playing = j.ed().is_some_and(|ed| ed.timeline.player.is_some());
+    j.look("playing");
+    j.key(Key::Enter);
+    j.expect("the-poses-play", playing, "Return plays the poses");
+
+    j.act("export the rig for Godot: File > Export > Godot…, a rig, the folder game, Export");
+    j.menu("File", "Export", "Godot…");
+    j.look("godot-window");
+    let offered = j.click("a rig");
+    j.retype("Godot folder", "game");
+    j.click("Export");
+    let project = j.folder.join("game");
+    let folder = project.clone();
+    let written = j.wait("the rig", |_| files_in(&folder).iter().any(|f| f.ends_with(".tscn")));
+    j.look("rig-exported");
+    let files = files_in(&project);
+    let scene = files
+        .iter()
+        .find(|f| f.ends_with(".tscn"))
+        .and_then(|f| std::fs::read_to_string(project.join(f)).ok())
+        .unwrap_or_default();
+    j.note(format!(
+        "files in game: {files:?}; the scene has {} Bone2D and {} Polygon2D nodes; it said: {}",
+        scene.matches("type=\"Bone2D\"").count(),
+        scene.matches("type=\"Polygon2D\"").count(),
+        j.heard().replace(&j.folder.display().to_string(), "")
+    ));
+    j.expect(
+        "the-rig-exports-with-its-bones",
+        offered && written && scene.matches("type=\"Bone2D\"").count() == 2 && scene.contains("Skeleton2D"),
+        "the export writes a scene with a Skeleton2D and the two bones",
+    );
+
+    j.finish(&[
+        "a-pose-of-nothing-is-not-called-done",
+        "a-pose-on-the-first-frame-is-kept-or-refused-plainly",
+        "messages-leave-open-menus-free",
+        "posing-with-no-layer-attached-says-so",
+        "the-rows-bone-button-is-in-reach",
+    ]);
+}
+
+fn maps_on(j: &Journey) -> bool {
+    j.ed().is_some_and(|ed| ed.scene.bundle.doc.maps.is_some())
+}
+
+fn shows(j: &Journey) -> String {
+    j.ed()
+        .and_then(|ed| ed.maps.show)
+        .map_or_else(|| "the picture".to_string(), |show| format!("{show:?}"))
+}
+
+fn lights(j: &Journey) -> usize {
+    j.ed()
+        .and_then(|ed| ed.scene.bundle.doc.maps.as_ref().map(|m| m.lights.len()))
+        .unwrap_or(0)
+}
+
+#[test]
+fn someone_lights_a_drawing_for_a_game() {
+    let mut j = Journey::begin("light-maps", WINDOW, Some("lantern.klad"));
+
+    j.act("open the lantern and bring up the light maps: Window > Light maps");
+    j.look("opened");
+    if j.ed().is_none() {
+        return j.finish(&[]);
+    }
+    j.click("Window");
+    let asked = j.click("Light maps");
+    j.look("light-maps-panel");
+    let title = j.hint_in_sight("fold Light maps to its title");
+    let boxed = j.in_sight("light maps");
+    j.note(format!(
+        "the panel's title is in sight: {title}; its light maps box is in sight: {boxed}; it said: {}",
+        j.heard()
+    ));
+    j.expect(
+        "the-light-maps-panel-opens-with-its-switch-in-sight",
+        asked && title && boxed,
+        "Window > Light maps opens the panel with the box that turns the maps on in sight",
+    );
+
+    j.act("turn them on: the light maps box");
+    if !boxed {
+        j.scroll_to("light maps");
+    }
+    j.click("light maps");
+    j.look("maps-on");
+    j.note(format!("light maps are on: {}; it said: {}", maps_on(&j), j.heard()));
+    j.expect(
+        "the-box-turns-the-maps-on",
+        maps_on(&j),
+        "the box turns the light maps on",
+    );
+
+    j.act("look at the maps in turn with M, back to the picture");
+    let seen: Vec<String> = (0..7)
+        .map(|_| {
+            j.key(Key::M);
+            j.settle();
+            shows(&j)
+        })
+        .collect();
+    j.look("after-m");
+    j.note(format!("M showed in turn: {seen:?}"));
+    j.expect(
+        "m-walks-the-maps-and-returns-to-the-picture",
+        seen.first().is_some_and(|s| s.contains("Normal")) && seen.last().is_some_and(|s| s == "the picture"),
+        "M shows the normal map first and the picture again after the last map",
+    );
+
+    j.act("see it lit: the lit button of the panel, then hold L and move the pointer over the lantern");
+    let reach = j.in_sight("lit") || j.scroll_to("lit");
+    let lit = reach && j.click("lit");
+    j.settle();
+    j.look("lit");
+    j.note(format!("the canvas shows {}; it said: {}", shows(&j), j.heard()));
+    j.hold(Key::L, true);
+    j.hover_with(300.0, 300.0, Modifiers::NONE);
+    j.h.run_steps(6);
+    j.settle();
+    j.look("lit-by-the-pointer");
+    j.hover_with(700.0, 600.0, Modifiers::NONE);
+    j.h.run_steps(6);
+    j.settle();
+    j.look("lit-from-the-other-side");
+    j.hold(Key::L, false);
+    j.expect(
+        "the-lit-button-shows-the-picture-lit",
+        lit && shows(&j).contains("Lit"),
+        "the lit button shows the picture lit",
+    );
+
+    j.act("a light that stays: the panel's add a point light button");
+    let reach = j.in_sight("add a point light") || j.scroll_to("add a point light");
+    j.look("looking-for-the-lights");
+    j.expect(
+        "the-preview-lights-are-in-reach",
+        reach,
+        "the panel's lights can be brought in sight with the timeline open",
+    );
+    if !reach {
+        j.note("the lights lie under the timeline; closing it with Window > Timeline");
+        j.click("Window");
+        j.click("Timeline");
+        j.scroll_to("add a point light");
+    }
+    let added = j.click("add a point light");
+    j.settle();
+    j.look("point-light");
+    j.note(format!("the drawing has {} lights; it said: {}", lights(&j), j.heard()));
+    j.expect(
+        "a-point-light-is-added",
+        added && lights(&j) == 1,
+        "the button adds a point light to the drawing",
+    );
+    if !reach {
+        j.click("Window");
+        j.click("Timeline");
+    }
+
+    j.act("raise the flame: a map layer from the Layers panel's map button, a white stroke over the flame");
+    let before = names(&j);
+    let reach = j.hint_in_sight("new map layer") || j.scroll_to_hinted("new map layer");
+    let made = reach && j.press_hinted("new map layer");
+    j.look("map-layer");
+    let fresh = names(&j).into_iter().find(|n| !before.contains(n)).unwrap_or_default();
+    j.note(format!(
+        "layers {:?}; the new layer is {fresh:?}, a {:?} map; it said: {}",
+        names(&j),
+        layer_of(&j, &fresh).and_then(|l| l.map),
+        j.heard()
+    ));
+    j.expect(
+        "the-map-button-makes-a-height-layer",
+        made && layer_of(&j, &fresh).is_some_and(|l| l.map.is_some()),
+        "the map button makes a height layer above the layer in hand",
+    );
+    j.key(Key::B);
+    j.drag(&[(500.0, 380.0), (512.0, 420.0), (520.0, 460.0)]);
+    j.settle();
+    j.look("height-stroke");
+    j.note(format!(
+        "the map layer holds {} marks; the brush colour is {}; it said: {}",
+        count_on(&j, &fresh),
+        j.ed().map_or(String::new(), |ed| crate::color::hex(ed.color)),
+        j.heard()
+    ));
+    j.expect(
+        "a-stroke-lands-on-the-map-layer",
+        count_on(&j, &fresh) == 1,
+        "the stroke is on the map layer",
+    );
+
+    j.act("have klad check the maps: the check the maps box");
+    let reach = j.in_sight("check the maps") || j.scroll_to("check the maps");
+    let checked = reach && j.click("check the maps");
+    j.settle();
+    j.look("maps-checked");
+    j.note(format!("it said: {}", j.heard()));
+    j.expect(
+        "check-the-maps-answers",
+        checked && !j.heard().is_empty(),
+        "check the maps says what it found",
+    );
+
+    j.act("export the picture with its normal map: File > Export > Image…, the normal box, Export");
+    j.menu("File", "Export", "Image… cmd E");
+    j.look("export-window");
+    let offered = j.click("normal");
+    j.click("Export");
+    let folder = j.folder.clone();
+    let written = j.wait("the picture and its map", |_| pngs(&folder).len() >= 2);
+    j.look("exported");
+    let made: Vec<String> = pngs(&j.folder)
+        .iter()
+        .map(|p| {
+            format!(
+                "{} {:?}",
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                png_size(p)
+            )
+        })
+        .collect();
+    j.note(format!(
+        "pictures written: {made:?}; it said: {}",
+        j.heard().replace(&j.folder.display().to_string(), "")
+    ));
+    j.expect(
+        "the-normal-map-exports-beside-the-picture",
+        offered && written && made.len() == 2,
+        "the export writes the picture and its normal map, the same size",
+    );
+    j.press_hinted(&format!("close {} Export", crate::theme::icon::EXPORT));
+
+    j.act("and for Godot with a rim light: File > Export > Godot…, the folder game/art, the rim shader box, Export");
+    j.menu("File", "Export", "Godot…");
+    j.retype("Godot folder", "game/art");
+    let shader = j.click("rim shader");
+    j.look("godot-ready");
+    j.click("Export");
+    let project = j.folder.join("game").join("art");
+    let folder = project.clone();
+    let written = j.wait("the scene", |_| files_in(&folder).iter().any(|f| f.ends_with(".tscn")));
+    j.look("godot-exported");
+    let files = files_in(&project);
+    let text: String = files
+        .iter()
+        .filter(|f| f.ends_with(".tscn") || f.ends_with(".tres"))
+        .filter_map(|f| std::fs::read_to_string(project.join(f)).ok())
+        .collect();
+    j.note(format!(
+        "files in game/art: {files:?}; a normal map is wired in: {}; it said: {}",
+        text.contains("normal_texture"),
+        j.heard().replace(&j.folder.display().to_string(), "")
+    ));
+    j.expect(
+        "the-godot-export-carries-the-maps-and-the-shader",
+        shader && written && text.contains("normal_texture") && files.iter().any(|f| f.ends_with(".gdshader")),
+        "the Godot export wires the normal map in and writes the rim shader beside it",
+    );
+    let root = j.folder.clone();
+    if let Some(said) = godot(&mut j, &root.join("game"), "lantern") {
+        j.expect(
+            "godot-loads-the-lit-scene",
+            said.contains("ROOT "),
+            "Godot loads the scene",
+        );
+    }
+
+    j.finish(&["the-preview-lights-are-in-reach"]);
+}

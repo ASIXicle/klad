@@ -233,10 +233,18 @@ fn hint_texts_id() -> Id {
     Id::unique("klad hint texts")
 }
 
+#[cfg(test)]
+fn hint_parts_id() -> Id {
+    Id::unique("klad hint parts")
+}
+
 pub fn clear_hints(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp::<Vec<Rect>>(hinted_id(), Vec::new()));
     #[cfg(test)]
-    ctx.data_mut(|d| d.insert_temp::<Vec<(Rect, String)>>(hint_texts_id(), Vec::new()));
+    ctx.data_mut(|d| {
+        d.insert_temp::<Vec<(Rect, String)>>(hint_texts_id(), Vec::new());
+        d.insert_temp::<Vec<(Rect, Rect, String)>>(hint_parts_id(), Vec::new());
+    });
 }
 
 #[cfg(test)]
@@ -247,6 +255,14 @@ pub fn hinted(ctx: &egui::Context) -> Vec<Rect> {
 #[cfg(test)]
 pub fn hints(ctx: &egui::Context) -> Vec<(Rect, String)> {
     ctx.data(|d| d.get_temp::<Vec<(Rect, String)>>(hint_texts_id()).unwrap_or_default())
+}
+
+#[cfg(test)]
+pub fn hint_parts(ctx: &egui::Context) -> Vec<(Rect, Rect, String)> {
+    ctx.data(|d| {
+        d.get_temp::<Vec<(Rect, Rect, String)>>(hint_parts_id())
+            .unwrap_or_default()
+    })
 }
 
 pub fn select_all(ctx: &egui::Context, field: Id, text: &str) {
@@ -265,11 +281,16 @@ impl Hint for Response {
     fn hint(self, text: impl Into<WidgetText>) -> Response {
         let rect = self.rect;
         let text = text.into();
+        #[cfg(test)]
+        let seen = self.interact_rect;
         self.ctx.data_mut(|d| {
             d.get_temp_mut_or_default::<Vec<Rect>>(hinted_id()).push(rect);
             #[cfg(test)]
             d.get_temp_mut_or_default::<Vec<(Rect, String)>>(hint_texts_id())
                 .push((rect, text.text().to_string()));
+            #[cfg(test)]
+            d.get_temp_mut_or_default::<Vec<(Rect, Rect, String)>>(hint_parts_id())
+                .push((rect, seen, text.text().to_string()));
         });
         self.on_hover_text(text)
     }

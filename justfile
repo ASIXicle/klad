@@ -89,6 +89,9 @@ journeys out="":
     cargo build -p klad-cli
     KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- journeys
 
+sizes out="":
+    KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- --ignored sizes::
+
 sweep out="":
     cargo build -p klad-cli
     KLAD_SWEEP_OUT={{out}} cargo test -p klad-app -- --include-ignored sweep::
