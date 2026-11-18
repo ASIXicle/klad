@@ -23,7 +23,8 @@ const RULER: f32 = 18.0;
 const NAMES: f32 = 236.0;
 const EDGE: f32 = 8.0;
 const PAST: f32 = 14.0;
-const GRIP: f32 = 7.0;
+const GRIP: f32 = 4.5;
+const EDGE_SHARE: f32 = 0.25;
 const SETTLE: Duration = Duration::from_millis(150);
 const FLIP_PX: f32 = 22.0;
 const AHEAD: u32 = 4;
@@ -229,10 +230,11 @@ fn press_at(g: &Geom, blocks: &[Vec<Block>], p: Pos2) -> Option<Press> {
         return Some(Press::Ruler(f));
     };
     let list = blocks.get(r)?;
-    if let Some(b) = list
-        .iter()
-        .find(|b| (p.x - g.x_of(b.end)).abs() <= EDGE && p.x > g.x_of(b.start) + g.cell / 2.0)
-    {
+    let edge = EDGE.min(g.cell * EDGE_SHARE);
+    if let Some(b) = list.iter().find(|b| {
+        let end = g.x_of(b.end);
+        p.x <= end + 1.0 && p.x >= end - edge && p.x > g.x_of(b.start) + g.cell / 2.0
+    }) {
         return Some(Press::End(r, b.clone()));
     }
     match list.iter().find(|b| b.start <= f && f < b.end) {
@@ -939,8 +941,44 @@ impl Editor {
         Ok(())
     }
 
+    fn drawing_starting_here(&self) -> Option<(Cel, bool)> {
+        let (_, here) = self.here()?;
+        let (cel, _) = here?;
+        if cel.frame != self.scene.frame {
+            return None;
+        }
+        let empty = cel.nodes.is_empty()
+            && (cel.link.is_some() || (self.scene.knows_marks(&cel.id) && self.scene.marks_of(&cel.id).is_empty()));
+        Some((cel, empty))
+    }
+
+    pub(super) fn link_blocked(&self) -> Option<String> {
+        self.drawing_starting_here().filter(|(_, empty)| !empty).map(|_| {
+            format!(
+                "frame {} has a drawing of its own: go to a frame where a drawing is held, or delete this one first (Frame > Delete drawing)",
+                self.scene.frame
+            )
+        })
+    }
+
     pub(super) fn link_here(&mut self, source: String) -> Result<()> {
-        self.cel_op(CelAction::Link { cel: source }, Some(self.scene.frame), false)?;
+        if let Some(why) = self.link_blocked() {
+            self.say(Tone::Refused, why);
+            return Ok(());
+        }
+        let mut ops: Vec<Op> = self
+            .drawing_starting_here()
+            .map(|(cel, _)| Op::Remove { ids: vec![cel.id] })
+            .into_iter()
+            .collect();
+        ops.push(Op::Cel(CelSpec {
+            action: CelAction::Link { cel: source },
+            id: None,
+            frame: Some(self.scene.frame),
+            hold: None,
+            insert: false,
+        }));
+        self.timeline_apply(ops)?;
         Ok(())
     }
 
@@ -1091,8 +1129,7 @@ impl Editor {
     }
 
     pub(super) fn add_layer(&mut self, kind: &str) -> Result<()> {
-        let frame = self.scene.frame;
-        self.add_layer_value(json!({"kind": kind, "cels": [{"frame": frame}]}))
+        self.add_layer_value(json!({"kind": kind, "cels": [{"frame": 0}]}))
     }
 
     pub(super) fn add_layer_value(&mut self, layer: serde_json::Value) -> Result<()> {
@@ -1544,9 +1581,19 @@ impl Editor {
             |p: Pos2| in_strip(p) && matches!(strip.hit(&clip_list, p), Some((_, Hit::First | Hit::Last)));
         let resizing = matches!(self.timeline.drag, Some(Drag::Hold { .. } | Drag::ClipEnd { .. }));
         let hover_end = response.hover_pos().is_some_and(|p| on_edge(p) || on_clip_end(p));
+        let alt = ui.input(|i| i.modifiers.alt);
+        let span_now = self.timeline.span.clone();
+        let movable = |r: usize, p: Pos2| {
+            alt || span_now
+                .as_ref()
+                .is_some_and(|s| s.rows.contains(&rows[r].id) && (s.from..=s.to).contains(&geom.frame_at(p.x)))
+        };
         let hover_dot = response
             .hover_pos()
-            .is_some_and(|p| matches!(press_at(&geom, &row_blocks, p), Some(Press::Start(..))));
+            .is_some_and(|p| match press_at(&geom, &row_blocks, p) {
+                Some(Press::Start(r, _)) => movable(r, p),
+                _ => false,
+            });
         if resizing || (self.timeline.drag.is_none() && hover_end) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         } else if matches!(self.timeline.drag, Some(Drag::Move { .. })) {
@@ -1587,6 +1634,12 @@ impl Editor {
                     Some(_) => Some(Drag::Scrub),
                     None => Some(Drag::NewClip { from: f, to: f }),
                 },
+                Some(Press::Start(r, _) | Press::End(r, _)) if shift => {
+                    Some(drag_of(&Press::Cell(r, f), shift, |r| rows[r].id.clone()))
+                }
+                Some(Press::Start(r, _)) if !movable(r, p) => {
+                    Some(drag_of(&Press::Cell(r, f), shift, |r| rows[r].id.clone()))
+                }
                 Some(press) => Some(drag_of(&press, shift, |r| rows[r].id.clone())),
                 None => None,
             };
@@ -1884,9 +1937,10 @@ mod tests {
         assert_eq!(press_at(&g, &rows, pos2(130.0, 30.0)), None);
         assert_eq!(press_at(&g, &rows, pos2(130.0, 45.0)), Some(Press::Ruler(1)));
         assert_eq!(
-            press_at(&g, &rows, pos2(105.0, row0)),
+            press_at(&g, &rows, pos2(110.0, row0)),
             Some(Press::Start(0, rows[0][0].clone()))
         );
+        assert_eq!(press_at(&g, &rows, pos2(104.0, row0)), Some(Press::Cell(0, 0)));
         assert_eq!(press_at(&g, &rows, pos2(150.0, row0)), Some(Press::Cell(0, 2)));
         assert_eq!(
             press_at(&g, &rows, pos2(102.0, row0 - ROW / 2.0 + 2.0)),
@@ -1894,25 +1948,24 @@ mod tests {
         );
         assert_eq!(press_at(&g, &rows, pos2(118.0, row0)), Some(Press::Cell(0, 0)));
         assert_eq!(
-            press_at(&g, &rows, pos2(180.0 - 7.0, row0)),
+            press_at(&g, &rows, pos2(180.0 - 4.0, row0)),
             Some(Press::End(0, rows[0][0].clone()))
         );
+        assert_eq!(press_at(&g, &rows, pos2(180.0 - 7.0, row0)), Some(Press::Cell(0, 3)));
+        assert_eq!(press_at(&g, &rows, pos2(180.0 + 3.0, row0)), Some(Press::Cell(0, 4)));
         assert_eq!(
-            press_at(&g, &rows, pos2(180.0 + 7.0, row0)),
-            Some(Press::End(0, rows[0][0].clone()))
-        );
-        assert_eq!(
-            press_at(&g, &rows, pos2(195.0, row0)),
+            press_at(&g, &rows, pos2(192.0, row0)),
             Some(Press::Start(0, rows[0][1].clone()))
         );
         assert_eq!(press_at(&g, &rows, pos2(400.0, row0)), Some(Press::Cell(0, 15)));
         assert_eq!(
-            press_at(&g, &rows, pos2(165.0, row1)),
+            press_at(&g, &rows, pos2(158.0, row1)),
             Some(Press::End(1, rows[1][0].clone()))
         );
+        assert_eq!(press_at(&g, &rows, pos2(165.0, row1)), Some(Press::Cell(1, 3)));
         assert_eq!(press_at(&g, &rows, pos2(130.0, row1 + ROW)), Some(Press::Ruler(1)));
         let origin = pos2(180.0 - 4.0, row0);
-        let moved = origin + vec2(6.0, 0.0);
+        let moved = origin + vec2(4.0, 0.0);
         assert!(matches!(press_at(&g, &rows, origin), Some(Press::End(..))));
         assert!(matches!(press_at(&g, &rows, moved), Some(Press::End(..))));
         let name = |r: usize| format!("l{r}");

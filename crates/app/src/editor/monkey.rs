@@ -829,18 +829,7 @@ struct Kept {
     look_first: bool,
 }
 
-const KEPT: [Kept; 1] = [Kept {
-    name: "a word typed on a sprite that fills the window",
-    paper: Paper::Sprite,
-    acts: &[
-        Act::Press(Mods::None, Key::T),
-        Act::Tap(5.0, 19.0),
-        Act::Type("12"),
-        Act::Type("klad"),
-    ],
-    rule: "no panic",
-    look_first: false,
-}];
+const KEPT: [Kept; 0] = [];
 
 #[test]
 fn the_kept_runs_still_break_their_rule() {

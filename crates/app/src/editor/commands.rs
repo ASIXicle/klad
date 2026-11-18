@@ -29,6 +29,7 @@ const TIMELINE_KEYS: [Cmd; 6] = [
     Cmd::MoveEarlier,
     Cmd::MoveLater,
 ];
+const ZOOM_STEP: f32 = 1.25;
 const ON_THE_DRAWING: [Cmd; 12] = [
     Cmd::NewDrawing,
     Cmd::NewDrawingAfter,
@@ -68,6 +69,12 @@ impl Editor {
                 .filter_map(klad_core::stroke::Mark::as_fill)
                 .any(|f| matches!(f.source, klad_core::fill::FillSource::Seed { .. }))
         })
+    }
+
+    fn swap_size(&mut self) {
+        let other = self.other_size.unwrap_or(self.size);
+        self.other_size = Some(self.size);
+        self.size = other;
     }
 
     pub(super) fn active_paint(&self) -> bool {
@@ -773,6 +780,7 @@ impl Editor {
                 if self.brush == "eraser" {
                     let back = self.previous_brush.clone();
                     self.pick(&back);
+                    self.swap_size();
                 }
             }
             Cmd::Eraser => {
@@ -784,6 +792,7 @@ impl Editor {
                     self.previous_brush = self.brush.clone();
                     self.pick("eraser");
                 }
+                self.swap_size();
             }
             Cmd::Fill => self.tool = Tool::Fill,
             Cmd::Shapes => self.tool = Tool::Select,
@@ -898,6 +907,22 @@ impl Editor {
                 self.view = Some(self.fitted(area));
                 self.fitted_to = Some(area);
                 self.zoom_wanted = None;
+            }
+            Cmd::ZoomIn | Cmd::ZoomOut => {
+                self.zoom_wanted = None;
+                let ppp = self.ctx.pixels_per_point();
+                let pixels = self.scene.bundle.doc.pixel_art();
+                if let Some(view) = self.view.as_mut() {
+                    let inwards = cmd == Cmd::ZoomIn;
+                    let px = view.zoom * ppp;
+                    let target = match (pixels && px >= 1.0, inwards) {
+                        (true, true) => (px.floor() + 1.0).min(64.0) / ppp,
+                        (true, false) => (px.ceil() - 1.0).max(1.0) / ppp,
+                        (false, true) => view.zoom * ZOOM_STEP,
+                        (false, false) => view.zoom / ZOOM_STEP,
+                    };
+                    view.zoom_at(target / view.zoom, area / 2.0, area);
+                }
             }
             Cmd::ActualSize => {
                 self.zoom_wanted = None;

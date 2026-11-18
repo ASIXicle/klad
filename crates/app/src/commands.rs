@@ -35,6 +35,8 @@ pub enum Cmd {
     Zoom,
     Fit,
     ActualSize,
+    ZoomIn,
+    ZoomOut,
     TurnRight,
     TurnLeft,
     Undo,
@@ -541,7 +543,7 @@ use Repeat as R;
 use Trigger as T;
 
 impl Cmd {
-    pub const ALL: [Cmd; 214] = [
+    pub const ALL: [Cmd; 216] = [
         Cmd::Brush,
         Cmd::Eraser,
         Cmd::Fill,
@@ -573,6 +575,8 @@ impl Cmd {
         Cmd::Zoom,
         Cmd::Fit,
         Cmd::ActualSize,
+        Cmd::ZoomIn,
+        Cmd::ZoomOut,
         Cmd::TurnRight,
         Cmd::TurnLeft,
         Cmd::Undo,
@@ -1026,9 +1030,27 @@ impl Cmd {
                 "fit the canvas in the window",
                 icon::FIT,
                 G::View,
-                T::Press(const { &[plain(Key::F)] }),
+                T::Press(const { &[plain(Key::F), cmd(Key::Num0)] }),
                 R::No,
                 "zoom and centre so the whole canvas shows",
+            ),
+            Cmd::ZoomIn => spec(
+                "view.zoom-in",
+                "zoom in",
+                icon::ZOOM,
+                G::View,
+                T::Press(const { &[cmd(Key::Plus), cmd(Key::Equals)] }),
+                R::Yes,
+                "zoom the view in a step about its middle; a pixel drawing by whole pixels",
+            ),
+            Cmd::ZoomOut => spec(
+                "view.zoom-out",
+                "zoom out",
+                icon::ZOOM,
+                G::View,
+                T::Press(const { &[cmd(Key::Minus)] }),
+                R::Yes,
+                "zoom the view out a step about its middle; a pixel drawing by whole pixels",
             ),
             Cmd::ActualSize => spec(
                 "view.100",
@@ -2713,6 +2735,8 @@ impl Cmd {
             Cmd::Bigger => "Bigger brush",
             Cmd::Fit => "Fit",
             Cmd::ActualSize => "100%",
+            Cmd::ZoomIn => "Zoom in",
+            Cmd::ZoomOut => "Zoom out",
             Cmd::TurnRight => "Rotate right",
             Cmd::TurnLeft => "Rotate left",
             Cmd::Undo => "Undo",
@@ -3211,6 +3235,8 @@ pub const MENUS: [Menu; 9] = [
     Menu {
         title: "View",
         items: &[
+            Run(Cmd::ZoomIn),
+            Run(Cmd::ZoomOut),
             Run(Cmd::Fit),
             Run(Cmd::ActualSize),
             Line,

@@ -32,7 +32,7 @@ impl Default for TextTool {
         Self {
             font: "Inter".into(),
             weight: None,
-            size: 48.0,
+            size: TEXT_SIZE,
             align: Align::Left,
             tracking: 0.0,
             leading: 1.2,
@@ -67,6 +67,10 @@ pub(super) struct Picker {
     pub group: Option<&'static str>,
     pub faces: HashMap<String, Option<TextureHandle>>,
 }
+
+pub(super) const TEXT_SIZE: f32 = 48.0;
+const PICTURE_MOST: usize = 8192;
+const PICTURE_ROOM: f32 = 0.9;
 
 fn compose(s: [f32; 6], m: [f32; 6]) -> [f32; 6] {
     [
@@ -551,6 +555,7 @@ impl Editor {
         let o = self.screen(view, rect, vec2(0.0, 0.0));
         let ex = self.screen(view, rect, vec2(1.0, 0.0)) - o;
         let ey = self.screen(view, rect, vec2(0.0, 1.0)) - o;
+        let laid = self.typing_layout().and_then(|l| bounds(&l));
         let Some(t) = self.text_edit.as_mut() else {
             return;
         };
@@ -560,14 +565,30 @@ impl Editor {
         if t.shown.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
-        let made = typeset::picture(&t.bytes, &t.text, m, t.fill).ok().flatten().map(|p| {
-            let handle = texture(ctx, "typing", &p);
-            let min = pos2(p.left as f32 / ppp, p.top as f32 / ppp);
-            (
-                handle,
-                Rect::from_min_size(min, vec2(p.width as f32, p.height as f32) / ppp),
-            )
+        let limit = ctx.input(|i| i.max_texture_side).min(PICTURE_MOST) as f32 * PICTURE_ROOM;
+        let side = laid.map_or(0.0, |[x0, y0, x1, y1]| {
+            let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| apply(m, x, y));
+            let (lo, hi) = corners
+                .iter()
+                .fold((corners[0], corners[0]), |(lo, hi), c| (lo.min(*c), hi.max(*c)));
+            (hi - lo).max_elem()
         });
+        let k = match side > limit {
+            true => limit / side,
+            false => 1.0,
+        };
+        let scaled = m.map(|v| v * k);
+        let made = typeset::picture(&t.bytes, &t.text, scaled, t.fill)
+            .ok()
+            .flatten()
+            .map(|p| {
+                let handle = texture(ctx, "typing", &p);
+                let min = pos2(p.left as f32, p.top as f32) / (k * ppp);
+                (
+                    handle,
+                    Rect::from_min_size(min, vec2(p.width as f32, p.height as f32) / (k * ppp)),
+                )
+            });
         t.shown = Some((key, made));
     }
 

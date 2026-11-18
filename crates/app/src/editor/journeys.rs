@@ -213,9 +213,10 @@ fn the_first_ten_minutes_of_someone_who_draws() {
     j.expect("cmd-plus-zooms", zoom(&j) > fit, "cmd + zooms the canvas in");
 
     j.act("zoom out with cmd -");
+    let zoomed = zoom(&j);
     j.chord(CMD, Key::Minus);
     j.look("cmd-minus");
-    j.expect("cmd-minus-zooms", zoom(&j) < fit, "cmd - zooms the canvas out");
+    j.expect("cmd-minus-zooms", zoom(&j) < zoomed, "cmd - zooms the canvas out");
 
     j.act("zoom with cmd and scroll, then fit with cmd 0");
     j.wheel(1000.0, 1000.0, vec2(0.0, 120.0), CMD);
@@ -374,14 +375,7 @@ fn the_first_ten_minutes_of_someone_who_draws() {
         "the drawing opens again from the recent list with everything in it",
     );
 
-    j.finish(&[
-        "cmd-x-cuts",
-        "cmd-y-redoes",
-        "cmd-plus-zooms",
-        "cmd-minus-zooms",
-        "cmd-zero-fits",
-        "layers-panel-shows-layers",
-    ]);
+    j.finish(&["cmd-x-cuts", "cmd-y-redoes", "layers-panel-shows-layers"]);
 }
 
 fn spot(j: &Journey, pick: impl Fn(&klad_core::stroke::Mark) -> bool) -> Option<(u32, f32, f32)> {
@@ -4210,10 +4204,7 @@ fn someone_fixes_and_adjusts_a_painting() {
         "a smudge stroke over the lines changes them",
     );
 
-    j.finish(&[
-        "an-adjustment-layers-settings-are-in-sight",
-        "the-eraser-keeps-its-own-size",
-    ]);
+    j.finish(&["an-adjustment-layers-settings-are-in-sight"]);
 }
 
 #[test]
@@ -5389,13 +5380,7 @@ fn someone_animates_a_sprite_and_exports_it() {
         "the bin removes the drawing on the frame and cmd Z brings it back",
     );
 
-    j.finish(&[
-        "a-drag-from-the-left-of-a-frame-selects",
-        "a-drag-over-frames-selects-them",
-        "a-new-clip-asks-its-name",
-        "a-shift-drag-over-frames-selects-them",
-        "equals-and-minus-undo-each-other",
-    ]);
+    j.finish(&["a-new-clip-asks-its-name", "equals-and-minus-undo-each-other"]);
 }
 
 fn drawings(j: &Journey, layer: &str) -> Vec<(u32, Option<u32>, bool)> {
@@ -5729,10 +5714,7 @@ fn someone_animates_frame_by_frame() {
         "the animation is written as a GIF",
     );
 
-    j.finish(&[
-        "a-new-layer-shows-on-every-frame",
-        "the-link-window-does-what-it-offers",
-    ]);
+    j.finish(&[]);
 }
 
 const GODOT_TILES: &str = r#"extends SceneTree

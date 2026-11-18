@@ -2961,7 +2961,23 @@ fn timeline_cells_select_by_dragging_copy_paste_move_and_open_the_clip() {
         geom.cell_centre(14, 0),
     );
     h.run_steps(2);
-    assert!(starts(&h).contains(&(14, Some(4))), "{:?}", starts(&h));
+    assert!(
+        starts(&h).contains(&(11, Some(4))),
+        "a drag from the dot of a frame that is not selected selects: {:?}",
+        starts(&h)
+    );
+    assert_eq!(h.state().timeline.span.as_ref().map(|s| (s.from, s.to)), Some((11, 14)));
+    drag(
+        &mut h,
+        geom.cell_centre(11, 0) + vec2(3.0, 0.0),
+        geom.cell_centre(14, 0),
+    );
+    h.run_steps(2);
+    assert!(
+        starts(&h).contains(&(14, Some(4))),
+        "the dot of a selected frame moves its drawing: {:?}",
+        starts(&h)
+    );
     h.state_mut().go_to(3).unwrap();
     h.state_mut().invoke(Cmd::ClipSettings).unwrap();
     h.run_steps(2);
@@ -8733,4 +8749,38 @@ fn the_editor_says_why_a_command_cannot_run_in_plain_words() {
         assert!(why.as_deref().is_some_and(no_ids), "{cmd:?} on pixels: {why:?}");
     });
     let _ = std::fs::remove_dir_all(&pixels);
+}
+
+#[test]
+fn text_typed_on_a_sprite_starts_small_and_stays_drawn_at_any_zoom() {
+    let path = pixel_sample("typing-big");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    assert_eq!(
+        h.state().text_tool.size,
+        6.0,
+        "a 24 pixel high sprite starts text at 6 px"
+    );
+    h.state_mut().text_tool.size = 48.0;
+    let at = canvas_at(&h, 2.0, 20.0);
+    open_text(&mut h, at);
+    h.event(egui::Event::Text("klad typed big".into()));
+    h.run_steps(3);
+    let limit = h.ctx.input(|i| i.max_texture_side) as f32;
+    let shown = h
+        .state()
+        .text_edit
+        .as_ref()
+        .and_then(|t| t.shown.as_ref())
+        .and_then(|(_, made)| made.as_ref())
+        .map(|(handle, at)| (handle.size(), *at));
+    let (size, at) = shown.expect("the text being typed is drawn");
+    assert!(
+        size.iter().all(|s| *s as f32 <= limit),
+        "its picture {size:?} fits the window's limit of {limit}"
+    );
+    assert!(
+        at.width() > limit / h.ctx.pixels_per_point(),
+        "it is drawn at its size on screen: {at:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
 }

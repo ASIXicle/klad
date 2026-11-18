@@ -94,6 +94,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use target::Target;
 
+const TEXT_SHARE: f32 = 0.25;
 const HANDLE: f32 = 12.0;
 const DROPPER: f32 = 22.0;
 const TWIST_PAUSE: f64 = 0.3;
@@ -735,6 +736,7 @@ pub(crate) struct Editor {
     tool: Tool,
     brush: String,
     previous_brush: String,
+    other_size: Option<f32>,
     tuning: Tuning,
     size: f32,
     color: [f32; 4],
@@ -946,6 +948,7 @@ impl Editor {
             tool: Tool::Brush,
             brush: "ink".into(),
             previous_brush: "ink".into(),
+            other_size: None,
             tuning,
             size: 12.0,
             color: [0.08, 0.08, 0.1, 1.0],
@@ -1111,7 +1114,12 @@ impl Editor {
         if let Some(size) = d.size {
             self.size = size.clamp(0.5, 500.0);
         }
-        self.timeline.on = d.exposure.clamp(1, 8);
+        let tall = self.scene.bundle.doc.canvas.height as f32;
+        self.text_tool.size = (tall * TEXT_SHARE).round().clamp(1.0, text::TEXT_SIZE);
+        self.timeline.on = match self.scene.bundle.doc.pixel_art() {
+            true => 1,
+            false => d.exposure.clamp(1, 8),
+        };
         self.scene.onion.before = d.onion_before;
         self.scene.onion.after = d.onion_after;
         self.scene.onion.opacity = d.onion_opacity.clamp(0.05, 1.0);

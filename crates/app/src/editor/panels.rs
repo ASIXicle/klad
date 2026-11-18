@@ -108,6 +108,9 @@ impl Editor {
             return;
         }
         theme::clear_hints(&ctx);
+        if ctx.options(|o| o.zoom_with_keyboard) {
+            ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        }
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 1e-3 {
             ctx.set_zoom_factor(self.settings.ui_scale);
         }
@@ -1101,6 +1104,7 @@ impl Editor {
                 })
                 .unwrap_or_default();
             let frame = self.scene.frame;
+            let blocked = self.link_blocked();
             let thumbs: Vec<_> = drawings.iter().map(|(id, _)| self.thumb(ctx, id)).collect();
             Self::window(
                 ctx,
@@ -1108,7 +1112,10 @@ impl Editor {
                 (format!("{} Show a drawing here", icon::LINK), Spot::Middle),
                 &mut open,
                 |ui| {
-                    ui.label(format!("frame {frame} will show the drawing you pick, as a link"));
+                    match &blocked {
+                        Some(why) => ui.colored_label(theme::REFUSED, why.as_str()),
+                        None => ui.label(format!("frame {frame} will show the drawing you pick, as a link")),
+                    };
                     ui.horizontal_wrapped(|ui| {
                         drawings.iter().zip(&thumbs).for_each(|((id, f), thumb)| {
                             let text = format!("frame {f}");
@@ -1123,8 +1130,10 @@ impl Editor {
                                 None => egui::Button::new(text),
                             };
                             if ui
-                                .add(button)
-                                .hint(format!("show {id} again here; drawing on it changes both"))
+                                .add_enabled(blocked.is_none(), button)
+                                .hint(format!(
+                                    "show the drawing of frame {f} again here; drawing on it changes both"
+                                ))
                                 .clicked()
                             {
                                 chosen = Some(id.clone());
