@@ -5713,6 +5713,104 @@ fn text_is_typed_on_the_canvas_and_edited_in_place() {
     assert!(path.join("fonts/Cinzel.ttf").is_file(), "picking a font copies it in");
 }
 
+fn text_shows(doc: &klad_core::doc::Document, id: &str) -> Option<bool> {
+    match doc.item(id) {
+        Some(klad_core::doc::Item::Node(_, _, n)) => Some(n.visible),
+        _ => None,
+    }
+}
+
+fn open_text(h: &mut Harness<'static, Editor>, at: egui::Pos2) {
+    h.key_press(Key::T);
+    h.run_steps(2);
+    click(h, at);
+    h.run_steps(2);
+}
+
+#[test]
+fn a_text_open_for_editing_is_never_saved_hidden() {
+    let path = sample("text-open-saved");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let at = canvas_at(&h, 200.0, 150.0);
+    open_text(&mut h, at);
+    h.event(egui::Event::Text("Hello".into()));
+    h.run_steps(1);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    let id = texts(&h)[0].0.clone();
+    let on = canvas_at(&h, 215.0, 175.0);
+    let on_disk = |path: &Path| Bundle::open(path).unwrap().doc;
+    [
+        (Cmd::NewPaintLayer, "a new layer"),
+        (Cmd::Undo, "an undo"),
+        (Cmd::Redo, "a redo"),
+        (Cmd::NewClip, "a new clip"),
+    ]
+    .into_iter()
+    .for_each(|(cmd, what)| {
+        open_text(&mut h, on);
+        assert_eq!(
+            h.state().text_edit.as_ref().and_then(|t| t.id.clone()),
+            Some(id.clone()),
+            "the text is open before {what}"
+        );
+        assert_eq!(
+            text_shows(&h.state().scene.bundle.doc, &id),
+            Some(false),
+            "the open text is out of the picture, so its words do not show twice"
+        );
+        h.state_mut().run_later(cmd);
+        h.run_steps(3);
+        assert_eq!(
+            text_shows(&on_disk(&path), &id),
+            Some(true),
+            "{what} while the text is open saves the text as it is, not hidden"
+        );
+        assert!(h.state().text_edit.is_some(), "{what} leaves the text open");
+        assert_eq!(
+            text_shows(&h.state().scene.bundle.doc, &id),
+            Some(false),
+            "after {what} the open text is out of the picture again"
+        );
+        h.key_press(Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().text_edit.is_none());
+        assert_eq!(
+            serde_json::to_value(&h.state().scene.bundle.doc).unwrap(),
+            serde_json::to_value(on_disk(&path)).unwrap(),
+            "after {what} and Esc the editor and the file hold the same drawing"
+        );
+        assert_eq!(text_shows(&on_disk(&path), &id), Some(true));
+    });
+    open_text(&mut h, on);
+    h.event(egui::Event::Text("more".into()));
+    h.run_steps(1);
+    let before = h.state().scene.bundle.doc.rev;
+    (0..40).for_each(|_| {
+        if text_shows(&h.state().scene.bundle.doc, &id).is_some() {
+            h.state_mut().run_later(Cmd::Undo);
+            h.run_steps(2);
+        }
+    });
+    assert_ne!(h.state().scene.bundle.doc.rev, before);
+    assert_eq!(
+        text_shows(&on_disk(&path), &id),
+        None,
+        "the step that made the text is undone"
+    );
+    h.run_steps(2);
+    assert!(
+        h.state().text_edit.is_none(),
+        "a text that is no longer in the drawing is no longer open"
+    );
+    assert_eq!(
+        serde_json::to_value(&h.state().scene.bundle.doc).unwrap(),
+        serde_json::to_value(on_disk(&path)).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 #[test]
 fn first_steps_tick_as_a_shape_is_drawn_filled_and_handed_to_an_agent() {
     let path = sample("first-steps");

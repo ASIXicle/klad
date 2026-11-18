@@ -50,9 +50,15 @@ pub(super) struct Typing {
     pub fill: [f32; 4],
     pub matrix: [f32; 6],
     pub focused: bool,
-    pub original: Option<Layer>,
     pub bytes: Arc<Vec<u8>>,
     pub shown: Option<(String, Option<(TextureHandle, Rect)>)>,
+}
+
+struct Written {
+    text: Text,
+    fill: [f32; 4],
+    matrix: [f32; 6],
+    hidden: Layer,
 }
 
 #[derive(Default)]
@@ -196,44 +202,53 @@ impl Editor {
         }
     }
 
-    pub(super) fn edit_text(&mut self, id: &str, at: Option<Vec2>) -> Result<()> {
+    fn written(&self, id: &str) -> Result<Option<Written>> {
         let doc = &self.scene.bundle.doc;
         let Some(Item::Node(layer, _, node)) = doc.item(id) else {
-            return Ok(());
+            return Ok(None);
         };
         let Shape::Text(text) = &node.shape else {
-            return Ok(());
+            return Ok(None);
         };
         let fill = match &node.fill {
             Some(Paint::Solid(hex)) => color::rgba_of(hex).unwrap_or([0.0, 0.0, 0.0, 1.0]),
             Some(_) => [0.25, 0.77, 1.0, 1.0],
             None => [0.0, 0.0, 0.0, 1.0],
         };
-        let fill = [fill[0], fill[1], fill[2], fill[3] * node.opacity];
-        let m = overlay::local_to_canvas(doc, id)?.map_or(IDENTITY, |m| [m[0], m[2], m[1], m[3], m[4], m[5]]);
-        let (text, original) = (text.clone(), layer.clone());
-        let Some(bytes) = self.font_bytes(&text.font) else {
-            return Ok(());
-        };
-        let mut hidden = original.clone();
+        let mut hidden = layer.clone();
         if let Some(cels) = hidden.cels_mut() {
             cels.iter_mut().any(|cel| hide(&mut cel.nodes, id));
         }
+        Ok(Some(Written {
+            text: text.clone(),
+            fill: [fill[0], fill[1], fill[2], fill[3] * node.opacity],
+            matrix: overlay::local_to_canvas(doc, id)?.map_or(IDENTITY, |m| [m[0], m[2], m[1], m[3], m[4], m[5]]),
+            hidden,
+        }))
+    }
+
+    pub(super) fn edit_text(&mut self, id: &str, at: Option<Vec2>) -> Result<()> {
+        let Some(written) = self.written(id)? else {
+            return Ok(());
+        };
+        let Some(bytes) = self.font_bytes(&written.text.font) else {
+            return Ok(());
+        };
         self.end_look_preview()?;
-        self.scene.preview_layer(hidden)?;
+        let layer = written.hidden.id.clone();
+        self.scene.preview_layer(written.hidden)?;
         self.dirty.extend(self.scene.all_tiles());
-        let caret = text.text.len();
+        let caret = written.text.text.len();
         self.text_edit = Some(Typing {
             id: Some(id.to_string()),
-            layer: Some(original.id.clone()),
+            layer: Some(layer),
             frame: self.scene.frame,
-            before: text.text.clone(),
-            text,
+            before: written.text.text.clone(),
+            text: written.text,
             caret,
-            fill,
-            matrix: m,
+            fill: written.fill,
+            matrix: written.matrix,
             focused: false,
-            original: Some(original),
             bytes,
             shown: None,
         });
@@ -288,25 +303,77 @@ impl Editor {
             fill: self.color,
             matrix: IDENTITY,
             focused: false,
-            original: None,
             bytes,
             shown: None,
         });
         Ok(())
     }
 
-    pub(super) fn end_typing_preview(&mut self) -> Result<()> {
-        if let Some(original) = self.text_edit.as_mut().and_then(|t| t.original.take()) {
-            self.scene.preview_layer(original)?;
+    fn end_typing_preview(&mut self) -> Result<()> {
+        let layer = self
+            .text_edit
+            .as_ref()
+            .filter(|t| t.id.is_some())
+            .and_then(|t| t.layer.clone());
+        if let Some(layer) = layer
+            && self.scene.end_preview(&layer)?
+        {
             self.dirty.extend(self.scene.all_tiles());
         }
         Ok(())
     }
 
-    pub(super) fn forget_typing_preview(&mut self) {
-        if let Some(t) = self.text_edit.as_mut() {
-            t.original = None;
+    pub(super) fn keep_typing_preview(&mut self) -> Result<()> {
+        if self.scene.take_unshown() {
+            self.dirty.extend(self.scene.all_tiles());
         }
+        let Some(id) = self.text_edit.as_ref().and_then(|t| t.id.clone()) else {
+            return Ok(());
+        };
+        let shows = match self.scene.bundle.doc.item(&id) {
+            Some(Item::Node(_, _, node)) if matches!(node.shape, Shape::Text(_)) => Some(node.visible),
+            _ => None,
+        };
+        let written = match shows {
+            Some(true) => self.written(&id)?,
+            Some(false) => return Ok(()),
+            None => None,
+        };
+        let Some(written) = written else {
+            self.text_edit = None;
+            self.say(
+                Tone::Info,
+                "the text that was open is no longer in the drawing, so it is closed",
+            );
+            return Ok(());
+        };
+        let font = self
+            .text_edit
+            .as_ref()
+            .is_some_and(|t| t.text.font != written.text.font)
+            .then(|| self.font_bytes(&written.text.font))
+            .flatten();
+        let layer = written.hidden.id.clone();
+        self.scene.preview_layer(written.hidden)?;
+        self.dirty.extend(self.scene.all_tiles());
+        if let Some(t) = self.text_edit.as_mut() {
+            let typed = std::mem::take(&mut t.text.text);
+            let kept = match &font {
+                Some(_) => written.text.font.clone(),
+                None => std::mem::take(&mut t.text.font),
+            };
+            t.before = written.text.text.clone();
+            t.text = written.text;
+            t.text.text = typed;
+            t.text.font = kept;
+            t.fill = written.fill;
+            t.matrix = written.matrix;
+            t.layer = Some(layer);
+            if let Some(bytes) = font {
+                t.bytes = bytes;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn finish_typing(&mut self) -> Result<()> {

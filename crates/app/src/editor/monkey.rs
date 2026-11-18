@@ -831,7 +831,7 @@ struct Kept {
     look_first: bool,
 }
 
-const KEPT: [Kept; 3] = [
+const KEPT: [Kept; 2] = [
     Kept {
         name: "a word typed on a sprite that fills the window",
         paper: Paper::Sprite,
@@ -842,21 +842,6 @@ const KEPT: [Kept; 3] = [
             Act::Type("klad"),
         ],
         rule: "no panic",
-        look_first: false,
-    },
-    Kept {
-        name: "a text opened again, a new layer meanwhile, and Esc",
-        paper: Paper::Sprite,
-        acts: &[
-            Act::Press(Mods::None, Key::T),
-            Act::Tap(4.0, 6.0),
-            Act::Type("ab"),
-            Act::Tap(25.0, 20.0),
-            Act::Press(Mods::None, Key::Escape),
-            Act::Tap(6.0, 6.0),
-            Act::Run(Cmd::NewVectorLayer),
-        ],
-        rule: "disk and editor hold the same drawing",
         look_first: false,
     },
     Kept {

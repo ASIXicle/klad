@@ -39,14 +39,9 @@ impl Touch {
     }
 }
 
-pub(super) struct Draft {
-    pub id: String,
-    pub original: Layer,
-}
-
 #[derive(Default)]
 pub(super) struct LookState {
-    pub draft: Option<Draft>,
+    pub draft: Option<String>,
     pub channel: usize,
     pub dragging: Option<usize>,
 }
@@ -780,26 +775,22 @@ impl Editor {
     }
 
     pub(super) fn preview_look(&mut self, layer: Layer) -> Result<()> {
-        if self.look.draft.as_ref().is_some_and(|d| d.id != layer.id) {
+        if self.look.draft.as_ref().is_some_and(|id| *id != layer.id) {
             self.end_look_preview()?;
         }
-        if self.look.draft.is_none() {
-            let Some(original) = self.scene.bundle.doc.find_layer(&layer.id).ok().cloned() else {
-                return Ok(());
-            };
-            self.look.draft = Some(Draft {
-                id: layer.id.clone(),
-                original,
-            });
+        if self.scene.bundle.doc.layer(&layer.id).is_none() {
+            return Ok(());
         }
+        self.look.draft = Some(layer.id.clone());
         self.scene.preview_layer(layer)?;
         self.dirty.extend(self.scene.all_tiles());
         Ok(())
     }
 
     pub(super) fn end_look_preview(&mut self) -> Result<()> {
-        if let Some(draft) = self.look.draft.take() {
-            self.scene.preview_layer(draft.original)?;
+        if let Some(id) = self.look.draft.take()
+            && self.scene.end_preview(&id)?
+        {
             self.dirty.extend(self.scene.all_tiles());
         }
         Ok(())

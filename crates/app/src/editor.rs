@@ -1191,7 +1191,6 @@ impl Editor {
 
     fn reload(&mut self) -> Result<()> {
         let seen = self.external.take();
-        self.forget_typing_preview();
         self.checks.gaps = None;
         self.checks.arcs = None;
         let start = Instant::now();
@@ -1303,7 +1302,6 @@ impl Editor {
             return Ok(Vec::new());
         }
         self.end_look_preview()?;
-        self.end_typing_preview()?;
         let start = Instant::now();
         let dirty = self.scene.apply(&ops, &self.brushes)?;
         self.measure(
@@ -3774,6 +3772,7 @@ impl Editor {
             self.view = Some(self.fitted(area));
         }
         self.navigate(ui, &response, rect);
+        self.keep_typing_preview()?;
         self.keep_typing_focus(ui, &response)?;
         self.typing_keys(ui)?;
         self.pen_keys(ui)?;
