@@ -246,6 +246,31 @@ pub struct Picture {
 }
 
 pub fn picture(bytes: &[u8], t: &Text, matrix: [f32; 6], colour: [f32; 4]) -> Result<Option<Picture>> {
+    drawn(bytes, t, matrix, colour, true)
+}
+
+pub fn cells(bytes: &[u8], t: &Text) -> Result<Vec<[i64; 2]>> {
+    let Some(drawn) = drawn(bytes, t, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], false)? else {
+        return Ok(Vec::new());
+    };
+    let width = drawn.width as usize;
+    Ok(drawn
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(_, px)| px[3] > 0)
+        .map(|(i, _)| {
+            [
+                drawn.left as i64 + (i % width) as i64,
+                drawn.top as i64 + (i / width) as i64,
+            ]
+        })
+        .collect())
+}
+
+fn drawn(bytes: &[u8], t: &Text, matrix: [f32; 6], colour: [f32; 4], smooth: bool) -> Result<Option<Picture>> {
     use skia_safe::{AlphaType, ColorType, ImageInfo, Matrix, Paint, RoundOut, surfaces};
     let [a, b, c, d, e, f] = matrix;
     let path = path_in(bytes, t)?.with_transform(&Matrix::new_all(a, c, e, b, d, f, 0.0, 0.0, 1.0));
@@ -262,7 +287,7 @@ pub fn picture(bytes: &[u8], t: &Text, matrix: [f32; 6], colour: [f32; 4]) -> Re
         skia_safe::Color4f::new(colour[0], colour[1], colour[2], colour[3]),
         None,
     );
-    paint.set_anti_alias(true);
+    paint.set_anti_alias(smooth);
     canvas.draw_path(&path, &paint);
     let mut rgba = vec![0u8; (width * height * 4) as usize];
     if !surface.read_pixels(&info, &mut rgba, width as usize * 4, (0, 0)) {

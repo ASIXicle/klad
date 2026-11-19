@@ -2064,6 +2064,10 @@ Shading: --shade 1 (or -1) draws no colour of its own: every pixel it covers tak
   ..iiii..
   GRID
 
+--text writes words in whole pixels with hard edges, in --color, its top left at --at; --font picks the font (Inter by default, klad fonts lists them) and --text-size the size of its letters in pixels. The pixels are one mark, as any other, and are not text any more.
+
+  klad pixel sprite.klad l1 --color ink --text 'GO!' --at 2,3 --text-size 9
+
 Also a pixel op in klad apply: {"op":"pixel","layer":"l1","color":"skin","cells":[[4,5],[5,5]]}, with "path":"M3.5 3.5 L9.5 3.5" in place of cells, "size":2, or "erase":true; "line":[x0,y0,x1,y1], "rect":[x,y,w,h] or "ellipse":[x,y,w,h] with "filled":true; "fill":[x,y] with "diagonal" and "ref"; and as a grid {"op":"pixel","layer":"l1","rows":["..ii..",".ibbi."],"legend":{"i":"ink","b":"body"},"at":[0,0]}.
 
 Usage: klad pixel [OPTIONS] <BUNDLE> <LAYER>
@@ -2119,9 +2123,22 @@ Options:
           Draw a grid of characters from a file (- reads stdin): a legend (i = ink), a blank line, then one row of characters per row of pixels
 
       --at <AT>
-          Where the grid's top left pixel goes: x,y
+          Where the grid's or the text's top left pixel goes: x,y
 
           [default: 0,0]
+
+      --text <TEXT>
+          Write this text in whole pixels with hard edges, its top left at --at (--font, --text-size)
+
+      --font <FONT>
+          The font of --text: one klad has (klad fonts) or a file in the bundle's fonts folder
+
+          [default: Inter]
+
+      --text-size <TEXT_SIZE>
+          The size of the --text letters in pixels
+
+          [default: 12]
 
       --tile <COLUMN,ROW>
           With --grid, in a drawing cut into tiles: put the grid's top left on that tile's (0,0 is the first tile)

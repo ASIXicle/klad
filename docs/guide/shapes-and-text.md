@@ -1,4 +1,4 @@
-_Last updated: 2026-11-17 09:25_
+_Last updated: 2026-11-19 14:00_
 
 # Shapes, paths and text
 
@@ -32,7 +32,7 @@ Select the shape with **V**, then in layer settings switch its fill to **linear*
 
 ## Write text
 
-Press **T**, click and type, and press **Esc** to finish. The font picker also finds any family on Google Fonts, and the font is kept inside the drawing.
+Press **T**, click and type, and press **Esc** to finish. The font picker also finds any family on Google Fonts, and the font is kept inside the drawing. On a pixel layer the text becomes pixels when you finish it (see [pixel art](pixel-art.md)).
 
 ## Repeat a shape
 

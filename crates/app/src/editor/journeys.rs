@@ -1436,9 +1436,8 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
         "a box around the grass takes every blade",
     );
 
-    j.act("the stone's edge came along: untick a box or loop cuts strokes at its edge and drag the box again");
+    j.act("the box took whole strokes only, as its cut is off by default: drag it again and check");
     j.key(Key::Escape);
-    j.click("a box or loop cuts strokes at its edge");
     j.drag(&around);
     j.look("looped-whole-strokes");
     let shading = elsewhere(&j);

@@ -2747,3 +2747,53 @@ fn apply_in_steps_makes_one_edit_per_line_waits_between_them_and_goes_on_after_a
     assert!(String::from_utf8_lossy(&nothing.stderr).contains("no steps from line 9"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn klad_pixel_writes_text_in_hard_edged_pixels() {
+    let dir = std::env::temp_dir().join(format!("draw-binary-pixel-text-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bundle = dir.join("sign.klad");
+    let path = bundle.to_str().unwrap();
+    let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_klad")).args(args).output().unwrap();
+    let draw = |args: &[&str]| {
+        let out = run(args);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    draw(&["new", path, "--pixel", "32x16"]);
+    let tree: serde_json::Value = serde_json::from_str(&draw(&["ls", path, "--json"])).unwrap();
+    let layer = tree["layers"][0]["id"].as_str().unwrap().to_string();
+    draw(&[
+        "pixel",
+        path,
+        &layer,
+        "--color",
+        "#2b2d42",
+        "--text",
+        "HI",
+        "--at",
+        "2,1",
+        "--text-size",
+        "10",
+    ]);
+    let listed: serde_json::Value = serde_json::from_str(&draw(&["strokes", path, &layer, "--json"])).unwrap();
+    let marks = listed["fills"].as_array().unwrap();
+    assert_eq!(marks.len(), 1, "the text is one pixel mark");
+    let cells = marks[0]["cells"].as_array().unwrap();
+    assert!(cells.len() > 10, "the letters take pixels: {}", cells.len());
+    let tiny = run(&[
+        "pixel",
+        path,
+        &layer,
+        "--color",
+        "#2b2d42",
+        "--text",
+        ".",
+        "--text-size",
+        "0.5",
+    ]);
+    assert!(!tiny.status.success(), "a text too small for any pixel says so");
+    assert!(String::from_utf8_lossy(&tiny.stderr).contains("larger --text-size"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

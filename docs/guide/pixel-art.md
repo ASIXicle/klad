@@ -1,4 +1,4 @@
-_Last updated: 2026-11-18 13:53_
+_Last updated: 2026-11-19 14:00_
 
 # Drawing pixel art
 
@@ -26,9 +26,13 @@ To change a colour everywhere, click it in the palette, change the colour, and c
 
 In the pencil's options, turn on **mirror**. The pencil, the shapes and the fill now draw each pixel's twin across an upright line. Drag **at x** to move the line.
 
+## Write text in pixels
+
+Press **T** on a pixel layer, click and type, and press **Esc**. The text becomes pixels in the current colour, with hard edges like the rest of the sprite. After that it is pixels, not text, so check the spelling before you press **Esc**; **cmd Z** takes it back. From the command line: `klad pixel sprite.klad l1 --color ink --text 'GO!' --at 2,3 --text-size 9`.
+
 ## Move or change part of a sprite
 
-1. Press **S** and drag a box around the pixels.
+1. Press **S** and drag a box around the pixels. The box takes the pixels inside it, also from marks that reach past its edge.
 2. Drag them to move them, or use the bar under them to flip, turn, recolour, copy or delete them.
 
 ## Shade along a ramp

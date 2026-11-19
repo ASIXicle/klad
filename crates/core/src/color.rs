@@ -126,6 +126,15 @@ pub fn value_step(c: Rgba, by: f32) -> Rgba {
     from_oklab([(l + by).clamp(0.0, 1.0), a + by * 0.03, b + by * 0.15], c[3])
 }
 
+pub fn mean(colours: &[Rgba]) -> Option<Rgba> {
+    let n = colours.len() as f32;
+    let sum = colours.iter().fold([0.0f32; 3], |m, c| {
+        let lab = to_oklab(*c);
+        [m[0] + lab[0], m[1] + lab[1], m[2] + lab[2]]
+    });
+    (!colours.is_empty()).then(|| from_oklab(sum.map(|v| v / n), 1.0).map(|c| c.clamp(0.0, 1.0)))
+}
+
 pub fn recolour(colours: &[Rgba], target: Rgba) -> Vec<Rgba> {
     let n = colours.len().max(1) as f32;
     let labs: Vec<[f32; 4]> = colours
@@ -149,6 +158,14 @@ pub fn recolour(colours: &[Rgba], target: Rgba) -> Vec<Rgba> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_recolour_lands_the_groups_mean_on_the_target() {
+        let greens = ["#3f6a3a", "#79b85a", "#a8dc84"].map(|h| parse_hex(h).unwrap());
+        let amber = parse_hex("#b0702a").unwrap();
+        let moved = mean(&recolour(&greens, amber)).unwrap();
+        assert_eq!(to_hex(moved), "#b0702a", "when no shade is clipped");
+    }
 
     #[test]
     fn a_recolour_moves_the_group_and_keeps_each_shade() {

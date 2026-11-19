@@ -628,6 +628,13 @@ impl Editor {
         }
     }
 
+    pub(super) fn cuts(&self) -> bool {
+        match self.scene.on_grid() {
+            true => self.cut_pixels,
+            false => self.cut_lasso,
+        }
+    }
+
     pub(crate) fn run_later(&mut self, cmd: Cmd) {
         self.queued.push(cmd);
         self.ctx.request_repaint();
@@ -659,7 +666,7 @@ impl Editor {
             Cmd::BoneTool => self.tool == Tool::Bone,
             Cmd::Symmetry => self.mirror.is_some(),
             Cmd::Note => self.tool == Tool::Note,
-            Cmd::CutLasso => self.cut_lasso,
+            Cmd::CutLasso => self.cuts(),
             Cmd::ToggleVisible => layer.is_some_and(|l| l.visible),
             Cmd::ToggleLocked => layer.is_some_and(|l| l.locked),
             Cmd::ToggleClip => layer.is_some_and(|l| l.clip),
@@ -1029,6 +1036,7 @@ impl Editor {
             Cmd::SelectAll => self.select_all_strokes(),
             Cmd::SelectSameColour => self.select_same_colour(),
             Cmd::TransformLayer => self.start_shift()?,
+            Cmd::CutLasso if self.scene.on_grid() => self.cut_pixels = !self.cut_pixels,
             Cmd::CutLasso => self.cut_lasso = !self.cut_lasso,
             Cmd::Recolour => self.recolour_picked()?,
             Cmd::FillShape => self.recolour_shape(false)?,

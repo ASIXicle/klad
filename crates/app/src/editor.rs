@@ -177,11 +177,15 @@ impl Dye {
     }
 }
 
-fn solid(paint: &klad_core::doc::Paint) -> Option<String> {
-    match paint {
-        klad_core::doc::Paint::Solid(hex) => Some(hex.clone()),
-        _ => None,
-    }
+fn paint_colour(paint: &klad_core::doc::Paint) -> Option<String> {
+    use klad_core::doc::Paint;
+    let stops = match paint {
+        Paint::Solid(hex) => return Some(hex.clone()),
+        Paint::Linear { linear } => &linear.stops,
+        Paint::Radial { radial } => &radial.stops,
+    };
+    let colours: Vec<[f32; 4]> = stops.iter().filter_map(|s| color::rgba_of(&s.1)).collect();
+    klad_core::color::mean(&colours).map(klad_core::color::to_hex)
 }
 
 const ALPHA: color::Channel = color::Channel {
@@ -901,6 +905,7 @@ pub(crate) struct Editor {
     simplify_px: f32,
     under: Vec<String>,
     cut_lasso: bool,
+    cut_pixels: bool,
     cut_view: Option<CutView>,
     timeline: timeline::Timeline,
     frames: FrameCache,
@@ -1117,7 +1122,8 @@ impl Editor {
             path_commit: None,
             simplify_px: 1.5,
             under: Vec::new(),
-            cut_lasso: true,
+            cut_lasso: false,
+            cut_pixels: true,
             cut_view: None,
             clipboard: None,
             timeline: timeline::Timeline::default(),
@@ -2520,7 +2526,7 @@ impl Editor {
         let crossed = crossing || others.iter().any(|o| o.3);
         let cut = polygon
             .clone()
-            .filter(|_| self.cut_lasso && crossed)
+            .filter(|_| self.cuts() && crossed)
             .or_else(|| previous.as_ref().and_then(|p| p.cut.clone()));
         let merge = |held: Vec<u32>, found: &[u32]| {
             found.iter().fold(held, |mut ids, id| {
@@ -2545,6 +2551,16 @@ impl Editor {
             })
             .collect();
         self.picked = (!ids.is_empty() || cut.is_some() || !more.is_empty()).then_some(Picked { cel, ids, cut, more });
+        if self.picked.is_none() && polygon.is_some() && crossed {
+            let shape = match self.select_box && self.tool == Tool::Strokes {
+                true => "box",
+                false => "loop",
+            };
+            self.say(
+                Tone::Info,
+                format!("the {shape} holds no whole stroke: tick \"a box or loop cuts strokes at its edge\" in the bar to take the parts inside"),
+            );
+        }
         Ok(())
     }
 
@@ -4812,8 +4828,8 @@ impl Editor {
             Dye::Strokes => self
                 .chosen_marks()
                 .and_then(|(_, chosen)| chosen.first().map(|(_, m)| m.color())),
-            Dye::Fill => of_node(&|node| node.fill.as_ref().and_then(solid)),
-            Dye::Outline => of_node(&|node| node.stroke.as_ref().and_then(|s| solid(&s.paint))),
+            Dye::Fill => of_node(&|node| node.fill.as_ref().and_then(paint_colour)),
+            Dye::Outline => of_node(&|node| node.stroke.as_ref().and_then(|s| paint_colour(&s.paint))),
         }
     }
 

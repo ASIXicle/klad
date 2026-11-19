@@ -12,7 +12,7 @@ Press **V**, press on what you want to move and drag. Hold **alt** to drag a cop
 
 ## Select strokes
 
-Press **S** and click a stroke. Shift click adds more. Drag a box around strokes to select them, or pick **loop** in the bar over the canvas and draw a loop around them. **cmd A** selects everything on the layer at this frame.
+Press **S** and click a stroke. Shift click adds more. Drag a box around strokes to select them, or pick **loop** in the bar over the canvas and draw a loop around them. The box or loop takes the strokes that are wholly inside it; to take the parts of strokes that cross its edge too, tick **a box or loop cuts strokes at its edge** in the bar. **cmd A** selects everything on the layer at this frame.
 
 To pick on every layer instead of only the active one, switch the bar over the canvas to **all layers**.
 

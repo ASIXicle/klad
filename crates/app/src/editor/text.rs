@@ -43,6 +43,7 @@ impl Default for TextTool {
 pub(super) struct Typing {
     pub id: Option<String>,
     pub layer: Option<String>,
+    pub pixels: Option<String>,
     pub frame: u32,
     pub text: Text,
     pub before: String,
@@ -306,6 +307,7 @@ impl Editor {
         let caret = written.text.text.len();
         self.text_edit = Some(Typing {
             id: Some(id.to_string()),
+            pixels: None,
             layer: Some(layer),
             frame: self.scene.frame,
             before: written.text.text.clone(),
@@ -361,9 +363,21 @@ impl Editor {
             .active_layer()
             .filter(|l| l.kind() == Kind::Vector && !l.locked && !l.reference && !self.scene.active_is_mask())
             .map(|l| l.id.clone());
+        let pixels = self
+            .scene
+            .active_layer()
+            .filter(|l| l.pixel() && !l.locked && !self.scene.active_is_mask() && self.hidden_in_hand().is_none())
+            .map(|l| (l.id.clone(), l.name.clone()));
+        if let Some((_, name)) = &pixels {
+            self.say(
+                Tone::Info,
+                format!("{name} is a pixel layer: the text becomes pixels when you finish it, and cannot be edited as text after that"),
+            );
+        }
         self.text_edit = Some(Typing {
             id: None,
             layer,
+            pixels: pixels.map(|(id, _)| id),
             frame: self.scene.frame,
             text,
             before: String::new(),
@@ -467,6 +481,33 @@ impl Editor {
                 self.selection = Some(id);
             }
             None if empty => {}
+            None if typing.pixels.is_some() => {
+                let layer = typing.pixels.clone().unwrap_or_default();
+                let cells = typeset::cells(&typing.bytes, &typing.text)?;
+                if cells.is_empty() {
+                    self.say(
+                        Tone::Refused,
+                        "the text is too small to leave any pixels: make it larger in the bar",
+                    );
+                    return Ok(());
+                }
+                let before = self.scene.bundle.doc.rev;
+                self.apply_pixels(klad_core::ops::PixelSpec {
+                    layer: layer.clone(),
+                    frame: typing.frame,
+                    color: Some(color::hex(typing.fill)),
+                    cells,
+                    by_hand: true,
+                    ..klad_core::ops::PixelSpec::default()
+                })?;
+                if self.scene.bundle.doc.rev != before {
+                    let name = self.layer_name(&layer);
+                    self.say(
+                        Tone::Done,
+                        format!("the text is pixels on {name} now and cannot be edited as text; cmd Z takes it back"),
+                    );
+                }
+            }
             None => {
                 let taken = self.scene.bundle.doc.ids();
                 let fresh = |stem: &str| {

@@ -9083,3 +9083,131 @@ fn s_drags_a_box_around_strokes_and_draws_a_loop_when_loop_is_picked() {
     assert!(ids(&h).is_empty(), "a straight drag closes no loop");
     let _ = std::fs::remove_dir_all(&path);
 }
+
+#[test]
+fn a_hex_typed_for_a_glow_is_kept_and_its_picker_shows_it_after_return() {
+    let path = sample("hex-glow");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let shapes = h.state().scene.active_id().unwrap();
+    let id = h.state().scene.bundle.doc.layer(&shapes).unwrap().cels()[0].nodes[0]
+        .id
+        .clone();
+    h.state_mut()
+        .set(
+            &id,
+            vec![(
+                "fill".into(),
+                serde_json::json!({"radial": {"center": [80, 60], "radius": 60, "stops": [[0, "#3a86ffff"], [1, "#3a86ff00"]]}}),
+            )],
+        )
+        .unwrap();
+    h.state_mut().tool = Tool::Select;
+    h.state_mut().select_shapes(vec![id.clone()]);
+    h.run_steps(3);
+    let shown = |h: &Harness<'static, Editor>| h.state().dyed(super::Dye::Fill).map(crate::color::hex);
+    assert_eq!(
+        shown(&h).as_deref(),
+        Some("#3a86ff"),
+        "the picker starts from the glow's colour"
+    );
+    h.get_by_label("the shape's fill").click();
+    h.run_steps(3);
+    let field = h
+        .query_all_by_role_and_label(Role::TextInput, "hex")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.left().total_cmp(&b.left()))
+        .unwrap();
+    click(&mut h, field.center());
+    let key = |h: &mut Harness<'static, Editor>, key: Key, modifiers: Modifiers, pressed: bool| {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        });
+        h.run_steps(1);
+    };
+    key(&mut h, Key::A, Modifiers::COMMAND, true);
+    key(&mut h, Key::A, Modifiers::COMMAND, false);
+    h.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+    h.event(egui::Event::Text("#".into()));
+    key(&mut h, Key::Num3, Modifiers::SHIFT, true);
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    key(&mut h, Key::Num3, Modifiers::SHIFT, false);
+    [
+        (Key::F, "f"),
+        (Key::F, "f"),
+        (Key::D, "d"),
+        (Key::Num9, "9"),
+        (Key::A, "a"),
+        (Key::Num0, "0"),
+    ]
+    .into_iter()
+    .for_each(|(k, t)| {
+        h.event(egui::Event::Text(t.into()));
+        key(&mut h, k, Modifiers::NONE, true);
+        key(&mut h, k, Modifiers::NONE, false);
+    });
+    key(&mut h, Key::Enter, Modifiers::NONE, true);
+    key(&mut h, Key::Enter, Modifiers::NONE, false);
+    h.run_steps(3);
+    assert_eq!(
+        shown(&h).as_deref(),
+        Some("#ffd9a0"),
+        "after Return the picker shows what was typed"
+    );
+    let fill = match h.state().scene.bundle.doc.item(&id) {
+        Some(klad_core::doc::Item::Node(_, _, node)) => format!("{:?}", node.fill),
+        _ => String::new(),
+    };
+    assert!(
+        fill.contains("Radial") && fill.contains("#ffd9a0"),
+        "the glow stays a glow in the typed colour: {fill}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn text_on_a_pixel_layer_becomes_hard_edged_pixels_and_says_so() {
+    let path = pixel_sample("pixel-text");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    h.run_steps(2);
+    let layer = h.state().scene.active_id().unwrap();
+    let layers = h.state().scene.bundle.doc.all_layers().len();
+    let marks = h.state().scene.active_marks().len();
+    let said = |h: &Harness<'static, Editor>| h.state().messages.log().map(|m| m.text.clone()).collect::<Vec<_>>();
+    let at = canvas_at(&h, 10.0, 12.0);
+    open_text(&mut h, at);
+    assert!(
+        said(&h)
+            .iter()
+            .any(|m| m.contains("is a pixel layer: the text becomes pixels")),
+        "the editor says what will happen: {:?}",
+        said(&h)
+    );
+    h.state_mut().text_edit.as_mut().unwrap().text.size = 10.0;
+    h.event(egui::Event::Text("HI".into()));
+    h.run_steps(1);
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        layers,
+        "no vector layer is made"
+    );
+    assert_eq!(h.state().scene.active_id().as_deref(), Some(layer.as_str()));
+    let now = h.state().scene.active_marks();
+    assert_eq!(now.len(), marks + 1, "the text is one pixel mark");
+    assert!(now.iter().all(|m| m.as_fill().is_some_and(|f| f.on_grid())));
+    assert!(
+        said(&h).iter().any(|m| m.starts_with("the text is pixels on")),
+        "{:?}",
+        said(&h)
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().scene.active_marks().len(), marks, "cmd Z takes it back");
+    let _ = std::fs::remove_dir_all(&path);
+}

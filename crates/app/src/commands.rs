@@ -1167,7 +1167,7 @@ impl Cmd {
                 G::Edit,
                 T::None,
                 R::No,
-                "on: a lasso also takes the parts of strokes crossing it; off: only strokes wholly inside",
+                "on: a box or loop also takes the parts of strokes crossing it; off (the default for strokes): only strokes wholly inside; on a pixel layer it is on by default and takes the pixels inside",
             ),
             Cmd::Recolour => spec(
                 "edit.recolour",
