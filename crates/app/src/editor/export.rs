@@ -311,8 +311,13 @@ impl Editor {
         let home = self.bundle_home();
         if let Some(target) = destination(&home, &form) {
             let folder = folder_of(form.what, &target);
-            std::fs::create_dir_all(&folder)
-                .map_err(|e| anyhow::anyhow!("the folder {} could not be made: {e}", tilde(&folder)))?;
+            std::fs::create_dir_all(&folder).map_err(|e| {
+                anyhow::anyhow!(
+                    "the folder {} could not be made: {}",
+                    tilde(&folder),
+                    crate::report::folder_words(&e)
+                )
+            })?;
         }
         let args = args(&self.scene.bundle.root, &home, self.scene.frame, &form);
         let name = match form.what {

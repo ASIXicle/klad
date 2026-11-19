@@ -2833,7 +2833,7 @@ fn someone_exports_an_agents_animation_for_a_game() {
     );
     shut(&mut j, "Export image");
 
-    j.finish(&["a-failed-export-speaks-plainly"]);
+    j.finish(&[]);
 }
 
 fn start_error(j: &Journey) -> String {
@@ -4194,7 +4194,7 @@ fn someone_fixes_and_adjusts_a_painting() {
         "a smudge stroke over the lines changes them",
     );
 
-    j.finish(&["an-adjustment-layers-settings-are-in-sight"]);
+    j.finish(&[]);
 }
 
 #[test]

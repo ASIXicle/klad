@@ -22,8 +22,30 @@ pub fn io_words(e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::NotFound => "it is not there (moved or deleted?)".to_string(),
         std::io::ErrorKind::PermissionDenied => "klad may not read it: check the file's permissions".to_string(),
-        _ => e.to_string(),
+        _ => plain_io(e),
     }
+}
+
+pub fn folder_words(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotADirectory | ErrorKind::AlreadyExists => {
+            "part of that path is a file, not a folder: pick another folder".to_string()
+        }
+        ErrorKind::PermissionDenied => "klad may not write there: pick another folder".to_string(),
+        ErrorKind::ReadOnlyFilesystem => "that disk can only be read: pick another folder".to_string(),
+        ErrorKind::StorageFull => "the disk is full".to_string(),
+        _ => plain_io(e),
+    }
+}
+
+fn plain_io(e: &std::io::Error) -> String {
+    let text = e.to_string();
+    let plain = text.split(" (os error").next().unwrap_or(&text);
+    let mut chars = plain.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |first| first.to_lowercase().chain(chars).collect())
 }
 
 pub fn job_failed(name: &str, why: &str) -> String {

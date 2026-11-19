@@ -171,6 +171,7 @@ impl Editor {
             );
             self.shape_clip = Some(shapes);
             self.clipboard = None;
+            self.cells_last = false;
             return;
         }
         let Some(copied) = self.copied() else {
@@ -190,6 +191,7 @@ impl Editor {
             ),
         );
         self.clipboard = Some(copied);
+        self.cells_last = false;
     }
 
     pub(super) fn paste(&mut self) -> Result<()> {

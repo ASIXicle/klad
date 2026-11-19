@@ -8625,6 +8625,7 @@ fn a_menu_longer_than_the_window_scrolls_to_its_last_item() {
     let mut h = harness(editor(&path), vec2(1280.0, 420.0));
     h.ctx
         .all_styles_mut(|s| s.scroll_animation = egui::style::ScrollAnimation::none());
+    ready(&mut h);
     let labels = |h: &Harness<'static, Editor>| -> Vec<(String, Rect)> {
         h.query_all(By::new().predicate(|n| matches!(n.role(), Role::Button | Role::CheckBox) && n.label().is_some()))
             .map(|n| (n.accesskit_node().label().unwrap_or_default().to_string(), n.rect()))
@@ -9237,8 +9238,13 @@ fn a_paste_on_a_held_frame_gives_the_frame_its_own_copy_of_the_drawing_first() {
     h.run_steps(2);
     h.state_mut().invoke(Cmd::Copy).unwrap();
     h.state_mut().go_to(5).unwrap();
+    h.state_mut().focus = super::Focus::Timeline;
     h.run_steps(2);
-    h.state_mut().invoke(Cmd::Paste).unwrap();
+    assert!(
+        h.state().on_timeline(),
+        "a click on a frame puts the keys on the timeline"
+    );
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
     h.run_steps(3);
     let now = cels(&h);
     assert_eq!(now.len(), 2, "frame 5 has a drawing of its own: {now:?}");
@@ -9262,4 +9268,37 @@ fn a_paste_on_a_held_frame_gives_the_frame_its_own_copy_of_the_drawing_first() {
     h.run_steps(2);
     assert_eq!(cels(&h).len(), 1, "one cmd Z takes back the copy and the paste");
     let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn v_s_and_a_say_when_the_layer_in_hand_is_locked_or_hidden_and_change_nothing() {
+    [Tool::Select, Tool::Strokes, Tool::Direct]
+        .into_iter()
+        .flat_map(|tool| {
+            [
+                (tool, Cmd::ToggleLocked, "is locked"),
+                (tool, Cmd::ToggleVisible, "is hidden"),
+            ]
+        })
+        .for_each(|(tool, cmd, words)| {
+            let path = sample(&format!("locked-hidden-{tool:?}-{cmd:?}"));
+            let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+            activate(&mut h, "lines");
+            h.state_mut().invoke(cmd).unwrap();
+            h.state_mut().tool = tool;
+            h.run_steps(2);
+            let rev = h.state().scene.bundle.doc.rev;
+            let (from, to) = (canvas_at(&h, 170.0, 120.0), canvas_at(&h, 200.0, 150.0));
+            click(&mut h, from);
+            h.run_steps(2);
+            drag(&mut h, from, to);
+            h.run_steps(3);
+            let said: Vec<String> = h.state().messages.log().map(|m| m.text.clone()).collect();
+            assert_eq!(h.state().scene.bundle.doc.rev, rev, "{tool:?} {cmd:?}: nothing changes");
+            assert!(
+                said.iter().any(|m| m.starts_with(&format!("lines {words}"))),
+                "{tool:?} {cmd:?}: it says so: {said:?}"
+            );
+            let _ = std::fs::remove_dir_all(&path);
+        });
 }

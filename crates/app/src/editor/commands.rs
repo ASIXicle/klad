@@ -140,7 +140,9 @@ impl Editor {
     pub(super) fn for_focus(&self, cmd: Cmd) -> Cmd {
         match (self.on_timeline(), cmd) {
             (true, Cmd::Copy) => Cmd::CopyCells,
-            (true, Cmd::Paste) => Cmd::PasteCells,
+            (true, Cmd::Paste) if self.cells_last || (self.clipboard.is_none() && self.shape_clip.is_none()) => {
+                Cmd::PasteCells
+            }
             (true, Cmd::DuplicateInPlace) => Cmd::Duplicate,
             (true, Cmd::Delete) => Cmd::DeleteDrawing,
             (true, Cmd::SelectAll) => Cmd::SelectAllFrames,
@@ -551,7 +553,8 @@ impl Editor {
                 }),
             Cmd::RedoInbetweens => self
                 .tweening()
-                .then(|| "in-betweens are being made: wait for them, or cancel them in the status line".to_string()),
+                .then(|| "in-betweens are being made: wait for them, or cancel them in the status line".to_string())
+                .or_else(need_span),
             Cmd::NewClip => (span.is_none() && self.timeline.range.is_none())
                 .then(|| "select frames or mark a loop range first".to_string()),
             Cmd::DeleteClip | Cmd::ClipLoops | Cmd::ClipOwnFps => need_clip(),
@@ -770,9 +773,15 @@ impl Editor {
         if !self.settings.layout.shows(pane) {
             return;
         }
+        self.give_room(pane);
+    }
+
+    pub(super) fn give_room(&mut self, pane: Pane) {
         self.dock_kept = Some(pane);
+        self.folded_for_room.retain(|p| *p != pane);
         let folded = self.settings.layout.make_room(pane, self.dock_room);
         if !folded.is_empty() {
+            self.settings_dirty = true;
             let names: Vec<String> = folded.iter().map(|p| p.title().to_string()).collect();
             self.say(
                 Tone::Info,
@@ -1130,7 +1139,11 @@ impl Editor {
                 self.new_skeleton()?;
             }
             Cmd::NewAdjustLayer => {
-                self.add_layer_value(json!({"kind": "adjust", "name": "curves", "adjust": {"curves": {}}}))?
+                self.add_layer_value(json!({"kind": "adjust", "name": "curves", "adjust": {"curves": {}}}))?;
+                match self.shows_pane(Pane::Inspector) {
+                    true => self.give_room(Pane::Inspector),
+                    false => self.show_pane(Pane::Inspector),
+                }
             }
             Cmd::NewMapLayer => self.new_map_layer()?,
             Cmd::MakeMapLayer => self.make_map_layer()?,

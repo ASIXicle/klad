@@ -163,6 +163,7 @@ impl Editor {
         let copied = copy_cells(&self.scene.bundle.doc, &rows, from, to);
         let drawings = copied.len();
         self.timeline.cells = Some(copied);
+        self.cells_last = true;
         self.say(
             Tone::Done,
             format!(

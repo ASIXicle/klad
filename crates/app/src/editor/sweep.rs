@@ -330,7 +330,7 @@ const NOWHERE: &[Place] = &[Place::Empty];
 const CLICK: &[Gesture] = &[Gesture::Click];
 const DRAG: &[Gesture] = &[Gesture::Drag];
 
-const KNOWN: [Known; 13] = [
+const KNOWN: [Known; 9] = [
     Known {
         hands: &["eraser"],
         rows: &["pixel"],
@@ -351,10 +351,6 @@ const KNOWN: [Known; 13] = [
             "adjustment",
             "map",
             "reference picture",
-            "locked paint",
-            "locked pixel",
-            "locked vector",
-            "hidden paint",
             "empty frame",
             "link",
             "nothing active",
@@ -374,10 +370,6 @@ const KNOWN: [Known; 13] = [
             "mask",
             "map",
             "reference picture",
-            "locked paint",
-            "locked pixel",
-            "locked vector",
-            "hidden paint",
             "link",
             "nothing active",
         ],
@@ -398,9 +390,6 @@ const KNOWN: [Known; 13] = [
             "adjustment",
             "map",
             "reference picture",
-            "locked paint",
-            "locked pixel",
-            "locked vector",
             "empty frame",
             "link",
             "nothing active",
@@ -413,7 +402,7 @@ const KNOWN: [Known; 13] = [
     },
     Known {
         hands: &["select strokes"],
-        rows: &["paint", "pixel", "mask", "map", "locked paint", "locked pixel", "link"],
+        rows: &["paint", "pixel", "mask", "map", "link"],
         gestures: AROUND,
         places: NOWHERE,
         verdict: "quiet",
@@ -422,48 +411,12 @@ const KNOWN: [Known; 13] = [
     },
     Known {
         hands: &["select strokes"],
-        rows: &["mask", "locked paint"],
+        rows: &["mask"],
         gestures: DRAG,
         places: OWN,
         verdict: "quiet",
         kind: Kind::Dead,
         why: "the drag starts on the stroke the click before took, so it moves it, and here the move does nothing and says nothing",
-    },
-    Known {
-        hands: &["select and move"],
-        rows: &["locked paint"],
-        gestures: DRAG,
-        places: OWN,
-        verdict: "quiet",
-        kind: Kind::Dead,
-        why: "the layer is locked: its stroke is taken but does not move, and nothing says so",
-    },
-    Known {
-        hands: &["select and move"],
-        rows: &["hidden paint"],
-        gestures: DRAG,
-        places: OWN,
-        verdict: "quiet",
-        kind: Kind::Dead,
-        why: "the layer is hidden: its stroke is taken but does not move, and nothing says so",
-    },
-    Known {
-        hands: &["select and move"],
-        rows: &["locked vector"],
-        gestures: AROUND,
-        places: OWN,
-        verdict: "quiet",
-        kind: Kind::Dead,
-        why: "the layer is locked, and nothing says so",
-    },
-    Known {
-        hands: &["edit points"],
-        rows: &["locked paint", "locked pixel", "locked vector"],
-        gestures: PRESS,
-        places: OWN,
-        verdict: "quiet",
-        kind: Kind::Dead,
-        why: "the layer is locked, and nothing says so",
     },
     Known {
         hands: &["rectangles and ellipses"],
@@ -1727,7 +1680,7 @@ const fn calm(cmd: &'static str, kind: Kind, why: &'static str) -> Calm {
 const IN_HAND: &str = "the tool is in hand already";
 const THERE: &str = "the playhead is on that frame already";
 
-const CALM: [Calm; 20] = [
+const CALM: [Calm; 19] = [
     calm("tool.brush", Kind::Idle, IN_HAND),
     calm("tool.strokes", Kind::Idle, IN_HAND),
     calm("tool.shapes", Kind::Idle, IN_HAND),
@@ -1751,11 +1704,6 @@ const CALM: [Calm; 20] = [
     calm("view.fit", Kind::Idle, "the canvas fits the window already"),
     calm("brush.smaller", Kind::Idle, "the pencil is one pixel already"),
     calm("numbers.reset", Kind::Idle, "the numbers are not on screen"),
-    calm(
-        "span.redo",
-        Kind::Dead,
-        "no in-betweens are selected to make again, and nothing says so",
-    ),
 ];
 
 const FAILS: [(&str, &str); 0] = [];

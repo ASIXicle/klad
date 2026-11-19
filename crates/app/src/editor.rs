@@ -856,6 +856,7 @@ pub(crate) struct Editor {
     keys_busy: bool,
     field_had_focus: bool,
     turned_box: Option<(String, u64, [Vec2; 4])>,
+    cells_last: bool,
     focus: Focus,
     shape_clip: Option<Vec<serde_json::Value>>,
     twist: Option<(f32, f64)>,
@@ -1074,6 +1075,7 @@ impl Editor {
             keys_busy: false,
             field_had_focus: false,
             turned_box: None,
+            cells_last: false,
             focus: Focus::Canvas,
             shape_clip: None,
             twist: None,
@@ -2248,6 +2250,9 @@ impl Editor {
             .collect();
         self.lasso = None;
         self.picked = None;
+        if found.is_empty() && self.refuse_locked_in_hand() {
+            return Ok(true);
+        }
         self.select_shapes(found);
         Ok(true)
     }
@@ -2292,6 +2297,12 @@ impl Editor {
             return Ok(());
         }
         let stroke = self.mark_at(c, slack);
+        if stroke.as_ref().is_some_and(|(path, _)| *path == self.scene.active)
+            && let Some(why) = self.take_target()
+        {
+            self.say(Tone::Refused, why);
+            return Ok(());
+        }
         let shape = self
             .shape_hits(c)?
             .first()
@@ -2512,7 +2523,10 @@ impl Editor {
                 ),
             }
         };
-        let (found, crossing) = pick(self.scene.active_marks());
+        let (found, crossing) = match self.take_target() {
+            Some(_) => (Vec::new(), false),
+            None => pick(self.scene.active_marks()),
+        };
         let others: Vec<(String, String, Vec<u32>, bool)> = self
             .pick_cels(every)
             .into_iter()
@@ -2551,6 +2565,15 @@ impl Editor {
             })
             .collect();
         self.picked = (!ids.is_empty() || cut.is_some() || !more.is_empty()).then_some(Picked { cel, ids, cut, more });
+        if self.picked.is_none() {
+            if let Some(why) = self.take_target() {
+                self.say(Tone::Refused, why);
+                return Ok(());
+            }
+            if self.refuse_locked_in_hand() {
+                return Ok(());
+            }
+        }
         if self.picked.is_none() && polygon.is_some() && crossed {
             let shape = match self.select_box && self.tool == Tool::Strokes {
                 true => "box",
@@ -2834,9 +2857,20 @@ impl Editor {
         }))
     }
 
+    fn refuse_locked_in_hand(&mut self) -> bool {
+        let Some(name) = self.scene.active_layer().filter(|l| l.locked).map(|l| l.name.clone()) else {
+            return false;
+        };
+        self.say(Tone::Refused, lock::Locked(vec![name]).to_string());
+        true
+    }
+
     fn pick_elsewhere(&mut self, c: Vec2) -> Result<Option<bool>> {
         self.under = overlay::leaf_hits(&self.scene.bundle.doc, self.scene.frame, (c.x, c.y))?;
         let zoom = self.view.map_or(1.0, |v| v.zoom);
+        if self.under.is_empty() && self.mark_at(c, 5.0 / zoom).is_none() && self.refuse_locked_in_hand() {
+            return Ok(None);
+        }
         let mut on_stroke = false;
         if self.under.is_empty()
             && let Some((path, mark)) = self.mark_at(c, 5.0 / zoom)
@@ -3538,7 +3572,7 @@ impl Editor {
                     self.picked = None;
                     if self.scene.active_layer().is_some_and(|l| l.kind() == Kind::Bones) {
                         self.say(Tone::Refused, "bones are picked and moved with the bone tool (J)");
-                    } else if far {
+                    } else if !self.refuse_locked_in_hand() && far {
                         self.say(
                             Tone::Info,
                             "a loop takes strokes of the active layer: pick a paint layer, or click a shape to take it",
@@ -5728,6 +5762,7 @@ impl Editor {
             return self.set(&id, props);
         }
         self.set(&id, std::mem::take(&mut props))?;
+        self.adjust_section(ui, &layer)?;
         self.map_section(ui, &layer)?;
         ui.horizontal_wrapped(|ui| {
             self.command_check(ui, Cmd::ToggleLocked, "locked");
@@ -5762,7 +5797,6 @@ impl Editor {
         if layer.map.is_none() {
             self.depth_section(ui, &layer)?;
         }
-        self.adjust_section(ui, &layer)?;
         self.effects_section(ui, &layer)?;
         self.animation_section(ui, &id)
     }

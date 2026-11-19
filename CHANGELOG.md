@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **cmd V** after clicking a frame pastes the strokes or pixels you copied last; it pastes frames only when frames were what you copied last.
+- An adjustment layer's own settings come first in **Layer settings**, and a new adjustment layer makes room for them.
+- An export into a folder that cannot be made says why in plain words ("part of that path is a file, not a folder"), without the system's error number.
+- **V**, **S** and **A** say when the layer in hand is locked or hidden, instead of doing nothing; **V** no longer moves a stroke of a hidden layer unseen.
+- **Redo in-betweens** without selected frames says to select them first.
 - A paste on a frame that shows a drawing held from an earlier frame gives that frame its own copy of the drawing first, so the frames before it stay as they were; the message says so, and one cmd Z takes back both. **klad copy --frame** does the same.
 - The timeline's bar names **new clip**, and its buttons no longer share one icon: duplicate to the next frame shows a stack of cards, fill like the first drawing a paint bucket, copy the selected cells the copy icon.
 - **File > Import picture…** opens the system's file chooser, showing PNG and JPEG files.
