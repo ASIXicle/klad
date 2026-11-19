@@ -78,6 +78,10 @@ fn typing_passes(e: &egui::Event) -> bool {
     }
 }
 
+fn undo_key(e: &egui::Event) -> bool {
+    matches!(e, egui::Event::Key { key: Key::Z, modifiers, pressed: true, .. } if modifiers.command && !modifiers.shift)
+}
+
 impl Editor {
     fn drawing_here(&self) -> Option<(klad_core::doc::Cel, u32)> {
         self.here().and_then(|(_, c)| c)
@@ -105,9 +109,10 @@ impl Editor {
     }
 
     fn swap_size(&mut self) {
-        let other = self.other_size.unwrap_or(self.size);
-        self.other_size = Some(self.size);
-        self.size = other;
+        let (size, pixel) = self.other_size.unwrap_or((self.size, self.pixel_size));
+        self.other_size = Some((self.size, self.pixel_size));
+        self.size = size;
+        self.pixel_size = pixel;
     }
 
     pub(super) fn active_paint(&self) -> bool {
@@ -845,6 +850,7 @@ impl Editor {
             Cmd::MakeScatter => self.wrap("scatter")?,
             Cmd::MakeMirror => self.wrap("mirror")?,
             Cmd::Unwrap => self.unwrap()?,
+            Cmd::ImportPicture if crate::picker::NATIVE => self.choose_picture(),
             Cmd::ImportPicture => self.windows.import = !self.windows.import,
             Cmd::Pixelize => self.windows.pixels = !self.windows.pixels,
             Cmd::TileSize => {
@@ -1373,6 +1379,7 @@ impl Editor {
 
     pub(super) fn command_keys(&mut self, ui: &egui::Ui) -> Result<()> {
         let typing = self.text_edit.is_some();
+        let untyped = self.text_edit.as_ref().is_some_and(|t| t.undo.is_empty());
         let popup = egui::Popup::is_any_open(ui.ctx());
         if (ui.ctx().egui_wants_keyboard_input() || self.field_had_focus) && !typing {
             return Ok(());
@@ -1386,7 +1393,7 @@ impl Editor {
         let pressed: Vec<(Option<Cmd>, bool, bool)> = ui.input(|i| {
             i.events
                 .iter()
-                .filter(|e| !typing || typing_passes(e))
+                .filter(|e| !typing || typing_passes(e) || (untyped && undo_key(e)))
                 .filter(|e| !(popup && matches!(e, egui::Event::Key { key: Key::Escape, .. })))
                 .filter_map(|e| match e {
                     egui::Event::Copy => Some((Some(Cmd::Copy), false, false)),
@@ -1442,7 +1449,10 @@ impl Editor {
     pub(super) fn run_queued(&mut self) -> Result<()> {
         std::mem::take(&mut self.queued)
             .into_iter()
-            .try_for_each(|cmd| self.invoke(cmd))
+            .try_for_each(|cmd| match self.typing_command(cmd) {
+                true => Ok(()),
+                false => self.invoke(cmd),
+            })
     }
 
     pub(super) fn command_hint(&self, cmd: Cmd) -> String {

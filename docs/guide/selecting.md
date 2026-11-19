@@ -1,4 +1,4 @@
-_Last updated: 2026-11-18 10:24_
+_Last updated: 2026-11-19 12:00_
 
 # Changing strokes
 
@@ -12,13 +12,13 @@ Press **V**, press on what you want to move and drag. Hold **alt** to drag a cop
 
 ## Select strokes
 
-Press **S** and click a stroke. Shift click adds more, and dragging a loop lassoes them. **cmd A** selects everything on the layer at this frame.
+Press **S** and click a stroke. Shift click adds more. Drag a box around strokes to select them, or pick **loop** in the bar over the canvas and draw a loop around them. **cmd A** selects everything on the layer at this frame.
 
 To pick on every layer instead of only the active one, switch the bar over the canvas to **all layers**.
 
 ## Change what you selected
 
-Drag inside the box to move it, a corner to scale it and the knob to turn it. The bar next to the selection recolours it, makes strokes thinner or thicker, duplicates it (**cmd D**) and deletes it (**Backspace**).
+Drag inside the box to move it, a corner to scale it and the knob to turn it. A turned box stays turned, so the next drag works on it as you see it. The bar next to the selection recolours it, makes strokes thinner or thicker, duplicates it (**cmd D**) and deletes it (**Backspace**).
 
 To recolour, click the palette button in the bar and pick a colour on the wheel, from the drawing's palette or from the colours you used lately; **use the current colour** gives it the colour you paint with. Recolouring several strokes keeps each one's own lighter or darker shade, so a painted area stays painted.
 

@@ -329,9 +329,8 @@ const AWAY: &[Place] = &[Place::Other, Place::Empty];
 const NOWHERE: &[Place] = &[Place::Empty];
 const CLICK: &[Gesture] = &[Gesture::Click];
 const DRAG: &[Gesture] = &[Gesture::Drag];
-const LOOP: &[Gesture] = &[Gesture::Loop];
 
-const KNOWN: [Known; 14] = [
+const KNOWN: [Known; 13] = [
     Known {
         hands: &["eraser"],
         rows: &["pixel"],
@@ -422,22 +421,13 @@ const KNOWN: [Known; 14] = [
         why: "nothing is there to take",
     },
     Known {
-        hands: &["select and move", "select strokes"],
-        rows: &["pixel", "locked pixel"],
-        gestures: LOOP,
+        hands: &["select strokes"],
+        rows: &["mask", "locked paint"],
+        gestures: DRAG,
         places: OWN,
         verdict: "quiet",
-        kind: Kind::Idle,
-        why: "on a pixel layer a drag is a box, and a loop that ends where it began is an empty box",
-    },
-    Known {
-        hands: &["select strokes"],
-        rows: &["paint", "mask", "map", "locked paint", "link"],
-        gestures: DRAG,
-        places: &[Place::Own, Place::Other],
-        verdict: "quiet",
-        kind: Kind::Idle,
-        why: "a straight drag closes no loop",
+        kind: Kind::Dead,
+        why: "the drag starts on the stroke the click before took, so it moves it, and here the move does nothing and says nothing",
     },
     Known {
         hands: &["select and move"],
@@ -1071,6 +1061,7 @@ impl Desk {
             }
         };
         let screen: Vec<Pos2> = path.iter().map(|p| self.at(*p)).collect();
+        self.h.state_mut().select_box = !matches!(gesture, Gesture::Loop);
         self.stroke(&screen);
         match hand.finish {
             Finish::Nothing => {}

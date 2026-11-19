@@ -49,6 +49,7 @@ pub(super) struct Typing {
     pub caret: usize,
     pub anchor: Option<usize>,
     pub undo: Vec<(String, usize)>,
+    pub run: bool,
     pub fill: [f32; 4],
     pub matrix: [f32; 6],
     pub focused: bool,
@@ -72,6 +73,17 @@ pub(super) struct Picker {
 
 pub(super) const TEXT_SIZE: f32 = 48.0;
 const SELECTED_TEXT: f32 = 0.35;
+const TYPING_ACTS: [Key; 9] = [
+    Key::Enter,
+    Key::Backspace,
+    Key::Delete,
+    Key::ArrowLeft,
+    Key::ArrowRight,
+    Key::ArrowUp,
+    Key::ArrowDown,
+    Key::Home,
+    Key::End,
+];
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 fn word_around(text: &str, at: usize) -> (usize, usize) {
@@ -216,6 +228,7 @@ impl Editor {
             self.text_click = Some((std::time::Instant::now(), at));
             self.text_pressing = !twice;
             if let Some(t) = self.text_edit.as_mut() {
+                t.run = false;
                 match (shift, twice) {
                     (true, _) => {
                         t.anchor = t.anchor.or(Some(t.caret));
@@ -300,6 +313,7 @@ impl Editor {
             caret,
             anchor: None,
             undo: Vec::new(),
+            run: false,
             fill: written.fill,
             matrix: written.matrix,
             focused: false,
@@ -356,6 +370,7 @@ impl Editor {
             caret: 0,
             anchor: None,
             undo: Vec::new(),
+            run: false,
             fill: self.color,
             matrix: IDENTITY,
             focused: false,
@@ -498,6 +513,40 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn typing_command(&mut self, cmd: crate::commands::Cmd) -> bool {
+        use crate::commands::Cmd;
+        let Some(t) = self.text_edit.as_mut() else {
+            return false;
+        };
+        match cmd {
+            Cmd::Undo => {
+                let Some((was, caret)) = t.undo.pop() else {
+                    return false;
+                };
+                t.text.text = was;
+                t.caret = caret.min(t.text.text.len());
+                t.anchor = None;
+                t.run = false;
+            }
+            Cmd::SelectAll => {
+                t.anchor = Some(0);
+                t.caret = t.text.text.len();
+                t.run = false;
+            }
+            Cmd::Copy => {
+                if let Some(range) = t
+                    .anchor
+                    .filter(|a| *a != t.caret)
+                    .map(|a| a.min(t.caret)..a.max(t.caret))
+                {
+                    self.ctx.copy_text(t.text.text[range].to_string());
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub(super) fn typing_keys(&mut self, ui: &egui::Ui) -> Result<()> {
         if self.text_edit.is_none() {
             return Ok(());
@@ -538,10 +587,21 @@ impl Editor {
                     None => false,
                 }
             };
+            let acted = match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => modifiers.command || modifiers.alt || TYPING_ACTS.contains(key),
+                egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) => true,
+                _ => false,
+            };
+            let fresh = acted || !t.run;
             match e {
                 egui::Event::Text(s) | egui::Event::Paste(s) => {
                     let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\n').collect();
-                    if !cut(words, &mut t.caret, &mut t.undo) {
+                    if !cut(words, &mut t.caret, &mut t.undo) && fresh {
                         t.undo.push((words.clone(), t.caret));
                     }
                     words.insert_str(t.caret, &clean);
@@ -569,7 +629,7 @@ impl Editor {
                         t.anchor = Some(0);
                         t.caret = words.len();
                     }
-                    Key::Z if modifiers.command => {
+                    Key::Z if modifiers.command && !t.undo.is_empty() => {
                         if let Some((was, caret)) = t.undo.pop() {
                             *words = was;
                             t.caret = caret.min(words.len());
@@ -638,6 +698,10 @@ impl Editor {
             if moving && !shift {
                 t.anchor = None;
             }
+            t.run = match e {
+                egui::Event::Text(_) => true,
+                _ => t.run && !acted,
+            };
         });
         if let Some(text) = copied {
             ui.ctx().copy_text(text);

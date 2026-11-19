@@ -676,6 +676,23 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn choose_picture(&mut self) {
+        let Some(path) = crate::picker::choose_picture(None, "Import") else {
+            return;
+        };
+        self.import_from(&path);
+    }
+
+    fn import_from(&mut self, path: &std::path::Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => self.check(|e| e.import_picture(&bytes, &path.display().to_string())),
+            Err(e) => self.say(
+                Tone::Refused,
+                format!("could not read {}: {}", path.display(), crate::report::io_words(&e)),
+            ),
+        }
+    }
+
     pub(super) fn import_window(&mut self, ctx: &egui::Context) {
         if !self.windows.import {
             return;
@@ -694,17 +711,9 @@ impl Editor {
                     .hint("copy the picture into the drawing and place it on a new layer")
                     .clicked()
                 {
-                    let path = self.import_path.trim().to_string();
-                    match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            self.check(|e| e.import_picture(&bytes, &path));
-                            self.windows.import = false;
-                        }
-                        Err(e) => self.say(
-                            Tone::Refused,
-                            format!("could not read {path}: {}", crate::report::io_words(&e)),
-                        ),
-                    }
+                    let path = std::path::PathBuf::from(self.import_path.trim());
+                    self.windows.import = !path.is_file();
+                    self.import_from(&path);
                 }
                 ui.small("or drop a PNG or JPEG on the canvas");
             });
@@ -725,17 +734,11 @@ impl Editor {
                 .filter(|p| {
                     p.extension()
                         .and_then(|e| e.to_str())
-                        .is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str()))
+                        .is_some_and(|e| crate::picker::PICTURES.contains(&e.to_ascii_lowercase().as_str()))
                 })
                 .collect()
         });
-        files.into_iter().for_each(|path| match std::fs::read(&path) {
-            Ok(bytes) => self.check(|e| e.import_picture(&bytes, &path.display().to_string())),
-            Err(e) => self.say(
-                Tone::Refused,
-                format!("could not read {}: {}", path.display(), crate::report::io_words(&e)),
-            ),
-        });
+        files.iter().for_each(|path| self.import_from(path));
     }
 }
 

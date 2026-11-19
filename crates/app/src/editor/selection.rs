@@ -348,12 +348,8 @@ impl Editor {
             None => (egui::pos2(rect.center().x, rect.bottom() - 60.0), false),
         };
         self.bar_above = above;
-        let pointer = ctx.input(|i| i.pointer.hover_pos());
-        let over_bar = pointer.is_some_and(|p| {
-            ctx.memory(|m| m.area_rect(Id::unique("selection bar")))
-                .is_some_and(|r| r.contains(p))
-        });
-        if ctx.input(|i| i.modifiers.shift) && !over_bar {
+        let in_use = egui::Popup::is_any_open(ctx) || ctx.egui_wants_keyboard_input();
+        if ctx.input(|i| i.modifiers.shift) && !in_use {
             return;
         }
         let at = egui::pos2(

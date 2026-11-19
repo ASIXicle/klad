@@ -426,18 +426,7 @@ impl Editor {
                 }
                 Tool::Fill => self.fill_panel(ui),
                 Tool::Strokes if self.scene.on_grid() => {
-                    [(true, "box"), (false, "loop")].iter().for_each(|(boxed, label)| {
-                        if ui
-                            .selectable_label(self.pixel_box == *boxed, *label)
-                            .hint(match boxed {
-                                true => "drag a box around the pixels to select",
-                                false => "draw a loop around the pixels to select",
-                            })
-                            .clicked()
-                        {
-                            self.pixel_box = *boxed;
-                        }
-                    });
+                    self.box_or_loop(ui, "pixels");
                     self.command_check(ui, Cmd::CutLasso, "takes pixels, not whole marks");
                     self.command_button(ui, Cmd::SelectSameColour, Some("same colour"));
                     self.command_button(ui, Cmd::SelectAll, Some("select all"));
@@ -445,10 +434,11 @@ impl Editor {
                             .color(theme::WEAK));
                 }
                 Tool::Strokes => {
+                    self.box_or_loop(ui, "strokes");
                     self.pick_scope(ui);
-                    self.command_check(ui, Cmd::CutLasso, "a lasso cuts strokes at its edge");
+                    self.command_check(ui, Cmd::CutLasso, "a box or loop cuts strokes at its edge");
                     self.command_button(ui, Cmd::SelectAll, Some("select all"));
-                    note(ui, RichText::new("click or lasso strokes; the bar under them edits them").color(theme::WEAK));
+                    note(ui, RichText::new("click strokes, or drag around them; the bar under them edits them").color(theme::WEAK));
                 }
                 Tool::Select if self.shifting.is_some() => self.shift_options(ui),
                 Tool::Select => {
@@ -584,6 +574,21 @@ impl Editor {
                 note(ui, RichText::new(why).color(theme::REFUSED));
             }
         }
+    }
+
+    fn box_or_loop(&mut self, ui: &mut egui::Ui, what: &str) {
+        [(true, "box"), (false, "loop")].iter().for_each(|(boxed, label)| {
+            if ui
+                .selectable_label(self.select_box == *boxed, *label)
+                .hint(match boxed {
+                    true => format!("drag a box around the {what} to select"),
+                    false => format!("draw a loop around the {what} to select"),
+                })
+                .clicked()
+            {
+                self.select_box = *boxed;
+            }
+        });
     }
 
     fn pick_scope(&mut self, ui: &mut egui::Ui) {

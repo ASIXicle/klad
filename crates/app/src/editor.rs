@@ -385,10 +385,19 @@ fn grab(screen: [Pos2; 4], pos: Pos2, edges: bool) -> Option<Grab> {
     if let Some(side) = (0..4).find(|&side| edges && pos.distance(edge(&flat, side).to_pos2()) <= reach) {
         return Some(Grab::Stretch(side));
     }
-    let (min, max) = screen
-        .iter()
-        .fold((screen[0], screen[0]), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
-    Rect::from_min_max(min, max).contains(pos).then_some(Grab::Move)
+    let turns: Vec<f32> = (0..4)
+        .map(|i| {
+            let (side, to) = (screen[(i + 1) % 4] - screen[i], pos - screen[i]);
+            side.x * to.y - side.y * to.x
+        })
+        .collect();
+    let inside = turns.iter().all(|t| *t >= 0.0) || turns.iter().all(|t| *t <= 0.0);
+    inside.then_some(Grab::Move)
+}
+
+fn upright(corners: &[Vec2; 4]) -> bool {
+    let level = |a: f32, b: f32| (a - b).abs() < 1e-3 * (1.0 + a.abs());
+    level(corners[0].y, corners[1].y) && level(corners[1].x, corners[2].x)
 }
 
 fn edge(corners: &[Vec2; 4], side: usize) -> Vec2 {
@@ -738,7 +747,7 @@ pub(crate) struct Editor {
     tool: Tool,
     brush: String,
     previous_brush: String,
-    other_size: Option<f32>,
+    other_size: Option<(f32, u32)>,
     heard_seq: Option<u64>,
     bar_above: bool,
     text_click: Option<(Instant, usize)>,
@@ -842,6 +851,7 @@ pub(crate) struct Editor {
     capturing: Option<Cmd>,
     keys_busy: bool,
     field_had_focus: bool,
+    turned_box: Option<(String, u64, [Vec2; 4])>,
     focus: Focus,
     shape_clip: Option<Vec<serde_json::Value>>,
     twist: Option<(f32, f64)>,
@@ -871,7 +881,7 @@ pub(crate) struct Editor {
     pub(crate) pixel_filled: bool,
     pub(crate) pixel_diagonal: bool,
     pub(crate) pixel_fill_all: bool,
-    pub(crate) pixel_box: bool,
+    pub(crate) select_box: bool,
     pub(crate) pixel_mode: PixelMode,
     pub(crate) pixel_dither: u32,
     pub(crate) pixel_two: bool,
@@ -1058,6 +1068,7 @@ impl Editor {
             capturing: None,
             keys_busy: false,
             field_had_focus: false,
+            turned_box: None,
             focus: Focus::Canvas,
             shape_clip: None,
             twist: None,
@@ -1087,7 +1098,7 @@ impl Editor {
             pixel_filled: false,
             pixel_diagonal: false,
             pixel_fill_all: false,
-            pixel_box: true,
+            select_box: true,
             pixel_mode: PixelMode::Draw,
             pixel_dither: 100,
             pixel_two: false,
@@ -1697,6 +1708,13 @@ impl Editor {
 
     fn picked_corners(&self) -> Option<(String, [Vec2; 4])> {
         let picked = self.picked.as_ref()?;
+        if let Some((_, _, corners)) = self
+            .turned_box
+            .as_ref()
+            .filter(|(key, rev, _)| *key == picked.key() && *rev == self.scene.bundle.doc.rev)
+        {
+            return Some((picked.key(), *corners));
+        }
         let area = picked.cut.as_ref().filter(|_| self.scene.on_grid()).map(|polygon| {
             polygon.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| {
                 [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]
@@ -2371,6 +2389,11 @@ impl Editor {
                 self.picked = after;
                 self.forget_missing_selection();
                 self.finish_preview(ops, dirty, before);
+                self.turned_box = self
+                    .picked
+                    .as_ref()
+                    .map(|p| (p.key(), self.scene.bundle.doc.rev, drag.preview()))
+                    .filter(|(_, _, corners)| !upright(corners));
             }
             None => self.drop_preview(),
         }
@@ -2404,12 +2427,16 @@ impl Editor {
     }
 
     fn lasso_outline(&self, lasso: &Lasso) -> Vec<Vec2> {
-        let boxed = self.pixel_box && self.scene.on_grid() && matches!(self.tool, Tool::Strokes | Tool::Select);
+        let grid = self.scene.on_grid();
+        let boxed = self.select_box && (self.tool == Tool::Strokes || (grid && self.tool == Tool::Select));
         match (boxed, lasso.points.first(), lasso.points.last()) {
             (true, Some(a), Some(b)) => {
-                let (x0, y0) = (a.x.min(b.x).floor(), a.y.min(b.y).floor());
-                let (x1, y1) = (a.x.max(b.x).ceil(), a.y.max(b.y).ceil());
-                vec![vec2(x0, y0), vec2(x1, y0), vec2(x1, y1), vec2(x0, y1)]
+                let (lo, hi) = (a.min(*b), a.max(*b));
+                let (lo, hi) = match grid {
+                    true => (lo.floor(), hi.ceil()),
+                    false => (lo, hi),
+                };
+                vec![lo, vec2(hi.x, lo.y), hi, vec2(lo.x, hi.y)]
             }
             _ => lasso.points.clone(),
         }
@@ -2454,8 +2481,9 @@ impl Editor {
         };
         let at = lasso.points[0];
         let erased = self.erased();
-        let polygon: Option<Vec<[f32; 2]>> = (lasso.far && lasso.points.len() >= 3)
-            .then(|| self.lasso_outline(&lasso).iter().map(|p| [p.x, p.y]).collect());
+        let outline = self.lasso_outline(&lasso);
+        let polygon: Option<Vec<[f32; 2]>> =
+            (lasso.far && outline.len() >= 3).then(|| outline.iter().map(|p| [p.x, p.y]).collect());
         let pick = |marks: &[Mark]| -> (Vec<u32>, bool) {
             match &polygon {
                 Some(polygon) => {

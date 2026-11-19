@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **File > Import picture…** opens the system's file chooser, showing PNG and JPEG files.
+- The pixel eraser keeps its own size, as the brush eraser does.
+- While a text is open, **cmd Z** takes back what was typed since the last move of the caret in one step, and **Edit > Undo**, **Select all** and **Copy** act on the text; once there is no typing left to take back, they act on the drawing again.
+- The colour picker of the bar over a selection stays open while **shift** is held, so a **#** can be typed in its hex field; a hex without its **#** is taken too. The bar hides while shift is held only when none of its pickers is in use, and it no longer comes back when the pointer passes over its place, so a shift click reaches the stroke under it.
+- **S** drags a box around strokes, as its icon shows; **loop** in the bar over the canvas draws a loop as before.
+- A turned layer (**cmd T**) or turned strokes keep a turned box, so the next drag scales or turns what you see.
+
 - The editor fits a small screen. A drawing of one frame opens with the timeline folded to its toolbar, and it opens by itself when the drawing gets a second frame; open, it is no taller than its rows. The panels on the right share the height of the window and never run past it: each scrolls inside, Layers always shows at least three rows with its buttons, and when the window is too short for all of them Brush folds first. A panel you open with its arrow or from the **Window** menu gets its room and the others give way, and the **Window** menu ticks a panel only when it shows, so one choice brings up a folded panel. At an interface size above 100% the timeline keeps its size on the screen, so the canvas keeps its room. On a 1440 by 900 window the canvas went from about a third of the window to more than half.
 - In a pixel drawing the Colour panel shows the palette and its buttons first, above the colour wheel.
 - Menus, windows and the tool bar fit a small screen too. On Windows and Linux a menu longer than the window scrolls, so its last items can be reached. A window is never taller than the room above the status line: its title and its close button stay in sight, the brush window's list shrinks to fit, and on a very short screen the whole window scrolls. Windows open at their full size at once, and a second window opens a little below and to the right of the first instead of over it. In the bar above the canvas a slider that does not fit moves to the next row whole, and a tool's hint stays on one line (cut off at the end, with all of it when you point at it).

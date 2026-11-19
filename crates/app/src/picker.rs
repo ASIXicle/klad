@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 pub const NATIVE: bool = !cfg!(test);
 
+pub const PICTURES: [&str; 3] = ["png", "jpg", "jpeg"];
+
 pub const CHOOSE_DRAWING: &str = if cfg!(target_os = "macos") {
     "Choose a .klad file..."
 } else {
@@ -14,6 +16,7 @@ enum Pick {
     Folder,
     File,
     Drawing,
+    Picture,
 }
 
 #[cfg(target_os = "macos")]
@@ -27,16 +30,22 @@ pub fn choose_file(start: Option<&Path>, prompt: &str) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn choose_picture(start: Option<&Path>, prompt: &str) -> Option<PathBuf> {
+    choose(start, prompt, Pick::Picture)
+}
+
+#[cfg(target_os = "macos")]
 pub fn choose_drawing(start: Option<&Path>, prompt: &str) -> Option<PathBuf> {
     choose(start, prompt, Pick::Drawing)
 }
 
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
-fn only_drawings(panel: &objc2_app_kit::NSOpenPanel) {
+fn only_kinds(panel: &objc2_app_kit::NSOpenPanel, kinds: &[&str]) {
     use objc2_foundation::{NSArray, NSString};
-    // TODO: setAllowedContentTypes with the drawing's UTType once objc2-uniform-type-identifiers is a dependency
-    panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&[NSString::from_str("klad")])));
+    // TODO: setAllowedContentTypes with UTTypes once objc2-uniform-type-identifiers is a dependency
+    let kinds: Vec<_> = kinds.iter().map(|k| NSString::from_str(k)).collect();
+    panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&kinds)));
 }
 
 #[cfg(target_os = "macos")]
@@ -46,12 +55,14 @@ fn choose(start: Option<&Path>, prompt: &str, pick: Pick) -> Option<PathBuf> {
     use objc2_foundation::{NSString, NSURL};
     let mtm = MainThreadMarker::new()?;
     let panel = NSOpenPanel::openPanel(mtm);
-    panel.setCanChooseDirectories(pick != Pick::File);
+    panel.setCanChooseDirectories(matches!(pick, Pick::Folder | Pick::Drawing));
     panel.setCanChooseFiles(pick != Pick::Folder);
     panel.setAllowsMultipleSelection(false);
     panel.setCanCreateDirectories(pick == Pick::Folder);
-    if pick == Pick::Drawing {
-        only_drawings(&panel);
+    match pick {
+        Pick::Drawing => only_kinds(&panel, &["klad"]),
+        Pick::Picture => only_kinds(&panel, &PICTURES),
+        Pick::Folder | Pick::File => {}
     }
     panel.setPrompt(Some(&NSString::from_str(prompt)));
     if let Some(dir) = start.and_then(Path::to_str) {
@@ -83,6 +94,11 @@ pub fn choose_folder(start: Option<&Path>, prompt: &str) -> Option<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 pub fn choose_file(start: Option<&Path>, prompt: &str) -> Option<PathBuf> {
     dialog(start, prompt).pick_file()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn choose_picture(start: Option<&Path>, prompt: &str) -> Option<PathBuf> {
+    dialog(start, prompt).add_filter("PNG or JPEG", &PICTURES).pick_file()
 }
 
 #[cfg(not(target_os = "macos"))]

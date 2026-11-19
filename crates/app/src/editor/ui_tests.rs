@@ -325,6 +325,7 @@ fn a_lasso_picks_strokes_on_every_layer_when_all_layers_is_on() {
     activate(&mut h, "lines");
     h.key_press(Key::S);
     h.run_steps(2);
+    h.state_mut().select_box = false;
     let lasso = |h: &mut Harness<'static, Editor>| {
         let corners = [(5.0, 5.0), (505.0, 5.0), (505.0, 379.0), (5.0, 379.0), (5.0, 10.0)];
         let at: Vec<egui::Pos2> = corners.iter().map(|(x, y)| canvas_at(h, *x, *y)).collect();
@@ -5075,6 +5076,7 @@ fn strokes_select_move_and_copy_across_cmd_clicked_layers() {
     assert_eq!(h.state().also, vec!["l5".to_string()]);
     h.key_press(Key::S);
     h.run_steps(2);
+    h.state_mut().select_box = false;
     let view = h.state().view.unwrap();
     let rect = h.state().canvas_rect;
     let at = |x: f32, y: f32| rect.min + view.to_screen(egui::Vec2::new(x, y), rect.size());
@@ -8527,7 +8529,7 @@ fn a_tools_bar_moves_what_does_not_fit_to_its_next_row_and_keeps_its_hint_on_one
         (&painted, Cmd::Brush, ""),
         (&painted, Cmd::Eraser, ""),
         (&painted, Cmd::Fill, "click inside lines to fill"),
-        (&painted, Cmd::Strokes, "click or lasso strokes"),
+        (&painted, Cmd::Strokes, "click strokes, or drag around them"),
         (&pixels, Cmd::Brush, "draws whole pixels"),
     ]
     .into_iter()
@@ -8896,4 +8898,188 @@ fn a_drawing_the_agent_changed_last_opens_ready_to_pick_and_keys_a_laptop_has_re
         "a drawing of shapes opens with its top layer in hand"
     );
     let _ = std::fs::remove_dir_all(&shapes);
+}
+
+#[test]
+fn typing_is_one_step_to_take_back_and_undo_from_the_menu_takes_it_back_first() {
+    let path = sample("typing-undo");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    let at = canvas_at(&h, 200.0, 150.0);
+    open_text(&mut h, at);
+    let typed = |h: &Harness<'static, Editor>| h.state().text_edit.as_ref().map(|t| t.text.text.clone());
+    let type_out = |h: &mut Harness<'static, Editor>, words: &str| {
+        words.chars().for_each(|c| {
+            h.event(egui::Event::Text(c.to_string()));
+            h.run_steps(1);
+        });
+    };
+    type_out(&mut h, "hello world");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    type_out(&mut h, "bye");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(1);
+    assert_eq!(
+        typed(&h).as_deref(),
+        Some("hello world"),
+        "one cmd Z takes back the word typed over the selection, not one letter"
+    );
+    let rev = h.state().scene.bundle.doc.rev;
+    h.key_press(Key::End);
+    h.run_steps(1);
+    type_out(&mut h, " again");
+    h.state_mut().run_later(Cmd::Undo);
+    h.run_steps(2);
+    assert_eq!(
+        typed(&h).as_deref(),
+        Some("hello world"),
+        "Edit > Undo takes back the typing while the text is open"
+    );
+    assert_eq!(h.state().scene.bundle.doc.rev, rev, "and leaves the drawing as it is");
+    h.state_mut().run_later(Cmd::SelectAll);
+    h.run_steps(1);
+    type_out(&mut h, "x");
+    assert_eq!(typed(&h).as_deref(), Some("x"), "Edit > Select all selects the text");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_bars_colour_picker_stays_while_shift_is_held_and_takes_a_hex_without_its_hash() {
+    let path = sample("hex-shift");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let shapes = h.state().scene.active_id().unwrap();
+    let id = h.state().scene.bundle.doc.layer(&shapes).unwrap().cels()[0].nodes[0]
+        .id
+        .clone();
+    h.state_mut().tool = Tool::Select;
+    h.state_mut().select_shapes(vec![id.clone()]);
+    h.run_steps(3);
+    let fill = |h: &Harness<'static, Editor>| match h.state().scene.bundle.doc.item(&id) {
+        Some(klad_core::doc::Item::Node(_, _, node)) => format!("{:?}", node.fill),
+        _ => String::new(),
+    };
+    let fields = |h: &Harness<'static, Editor>| h.query_all_by_role_and_label(Role::TextInput, "hex").count();
+    let panel_only = fields(&h);
+    h.get_by_label("the shape's fill").click();
+    h.run_steps(3);
+    assert_eq!(fields(&h), panel_only + 1, "the picker opens with its hex field");
+    let field = h
+        .query_all_by_role_and_label(Role::TextInput, "hex")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.left().total_cmp(&b.left()))
+        .unwrap();
+    click(&mut h, field.center());
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    h.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+    h.run_steps(3);
+    assert_eq!(fields(&h), panel_only + 1, "holding shift keeps the bar and its picker");
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    "ffd9a0".chars().for_each(|c| {
+        h.event(egui::Event::Text(c.to_string()));
+        h.run_steps(1);
+    });
+    h.key_press(Key::ArrowLeft);
+    h.run_steps(2);
+    assert_eq!(fields(&h), panel_only + 1, "the left arrow keeps the picker");
+    h.key_press(Key::Enter);
+    h.run_steps(4);
+    assert_eq!(fill(&h), r##"Some(Solid("#ffd9a0"))"##, "a hex without its # is taken");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_turned_layer_and_a_turned_selection_keep_their_turned_box() {
+    let path = sample("turned-box");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::TransformLayer).unwrap();
+    h.run_steps(2);
+    let corners = |h: &Harness<'static, Editor>| h.state().handles().map(|(_, c)| c);
+    let before = corners(&h).unwrap();
+    assert!(super::upright(&before));
+    let (from, to) = (canvas_at(&h, 470.0, 10.0), canvas_at(&h, 500.0, 160.0));
+    drag(&mut h, from, to);
+    h.run_steps(2);
+    let after = corners(&h).expect("the transform goes on");
+    assert!(
+        !super::upright(&after),
+        "the box stays turned with the layer: {after:?}"
+    );
+    let middle = (after[0] + after[2]) / 2.0;
+    let inside =
+        h.state().view.unwrap().to_screen(middle, h.state().canvas_rect.size()) + h.state().canvas_rect.min.to_vec2();
+    let moved = h.state().scene.bundle.doc.rev;
+    drag(&mut h, inside.to_pos2(), inside.to_pos2() + vec2(30.0, 0.0));
+    h.run_steps(2);
+    assert_ne!(
+        h.state().scene.bundle.doc.rev,
+        moved,
+        "a drag inside the turned box moves the layer"
+    );
+    assert!(!super::upright(&corners(&h).unwrap()), "and the box stays turned");
+    let _ = std::fs::remove_dir_all(&path);
+    let path = sample("turned-strokes");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "lines");
+    h.key_press(Key::S);
+    h.run_steps(2);
+    let (from, to) = (canvas_at(&h, 5.0, 5.0), canvas_at(&h, 505.0, 379.0));
+    drag(&mut h, from, to);
+    let picked = corners(&h).expect("the box takes the strokes");
+    assert!(super::upright(&picked));
+    let knob = {
+        let top = (picked[0] + picked[1]) / 2.0;
+        let view = h.state().view.unwrap();
+        let rect = h.state().canvas_rect;
+        rect.min + view.to_screen(top, rect.size()) - vec2(0.0, super::KNOB)
+    };
+    drag(&mut h, knob, knob + vec2(60.0, 10.0));
+    h.run_steps(2);
+    assert!(
+        !super::upright(&corners(&h).unwrap()),
+        "turned strokes keep a turned box"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_pixel_eraser_keeps_its_own_size() {
+    let path = pixel_sample("pixel-eraser-size");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.run_steps(2);
+    h.state_mut().pixel_size = 1;
+    h.state_mut().invoke(Cmd::Eraser).unwrap();
+    h.state_mut().pixel_size = 4;
+    h.state_mut().invoke(Cmd::Brush).unwrap();
+    assert_eq!(h.state().pixel_size, 1, "the pencil keeps its size");
+    h.state_mut().invoke(Cmd::Eraser).unwrap();
+    assert_eq!(h.state().pixel_size, 4, "the eraser keeps its own");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn s_drags_a_box_around_strokes_and_draws_a_loop_when_loop_is_picked() {
+    let path = sample("box-select");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "lines");
+    h.key_press(Key::S);
+    h.run_steps(2);
+    assert!(h.state().select_box, "S starts as a box, as its icon shows");
+    let (from, to) = (canvas_at(&h, 20.0, 20.0), canvas_at(&h, 320.0, 220.0));
+    drag(&mut h, from, to);
+    h.run_steps(2);
+    let ids = |h: &Harness<'static, Editor>| h.state().picked.as_ref().map_or(Vec::new(), |p| p.ids.clone());
+    assert!(!ids(&h).is_empty(), "a straight drag takes the stroke inside its box");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("loop").click();
+    h.run_steps(2);
+    assert!(!h.state().select_box);
+    let (from, to) = (canvas_at(&h, 20.0, 20.0), canvas_at(&h, 320.0, 220.0));
+    drag(&mut h, from, to);
+    h.run_steps(2);
+    assert!(ids(&h).is_empty(), "a straight drag closes no loop");
+    let _ = std::fs::remove_dir_all(&path);
 }

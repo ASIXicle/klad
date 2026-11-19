@@ -1400,18 +1400,12 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
     );
     j.key(Key::Escape);
 
-    j.act("put the grass right of the stone on a layer of its own: zoom in, S, and a loop around it");
+    j.act("put the grass right of the stone on a layer of its own: zoom in, S, and a box around it");
     j.pinch(750.0, 1150.0, 2.0);
     j.key(Key::S);
     let count_before = layer_marks(&j, "lines").len();
     let all_before = j.ed().map_or(0, |ed| ed.scene.total_marks());
-    let around = [
-        (694.0, 1108.0),
-        (806.0, 1108.0),
-        (806.0, 1212.0),
-        (694.0, 1212.0),
-        (694.0, 1112.0),
-    ];
+    let around = [(694.0, 1108.0), (806.0, 1212.0)];
     j.drag(&around);
     j.look("looped-the-grass");
     let grass: Vec<u32> = (28..=34).collect();
@@ -1427,7 +1421,7 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
             .unwrap_or_default()
     };
     j.note(format!(
-        "the loop took {:?} on lines{}, and on other layers {:?}; the grass there is {grass:?}",
+        "the box took {:?} on lines{}, and on other layers {:?}; the grass there is {grass:?}",
         picked_ids(&j),
         if cut(&j) {
             " with the parts of other strokes inside it"
@@ -1439,18 +1433,18 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
     j.expect(
         "a-loop-takes-the-grass",
         grass.iter().all(|id| picked_ids(&j).contains(id)),
-        "a loop around the grass takes every blade",
+        "a box around the grass takes every blade",
     );
 
-    j.act("the stone's edge came along: untick a lasso cuts strokes at its edge and loop again");
+    j.act("the stone's edge came along: untick a box or loop cuts strokes at its edge and drag the box again");
     j.key(Key::Escape);
-    j.click("a lasso cuts strokes at its edge");
+    j.click("a box or loop cuts strokes at its edge");
     j.drag(&around);
     j.look("looped-whole-strokes");
     let shading = elsewhere(&j);
     let taken = picked_ids(&j).len() + shading.iter().map(|(_, n)| n).sum::<usize>();
     j.note(format!(
-        "the loop took {:?} on lines and on other layers {shading:?}: {taken} marks",
+        "the box took {:?} on lines and on other layers {shading:?}: {taken} marks",
         picked_ids(&j)
     ));
     let mut whole = picked_ids(&j);
@@ -1458,7 +1452,7 @@ fn someone_changes_one_stroke_and_several_in_what_an_agent_painted() {
     j.expect(
         "a-loop-without-the-cut-takes-whole-strokes",
         whole == grass && !cut(&j),
-        "with the cut off, the loop takes the strokes wholly inside it and nothing else on this layer",
+        "with the cut off, the box takes the strokes wholly inside it and nothing else on this layer",
     );
 
     j.act("move them: cmd X, a new paint layer, cmd V");
@@ -3999,9 +3993,9 @@ fn someone_fixes_and_adjusts_a_painting() {
     );
     j.chord(CMD, Key::Z);
 
-    j.act("the shape at the top left sits wrong: loop it with S and mirror it with the bar's flip");
+    j.act("the shape at the top left sits wrong: drag a box around it with S and mirror it with the bar's flip");
     j.key(Key::S);
-    j.drag(&[(70.0, 30.0), (270.0, 30.0), (270.0, 215.0), (70.0, 215.0), (70.0, 36.0)]);
+    j.drag(&[(70.0, 30.0), (270.0, 215.0)]);
     j.look("looped");
     let taken = picked_ids(&j);
     let first = taken.first().copied().unwrap_or_default();
@@ -4013,7 +4007,7 @@ fn someone_fixes_and_adjusts_a_painting() {
     j.look("flipped-selection");
     let now = (box_of(&layer_marks(&j, "lines"), &taken), head(&j));
     j.note(format!(
-        "the loop took {} strokes; their box went from {:?} to {:?}, the first stroke's start from {:?} to {:?}",
+        "the box took {} strokes; their box went from {:?} to {:?}, the first stroke's start from {:?} to {:?}",
         taken.len(),
         was.0,
         now.0,
