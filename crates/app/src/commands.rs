@@ -1685,7 +1685,7 @@ impl Cmd {
             Cmd::Duplicate => spec(
                 "drawing.duplicate",
                 "duplicate to the next frame",
-                icon::COPY,
+                icon::CARDS,
                 G::Frames,
                 T::None,
                 R::No,
@@ -2576,7 +2576,7 @@ impl Cmd {
             Cmd::FillLike => spec(
                 "colour.fill-like",
                 "fill like the first drawing",
-                icon::COPY,
+                icon::FILL,
                 G::Colour,
                 T::None,
                 R::No,

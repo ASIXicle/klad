@@ -381,8 +381,8 @@ impl Editor {
     fn target(&self, layer: &klad_core::doc::Layer) -> CopyTarget {
         let frame = self.scene.frame;
         match layer.content_at(frame) {
-            Some(cel) => CopyTarget::Cel(cel.id.clone()),
-            None => CopyTarget::Frame {
+            Some(cel) if cel.frame == frame => CopyTarget::Cel(cel.id.clone()),
+            _ => CopyTarget::Frame {
                 frame,
                 layer: Some(layer.id.clone()),
             },
@@ -440,6 +440,9 @@ impl Editor {
         };
         let frame = self.scene.frame;
         let start = Instant::now();
+        let held = targets.iter().any(|(_, to)| {
+            matches!(to, CopyTarget::Frame { layer: Some(l), .. } if doc.layer(l).and_then(|l| l.content_at(frame)).is_some())
+        });
         let ops: Vec<Op> = targets.iter().flat_map(|(p, to)| paste_ops(p, to)).collect();
         let (dirty, applied) = match self.write(&ops) {
             Ok(done) => done,
@@ -456,8 +459,12 @@ impl Editor {
             self.say(
                 Tone::Done,
                 format!(
-                    "{word} {}{onto} on frame {frame}, in place and selected: drag to move them (one cmd Z takes them off)",
-                    counted(made.len(), "mark")
+                    "{word} {}{onto} on frame {frame}, in place and selected: drag to move them (one cmd Z takes them off){}",
+                    counted(made.len(), "mark"),
+                    match held {
+                        true => format!("; frame {frame} showed an earlier drawing, so it got its own copy of it first and the frames before it stay as they were"),
+                        false => String::new(),
+                    }
                 ),
             );
         }

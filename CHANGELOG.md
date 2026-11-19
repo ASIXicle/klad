@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A paste on a frame that shows a drawing held from an earlier frame gives that frame its own copy of the drawing first, so the frames before it stay as they were; the message says so, and one cmd Z takes back both. **klad copy --frame** does the same.
+- The timeline's bar names **new clip**, and its buttons no longer share one icon: duplicate to the next frame shows a stack of cards, fill like the first drawing a paint bucket, copy the selected cells the copy icon.
 - **File > Import picture…** opens the system's file chooser, showing PNG and JPEG files.
 - The pixel eraser keeps its own size, as the brush eraser does.
 - While a text is open, **cmd Z** takes back what was typed since the last move of the caret in one step, and **Edit > Undo**, **Select all** and **Copy** act on the text; once there is no typing left to take back, they act on the drawing again.

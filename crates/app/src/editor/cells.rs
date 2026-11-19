@@ -290,7 +290,7 @@ impl Editor {
             self.command_button(ui, Cmd::Inbetween, Some("in-between"));
             self.command_button(ui, Cmd::RedoInbetweens, None);
             self.command_button(ui, Cmd::FillLike, None);
-            self.command_button(ui, Cmd::NewClip, None);
+            self.command_button(ui, Cmd::NewClip, Some("new clip"));
             if let Some(span) = &self.timeline.span {
                 ui.label(
                     RichText::new(format!(

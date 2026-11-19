@@ -9211,3 +9211,55 @@ fn text_on_a_pixel_layer_becomes_hard_edged_pixels_and_says_so() {
     assert_eq!(h.state().scene.active_marks().len(), marks, "cmd Z takes it back");
     let _ = std::fs::remove_dir_all(&path);
 }
+
+#[test]
+fn a_paste_on_a_held_frame_gives_the_frame_its_own_copy_of_the_drawing_first() {
+    let path = sample("paste-held");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let layer = h.state().scene.active_id().unwrap();
+    let cels = |h: &Harness<'static, Editor>| {
+        h.state()
+            .scene
+            .bundle
+            .doc
+            .layer(&layer)
+            .unwrap()
+            .cels()
+            .iter()
+            .map(|c| (c.id.clone(), c.frame))
+            .collect::<Vec<_>>()
+    };
+    let first = cels(&h)[0].0.clone();
+    let before = h.state().scene.bundle.read_marks(&layer, &first).unwrap().len();
+    h.state_mut().tool = Tool::Strokes;
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::Copy).unwrap();
+    h.state_mut().go_to(5).unwrap();
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::Paste).unwrap();
+    h.run_steps(3);
+    let now = cels(&h);
+    assert_eq!(now.len(), 2, "frame 5 has a drawing of its own: {now:?}");
+    assert_eq!(now[1].1, 5);
+    assert_eq!(
+        h.state().scene.bundle.read_marks(&layer, &first).unwrap().len(),
+        before,
+        "the frames before keep their drawing as it was"
+    );
+    assert_eq!(
+        h.state().scene.bundle.read_marks(&layer, &now[1].0).unwrap().len(),
+        before * 2,
+        "frame 5 shows the drawing it showed and the paste"
+    );
+    let said: Vec<String> = h.state().messages.log().map(|m| m.text.clone()).collect();
+    assert!(
+        said.iter().any(|m| m.contains("got its own copy of it first")),
+        "{said:?}"
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(cels(&h).len(), 1, "one cmd Z takes back the copy and the paste");
+    let _ = std::fs::remove_dir_all(&path);
+}

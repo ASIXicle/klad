@@ -119,6 +119,7 @@ pub mod icon {
     pub const FOLDER_OPEN: &str = "\u{E256}";
     pub const SAVE: &str = "\u{E248}";
     pub const STACK_PLUS: &str = "\u{EDF6}";
+    pub const CARDS: &str = "\u{E0F6}";
 }
 
 pub fn install(ctx: &egui::Context) {

@@ -2987,7 +2987,25 @@ fn copy(doc: &mut Document, spec: &CopySpec, out: &mut Applied) -> Result<String
                     }
                 }
             };
-            let cel = paint_cel_at(doc, &layer, *frame, out)?;
+            let held = doc
+                .layer(&layer)
+                .and_then(|l| l.cel_at(*frame))
+                .filter(|c| c.frame != *frame && c.link.is_none() && *frame < doc.timeline.frames)
+                .map(|c| c.id.clone());
+            let cel = match held {
+                Some(held) => crate::timing::cel(
+                    doc,
+                    &crate::timing::CelSpec {
+                        action: crate::timing::CelAction::Dup { cel: held },
+                        id: None,
+                        frame: Some(*frame),
+                        hold: None,
+                        insert: false,
+                    },
+                    out,
+                )?,
+                None => paint_cel_at(doc, &layer, *frame, out)?,
+            };
             (layer, cel)
         }
     };

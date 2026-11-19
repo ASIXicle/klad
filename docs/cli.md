@@ -554,7 +554,7 @@ Options:
 ## klad copy
 
 ```text
-Copy strokes and fills (<cel>:s<id>) into another drawing. The copies get new ids, printed as a map (c1:s3 -> c9:s12), and land on top of that drawing in the order they had. --to names the drawing; --frame takes the drawing the layer shows at that frame (a new drawing on an empty frame or past the end; a frame that shows a link names its source instead). The marks' own layer unless --layer. The move, turn, scale and flip options are klad transform's, applied to the copies together about the middle of their bounds or --pivot. --cut keeps only the parts inside a polygon.
+Copy strokes and fills (<cel>:s<id>) into another drawing. The copies get new ids, printed as a map (c1:s3 -> c9:s12), and land on top of that drawing in the order they had. --to names the drawing; --frame takes the drawing that starts at that frame; a frame that shows a drawing held from an earlier frame first gets its own copy of that drawing, so the frames before it stay as they were (a new drawing on an empty frame or past the end; a frame that shows a link names its source instead). The marks' own layer unless --layer. The move, turn, scale and flip options are klad transform's, applied to the copies together about the middle of their bounds or --pivot. --cut keeps only the parts inside a polygon.
 
   klad copy art.klad c1:s3 c1:s4 --frame 4
   klad copy art.klad c1:s3 --to c9 --move 12,-4 --rotate 8

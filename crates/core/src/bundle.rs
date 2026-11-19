@@ -1751,6 +1751,36 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_onto_a_held_frame_gives_the_frame_its_own_drawing_first() {
+        use crate::ops::parse_lines;
+        let dir = scratch("copy-held");
+        let mut doc = Document::new(256, 256);
+        doc.timeline.frames = 8;
+        doc.layers.push(Layer::paint("l1", "ink", "c1"));
+        doc.next_id = 10;
+        let mut bundle = Bundle::create(&dir, doc).unwrap();
+        bundle
+            .apply(&parse_lines(r#"{"op":"stroke","layer":"l1","path":"M10 10 L90 10"}"#).unwrap())
+            .unwrap();
+        bundle
+            .apply(&parse_lines(r#"{"op":"copy","ids":["c1:s1"],"frame":5,"y":20}"#).unwrap())
+            .unwrap();
+        let cels = bundle.doc.layer("l1").unwrap().cels().to_vec();
+        assert_eq!(cels.iter().map(|c| c.frame).collect::<Vec<_>>(), [0, 5]);
+        assert_eq!(
+            bundle.read_marks("l1", "c1").unwrap().len(),
+            1,
+            "frames 0 to 4 keep their drawing"
+        );
+        assert_eq!(
+            bundle.read_marks("l1", &cels[1].id).unwrap().len(),
+            2,
+            "frame 5 holds a copy of the drawing it showed, and the copied stroke"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn copies_take_new_ids_move_on_the_way_and_undo_in_one_step() {
         use crate::history::{Stack, step};
         use crate::markedit::{Copied, MarkChange};
