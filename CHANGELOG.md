@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.0 (2026-11-19)
+
+The editor after a full audit: it fits a small screen, says what it does and why it cannot, and keys follow what you work in. New: an Export menu by kind, a right-click menu, colour sliders, zoom keys, text you can select, a starter palette for pixel art and `klad apply --steps`.
+
+Drawings are saved in format `klad/8`, as in 0.3.0; older drawings open unchanged.
+
 - **cmd V** after clicking a frame pastes the strokes or pixels you copied last; it pastes frames only when frames were what you copied last.
 - An adjustment layer's own settings come first in **Layer settings**, and a new adjustment layer makes room for them.
 - An export into a folder that cannot be made says why in plain words ("part of that path is a file, not a folder"), without the system's error number.
@@ -17,7 +25,6 @@
 - Text typed on a pixel layer becomes pixels in the current colour, hard edged, when it is finished; the editor says so when the text starts and when it is laid down. **klad pixel --text** does the same from the command line (with **--font**, **--text-size** and **--at**).
 - The colour picker of the bar over a glow or another gradient starts from the gradient's colour, and after a hex is typed and Return pressed it shows that colour, not the colour you paint with.
 - A turned layer (**cmd T**) or turned strokes keep a turned box, so the next drag scales or turns what you see.
-
 - The editor fits a small screen. A drawing of one frame opens with the timeline folded to its toolbar, and it opens by itself when the drawing gets a second frame; open, it is no taller than its rows. The panels on the right share the height of the window and never run past it: each scrolls inside, Layers always shows at least three rows with its buttons, and when the window is too short for all of them Brush folds first. A panel you open with its arrow or from the **Window** menu gets its room and the others give way, and the **Window** menu ticks a panel only when it shows, so one choice brings up a folded panel. At an interface size above 100% the timeline keeps its size on the screen, so the canvas keeps its room. On a 1440 by 900 window the canvas went from about a third of the window to more than half.
 - In a pixel drawing the Colour panel shows the palette and its buttons first, above the colour wheel.
 - Menus, windows and the tool bar fit a small screen too. On Windows and Linux a menu longer than the window scrolls, so its last items can be reached. A window is never taller than the room above the status line: its title and its close button stay in sight, the brush window's list shrinks to fit, and on a very short screen the whole window scrolls. Windows open at their full size at once, and a second window opens a little below and to the right of the first instead of over it. In the bar above the canvas a slider that does not fit moves to the next row whole, and a tool's hint stays on one line (cut off at the end, with all of it when you point at it).
@@ -82,6 +89,11 @@
 - The editor no longer writes over what an agent changed a moment before. It used to learn of a change in the drawing's folder only when the system reported it, a moment later; a stroke, a command or an undo made in that moment was worked out on the drawing as klad last read it, so the agent's change was dropped, and an undo could put a layer into the drawing twice, after which it opened only after a repair. Every change now reads the folder first when it has changed, and nothing is written over a change klad has not read.
 - Fixed the canvas after undoing **Make it a map layer** on a layer that was no longer selected: the layer's paint stayed off the canvas until another layer was picked. **Make it a map layer** and the **map** button are one undo step each, with the light maps they turn on.
 - Fixed links that did nothing: **Help > Guides**, **What's new**, the links in **About klad** and in the start window, and the report and support emails now open with the system.
+
+## 0.3.0 (2026-11-16)
+
+Light maps for 2D lighting: normal, height, specular, emission, depth and occlusion maps made from what is drawn, shaped by hand, written beside every export and lit in Godot. Drawings are saved in format `klad/8`; older drawings open unchanged.
+
 - Fixed opening a drawing on the Mac: **Choose a .klad file...** in the start window (it said folder) and **File > Open…** could not pick a `.klad` drawing, which Finder shows as one file. The open panel now takes a `.klad` drawing; other files are greyed out.
 - Fixed shade and rim on posed layers. The shade and rim fills that `klad light` makes keep the part of the shape outside a cut, and a pose turned the fill with its bone but left that cut where it was in the rest drawing, so in posed frames and their in-betweens the rim grew into a wide crescent and the shade slid away. Posing now moves the cut with the fill, in `klad apply` poses, in-betweens and the editor alike; a frame posed before this comes right when you pose it again.
 - Fixed cuts in in-betweens. A fill or stroke cut by a lasso kept its cut where it was in the first key when an in-between moved it: flood fills between keys, and marks that ride a line (marks drawn by hand between keys and marks found in one key only). The cut now moves with the mark.
