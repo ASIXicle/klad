@@ -65,6 +65,7 @@ pub struct Event {
     pub outcome: Outcome,
     pub took: Duration,
     pub output: String,
+    pub stdout: String,
 }
 
 #[derive(Default)]
@@ -167,12 +168,14 @@ impl Jobs {
                 Ok(e) => format!("{}{}", e.stdout, e.stderr),
                 Err(_) => String::new(),
             };
+            let stdout = result.as_ref().map_or_else(|_| String::new(), |e| e.stdout.clone());
             let event = |outcome| Event {
                 tag: r.spec.tag,
                 name: r.spec.name.clone(),
                 outcome,
                 took,
                 output: output.clone(),
+                stdout: stdout.clone(),
             };
             let outcome = match result {
                 _ if r.cancelled.load(Ordering::Relaxed) => Outcome::Cancelled,

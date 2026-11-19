@@ -1,4 +1,4 @@
-_Last updated: 2026-11-09 21:00_
+_Last updated: 2026-11-19 12:00_
 
 # Changing strokes
 
@@ -12,13 +12,26 @@ Press **V**, press on what you want to move and drag. Hold **alt** to drag a cop
 
 ## Select strokes
 
-Press **S** and click a stroke. Shift click adds more, and dragging a loop lassoes them. **cmd A** selects everything on the layer at this frame.
+Press **S** and click a stroke. Shift click adds more. Drag a box around strokes to select them, or pick **loop** in the bar over the canvas and draw a loop around them. The box or loop takes the strokes that are wholly inside it; to take the parts of strokes that cross its edge too, tick **a box or loop cuts strokes at its edge** in the bar. **cmd A** selects everything on the layer at this frame.
 
 To pick on every layer instead of only the active one, switch the bar over the canvas to **all layers**.
 
 ## Change what you selected
 
-Drag inside the box to move it, a corner to scale it and the knob to turn it. The bar next to the selection recolours it with the current colour, makes strokes thinner or thicker, duplicates it (**cmd D**) and deletes it (**Backspace**). Recolouring several strokes keeps each one's own lighter or darker shade, so a painted area stays painted.
+Drag inside the box to move it, a corner to scale it and the knob to turn it. A turned box stays turned, so the next drag works on it as you see it. The bar next to the selection recolours it, makes strokes thinner or thicker, duplicates it (**cmd D**) and deletes it (**Backspace**).
+
+To recolour, click the palette button in the bar and pick a colour on the wheel, from the drawing's palette or from the colours you used lately; **use the current colour** gives it the colour you paint with. Recolouring several strokes keeps each one's own lighter or darker shade, so a painted area stays painted.
+
+## Copy and paste
+
+**cmd C** copies the selected strokes or shapes and **cmd V** pastes them in place, on this frame or on another one. Strokes are pasted on the layer you have selected, so to put them on another layer, select that layer before you paste. Shapes pasted while a paint layer is active get a vector layer of their own above it.
+
+## Split part of a drawing onto its own layer
+
+1. Select the strokes or shapes, such as the roof of a house.
+2. Right click the canvas and select **Move to new layer**.
+
+They move to a new layer right above the one they were on and stay selected.
 
 ## Move an eraser on its own
 

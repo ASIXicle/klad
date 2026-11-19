@@ -1,5 +1,6 @@
 use super::Editor;
 use crate::commands::Cmd;
+use crate::layout;
 use crate::messages::Tone;
 use crate::theme::{self, Hint, icon};
 use anyhow::Result;
@@ -11,6 +12,8 @@ use rayon::prelude::*;
 use serde_json::{Map, json};
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, channel};
+
+const ROW: f32 = 32.0;
 
 pub use crate::composite::{THUMB, thumbnail};
 
@@ -46,6 +49,7 @@ pub(super) struct Rename {
     pub id: String,
     pub text: String,
     pub place: Where,
+    pub fresh: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -330,10 +334,11 @@ impl Editor {
             _ => icon::BRUSH,
         };
         child.label(RichText::new(kind).color(theme::WEAK));
-        let rename = |text: String| Rename {
+        let rename = |text: String, fresh: bool| Rename {
             id: row.id.clone(),
             text,
             place,
+            fresh,
         };
         let renaming = self
             .renaming
@@ -341,12 +346,15 @@ impl Editor {
             .is_some_and(|r| r.id == row.id && r.place == place);
         if renaming {
             let mut text = self.renaming.as_ref().map(|r| r.text.clone()).unwrap_or_default();
-            let label = child.label("rename");
+            let fresh = self.renaming.as_ref().is_some_and(|r| r.fresh);
             let edit = child
-                .add(egui::TextEdit::singleline(&mut text).desired_width(90.0))
-                .labelled_by(label.id)
+                .add(egui::TextEdit::singleline(&mut text).desired_width(120.0))
                 .hint("the new name; Return keeps it, Esc leaves it");
+            edit.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "rename"));
             edit.request_focus();
+            if fresh {
+                theme::select_all(child.ctx(), edit.id, &text);
+            }
             let (enter, escape) = child.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
             match (enter || edit.lost_focus(), escape) {
                 (_, true) => self.renaming = None,
@@ -357,16 +365,20 @@ impl Editor {
                     }
                     self.renaming = None;
                 }
-                _ => self.renaming = Some(rename(text)),
+                _ => self.renaming = Some(rename(text, false)),
+            }
+            if self.renaming.is_none() {
+                child.memory_mut(|m| m.surrender_focus(edit.id));
             }
         } else {
             let name = child.add(
                 egui::Label::new(RichText::new(&row.name).color(if active { Color32::WHITE } else { theme::TEXT }))
                     .truncate()
+                    .selectable(false)
                     .sense(Sense::click()),
             );
             if name.double_clicked() {
-                self.renaming = Some(rename(row.name.clone()));
+                self.renaming = Some(rename(row.name.clone(), true));
             }
             if name.clicked() {
                 self.row_click(ui, row);
@@ -501,7 +513,7 @@ impl Editor {
             self.row_click(ui, row);
         }
         if response.double_clicked() && !row.mask {
-            self.renaming = Some(rename(row.name.clone()));
+            self.renaming = Some(rename(row.name.clone(), true));
         }
         if !ops.is_empty() {
             self.check(|e| e.apply(ops));
@@ -643,7 +655,40 @@ impl Editor {
         self.set(&id, props)
     }
 
-    pub(super) fn layers_pane(&mut self, ui: &mut egui::Ui) -> Result<()> {
+    pub(super) fn layers_body(&mut self, ui: &mut egui::Ui, height: f32) -> f32 {
+        let top = ui.cursor().top();
+        egui::Frame::new()
+            .inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 6,
+                bottom: 5,
+            })
+            .show(ui, |ui| self.layers_bar(ui));
+        let bar = ui.cursor().top() - top;
+        let rows = self.layer_rows(Where::Panel);
+        let kept = rows.len().min(layout::LAYER_ROWS_KEPT) as f32;
+        self.dock_fit.layers_least = bar + kept * ROW + 6.0;
+        let list = (height - bar).max(0.0);
+        let shown = egui::ScrollArea::vertical()
+            .id_salt(("pane", layout::Pane::Layers))
+            .max_height(list)
+            .min_scrolled_height(list)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 0,
+                        bottom: 6,
+                    })
+                    .show(ui, |ui| self.layer_list(ui, rows));
+            });
+        bar + shown.content_size.y
+    }
+
+    fn layers_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             [
                 (Cmd::NewPaintLayer, Some("paint")),
@@ -663,18 +708,29 @@ impl Editor {
                 self.command_button(ui, cmd, label);
             });
         });
-        let rows = self.layer_rows(Where::Panel);
+    }
+
+    fn layer_list(&mut self, ui: &mut egui::Ui, rows: Vec<LayerRow>) {
         let width = ui.available_width();
         let mut placed = Vec::new();
         let mut responses = Vec::new();
         ui.spacing_mut().item_spacing.y = 0.0;
         rows.into_iter().for_each(|row| {
-            let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
-            responses.push(self.layer_row(ui, &row, Where::Panel, rect));
+            let (rect, _) = ui.allocate_exact_size(vec2(width, ROW), Sense::hover());
+            if self.scene.active == row.path && self.layer_in_sight.as_ref() != Some(&row.id) {
+                match ui.clip_rect().contains_rect(rect) {
+                    true => self.layer_in_sight = Some(row.id.clone()),
+                    false => ui.scroll_to_rect_animation(rect, None, egui::style::ScrollAnimation::none()),
+                }
+            }
+            let response = self.layer_row(ui, &row, Where::Panel, rect);
+            if response.is_pointer_button_down_on() {
+                self.layer_in_sight = Some(row.id.clone());
+            }
+            responses.push(response);
             placed.push((rect, row));
         });
         self.layer_drags(ui, Where::Panel, &placed, &responses);
-        Ok(())
     }
 
     pub(super) fn duplicate_layer(&mut self) -> Result<()> {

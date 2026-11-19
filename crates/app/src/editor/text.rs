@@ -32,7 +32,7 @@ impl Default for TextTool {
         Self {
             font: "Inter".into(),
             weight: None,
-            size: 48.0,
+            size: TEXT_SIZE,
             align: Align::Left,
             tracking: 0.0,
             leading: 1.2,
@@ -43,16 +43,26 @@ impl Default for TextTool {
 pub(super) struct Typing {
     pub id: Option<String>,
     pub layer: Option<String>,
+    pub pixels: Option<String>,
     pub frame: u32,
     pub text: Text,
     pub before: String,
     pub caret: usize,
+    pub anchor: Option<usize>,
+    pub undo: Vec<(String, usize)>,
+    pub run: bool,
     pub fill: [f32; 4],
     pub matrix: [f32; 6],
     pub focused: bool,
-    pub original: Option<Layer>,
     pub bytes: Arc<Vec<u8>>,
     pub shown: Option<(String, Option<(TextureHandle, Rect)>)>,
+}
+
+struct Written {
+    text: Text,
+    fill: [f32; 4],
+    matrix: [f32; 6],
+    hidden: Layer,
 }
 
 #[derive(Default)]
@@ -61,6 +71,38 @@ pub(super) struct Picker {
     pub group: Option<&'static str>,
     pub faces: HashMap<String, Option<TextureHandle>>,
 }
+
+pub(super) const TEXT_SIZE: f32 = 48.0;
+const SELECTED_TEXT: f32 = 0.35;
+const TYPING_ACTS: [Key; 9] = [
+    Key::Enter,
+    Key::Backspace,
+    Key::Delete,
+    Key::ArrowLeft,
+    Key::ArrowRight,
+    Key::ArrowUp,
+    Key::ArrowDown,
+    Key::Home,
+    Key::End,
+];
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+fn word_around(text: &str, at: usize) -> (usize, usize) {
+    let word = |c: char| c.is_alphanumeric() || c == '\'' || c == '_';
+    let from = text[..at]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| word(*c))
+        .last()
+        .map_or(at, |(i, _)| i);
+    let to = text[at..]
+        .char_indices()
+        .find(|(_, c)| !word(*c))
+        .map_or(text.len(), |(i, _)| at + i);
+    (from, to)
+}
+const PICTURE_MOST: usize = 8192;
+const PICTURE_ROOM: f32 = 0.9;
 
 fn compose(s: [f32; 6], m: [f32; 6]) -> [f32; 6] {
     [
@@ -158,6 +200,15 @@ impl Editor {
         typeset::layout_in(&t.bytes, &t.text).ok()
     }
 
+    pub(super) fn text_drag(&mut self, c: Vec2) {
+        let Some(at) = self.inside_typing(c) else {
+            return;
+        };
+        if let Some(t) = self.text_edit.as_mut().filter(|t| t.anchor.is_some()) {
+            t.caret = at;
+        }
+    }
+
     fn inside_typing(&self, c: Vec2) -> Option<usize> {
         let t = self.text_edit.as_ref()?;
         let layout = self.typing_layout()?;
@@ -171,8 +222,29 @@ impl Editor {
 
     pub(super) fn text_down(&mut self, c: Vec2) -> Result<()> {
         if let Some(at) = self.inside_typing(c) {
+            let shift = self.modifiers.shift;
+            let twice = self
+                .text_click
+                .is_some_and(|(when, was)| was == at && when.elapsed() < DOUBLE_CLICK);
+            self.text_click = Some((std::time::Instant::now(), at));
+            self.text_pressing = !twice;
             if let Some(t) = self.text_edit.as_mut() {
-                t.caret = at;
+                t.run = false;
+                match (shift, twice) {
+                    (true, _) => {
+                        t.anchor = t.anchor.or(Some(t.caret));
+                        t.caret = at;
+                    }
+                    (false, true) => {
+                        let (from, to) = word_around(&t.text.text, at);
+                        t.anchor = Some(from);
+                        t.caret = to;
+                    }
+                    (false, false) => {
+                        t.anchor = Some(at);
+                        t.caret = at;
+                    }
+                }
             }
             return Ok(());
         }
@@ -196,44 +268,57 @@ impl Editor {
         }
     }
 
-    pub(super) fn edit_text(&mut self, id: &str, at: Option<Vec2>) -> Result<()> {
+    fn written(&self, id: &str) -> Result<Option<Written>> {
         let doc = &self.scene.bundle.doc;
         let Some(Item::Node(layer, _, node)) = doc.item(id) else {
-            return Ok(());
+            return Ok(None);
         };
         let Shape::Text(text) = &node.shape else {
-            return Ok(());
+            return Ok(None);
         };
         let fill = match &node.fill {
             Some(Paint::Solid(hex)) => color::rgba_of(hex).unwrap_or([0.0, 0.0, 0.0, 1.0]),
             Some(_) => [0.25, 0.77, 1.0, 1.0],
             None => [0.0, 0.0, 0.0, 1.0],
         };
-        let fill = [fill[0], fill[1], fill[2], fill[3] * node.opacity];
-        let m = overlay::local_to_canvas(doc, id)?.map_or(IDENTITY, |m| [m[0], m[2], m[1], m[3], m[4], m[5]]);
-        let (text, original) = (text.clone(), layer.clone());
-        let Some(bytes) = self.font_bytes(&text.font) else {
-            return Ok(());
-        };
-        let mut hidden = original.clone();
+        let mut hidden = layer.clone();
         if let Some(cels) = hidden.cels_mut() {
             cels.iter_mut().any(|cel| hide(&mut cel.nodes, id));
         }
+        Ok(Some(Written {
+            text: text.clone(),
+            fill: [fill[0], fill[1], fill[2], fill[3] * node.opacity],
+            matrix: overlay::local_to_canvas(doc, id)?.map_or(IDENTITY, |m| [m[0], m[2], m[1], m[3], m[4], m[5]]),
+            hidden,
+        }))
+    }
+
+    pub(super) fn edit_text(&mut self, id: &str, at: Option<Vec2>) -> Result<()> {
+        let Some(written) = self.written(id)? else {
+            return Ok(());
+        };
+        let Some(bytes) = self.font_bytes(&written.text.font) else {
+            return Ok(());
+        };
         self.end_look_preview()?;
-        self.scene.preview_layer(hidden)?;
+        let layer = written.hidden.id.clone();
+        self.scene.preview_layer(written.hidden)?;
         self.dirty.extend(self.scene.all_tiles());
-        let caret = text.text.len();
+        let caret = written.text.text.len();
         self.text_edit = Some(Typing {
             id: Some(id.to_string()),
-            layer: Some(original.id.clone()),
+            pixels: None,
+            layer: Some(layer),
             frame: self.scene.frame,
-            before: text.text.clone(),
-            text,
+            before: written.text.text.clone(),
+            text: written.text,
             caret,
-            fill,
-            matrix: m,
+            anchor: None,
+            undo: Vec::new(),
+            run: false,
+            fill: written.fill,
+            matrix: written.matrix,
             focused: false,
-            original: Some(original),
             bytes,
             shown: None,
         });
@@ -276,37 +361,104 @@ impl Editor {
         let layer = self
             .scene
             .active_layer()
-            .filter(|l| l.kind() == Kind::Vector && !l.locked && !self.scene.active_is_mask())
+            .filter(|l| l.kind() == Kind::Vector && !l.locked && !l.reference && !self.scene.active_is_mask())
             .map(|l| l.id.clone());
+        let pixels = self
+            .scene
+            .active_layer()
+            .filter(|l| l.pixel() && !l.locked && !self.scene.active_is_mask() && self.hidden_in_hand().is_none())
+            .map(|l| (l.id.clone(), l.name.clone()));
+        if let Some((_, name)) = &pixels {
+            self.say(
+                Tone::Info,
+                format!("{name} is a pixel layer: the text becomes pixels when you finish it, and cannot be edited as text after that"),
+            );
+        }
         self.text_edit = Some(Typing {
             id: None,
             layer,
+            pixels: pixels.map(|(id, _)| id),
             frame: self.scene.frame,
             text,
             before: String::new(),
             caret: 0,
+            anchor: None,
+            undo: Vec::new(),
+            run: false,
             fill: self.color,
             matrix: IDENTITY,
             focused: false,
-            original: None,
             bytes,
             shown: None,
         });
         Ok(())
     }
 
-    pub(super) fn end_typing_preview(&mut self) -> Result<()> {
-        if let Some(original) = self.text_edit.as_mut().and_then(|t| t.original.take()) {
-            self.scene.preview_layer(original)?;
+    fn end_typing_preview(&mut self) -> Result<()> {
+        let layer = self
+            .text_edit
+            .as_ref()
+            .filter(|t| t.id.is_some())
+            .and_then(|t| t.layer.clone());
+        if let Some(layer) = layer
+            && self.scene.end_preview(&layer)?
+        {
             self.dirty.extend(self.scene.all_tiles());
         }
         Ok(())
     }
 
-    pub(super) fn forget_typing_preview(&mut self) {
-        if let Some(t) = self.text_edit.as_mut() {
-            t.original = None;
+    pub(super) fn keep_typing_preview(&mut self) -> Result<()> {
+        if self.scene.take_unshown() {
+            self.dirty.extend(self.scene.all_tiles());
         }
+        let Some(id) = self.text_edit.as_ref().and_then(|t| t.id.clone()) else {
+            return Ok(());
+        };
+        let shows = match self.scene.bundle.doc.item(&id) {
+            Some(Item::Node(_, _, node)) if matches!(node.shape, Shape::Text(_)) => Some(node.visible),
+            _ => None,
+        };
+        let written = match shows {
+            Some(true) => self.written(&id)?,
+            Some(false) => return Ok(()),
+            None => None,
+        };
+        let Some(written) = written else {
+            self.text_edit = None;
+            self.say(
+                Tone::Info,
+                "the text that was open is no longer in the drawing, so it is closed",
+            );
+            return Ok(());
+        };
+        let font = self
+            .text_edit
+            .as_ref()
+            .is_some_and(|t| t.text.font != written.text.font)
+            .then(|| self.font_bytes(&written.text.font))
+            .flatten();
+        let layer = written.hidden.id.clone();
+        self.scene.preview_layer(written.hidden)?;
+        self.dirty.extend(self.scene.all_tiles());
+        if let Some(t) = self.text_edit.as_mut() {
+            let typed = std::mem::take(&mut t.text.text);
+            let kept = match &font {
+                Some(_) => written.text.font.clone(),
+                None => std::mem::take(&mut t.text.font),
+            };
+            t.before = written.text.text.clone();
+            t.text = written.text;
+            t.text.text = typed;
+            t.text.font = kept;
+            t.fill = written.fill;
+            t.matrix = written.matrix;
+            t.layer = Some(layer);
+            if let Some(bytes) = font {
+                t.bytes = bytes;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn finish_typing(&mut self) -> Result<()> {
@@ -329,6 +481,33 @@ impl Editor {
                 self.selection = Some(id);
             }
             None if empty => {}
+            None if typing.pixels.is_some() => {
+                let layer = typing.pixels.clone().unwrap_or_default();
+                let cells = typeset::cells(&typing.bytes, &typing.text)?;
+                if cells.is_empty() {
+                    self.say(
+                        Tone::Refused,
+                        "the text is too small to leave any pixels: make it larger in the bar",
+                    );
+                    return Ok(());
+                }
+                let before = self.scene.bundle.doc.rev;
+                self.apply_pixels(klad_core::ops::PixelSpec {
+                    layer: layer.clone(),
+                    frame: typing.frame,
+                    color: Some(color::hex(typing.fill)),
+                    cells,
+                    by_hand: true,
+                    ..klad_core::ops::PixelSpec::default()
+                })?;
+                if self.scene.bundle.doc.rev != before {
+                    let name = self.layer_name(&layer);
+                    self.say(
+                        Tone::Done,
+                        format!("the text is pixels on {name} now and cannot be edited as text; cmd Z takes it back"),
+                    );
+                }
+            }
             None => {
                 let taken = self.scene.bundle.doc.ids();
                 let fresh = |stem: &str| {
@@ -342,20 +521,12 @@ impl Editor {
                 node["type"] = json!("text");
                 node["id"] = json!(id);
                 node["fill"] = json!(color::hex(typing.fill));
-                let mut ops = Vec::new();
-                let (layer, made) = match typing.layer {
-                    Some(layer) => (layer, false),
+                let (mut ops, layer, made, said) = match typing.layer {
+                    Some(layer) => (Vec::new(), layer, false, String::new()),
                     None => {
-                        let layer = fresh("l");
-                        let above = self.scene.active_layer().map(|l| l.id.clone());
-                        ops.push(Op::AddLayer {
-                            layer: json!({"id": layer, "kind": "vector", "name": "text", "cels": [{"frame": typing.frame}]}),
-                            place: Place {
-                                above,
-                                ..Place::default()
-                            },
-                        });
-                        (layer, true)
+                        let home = self.new_vector_layer("text", typing.frame);
+                        let said = home.said();
+                        (home.ops, home.layer, true, said)
                     }
                 };
                 ops.push(Op::AddNode {
@@ -374,11 +545,47 @@ impl Editor {
                 self.used_colour();
                 self.say(
                     Tone::Done,
-                    "text added: T and a click on it types more, V moves it, layer settings change its font",
+                    format!(
+                        "text added{said}: T and a click on it types more, V moves it, layer settings change its font"
+                    ),
                 );
             }
         }
         Ok(())
+    }
+
+    pub(super) fn typing_command(&mut self, cmd: crate::commands::Cmd) -> bool {
+        use crate::commands::Cmd;
+        let Some(t) = self.text_edit.as_mut() else {
+            return false;
+        };
+        match cmd {
+            Cmd::Undo => {
+                let Some((was, caret)) = t.undo.pop() else {
+                    return false;
+                };
+                t.text.text = was;
+                t.caret = caret.min(t.text.text.len());
+                t.anchor = None;
+                t.run = false;
+            }
+            Cmd::SelectAll => {
+                t.anchor = Some(0);
+                t.caret = t.text.text.len();
+                t.run = false;
+            }
+            Cmd::Copy => {
+                if let Some(range) = t
+                    .anchor
+                    .filter(|a| *a != t.caret)
+                    .map(|a| a.min(t.caret)..a.max(t.caret))
+                {
+                    self.ctx.copy_text(t.text.text[range].to_string());
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     pub(super) fn typing_keys(&mut self, ui: &egui::Ui) -> Result<()> {
@@ -387,17 +594,69 @@ impl Editor {
         }
         let events = ui.input(|i| i.events.clone());
         let mut finish = false;
+        let mut copied: Option<String> = None;
         events.iter().for_each(|e| {
             let layout = self.typing_layout();
             let Some(t) = self.text_edit.as_mut() else {
                 return;
             };
+            let chosen = t
+                .anchor
+                .filter(|a| *a != t.caret)
+                .map(|a| a.min(t.caret)..a.max(t.caret));
+            let shift = matches!(e, egui::Event::Key { modifiers, .. } if modifiers.shift);
+            let moving = matches!(
+                e,
+                egui::Event::Key {
+                    key: Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown | Key::Home | Key::End,
+                    pressed: true,
+                    ..
+                }
+            );
+            if moving && shift && t.anchor.is_none() {
+                t.anchor = Some(t.caret);
+            }
             let words = &mut t.text.text;
+            let cut = |words: &mut String, caret: &mut usize, undo: &mut Vec<(String, usize)>| -> bool {
+                match chosen.clone() {
+                    Some(range) => {
+                        undo.push((words.clone(), *caret));
+                        *caret = range.start;
+                        words.replace_range(range, "");
+                        true
+                    }
+                    None => false,
+                }
+            };
+            let acted = match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => modifiers.command || modifiers.alt || TYPING_ACTS.contains(key),
+                egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) => true,
+                _ => false,
+            };
+            let fresh = acted || !t.run;
             match e {
                 egui::Event::Text(s) | egui::Event::Paste(s) => {
                     let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+                    if !cut(words, &mut t.caret, &mut t.undo) && fresh {
+                        t.undo.push((words.clone(), t.caret));
+                    }
                     words.insert_str(t.caret, &clean);
                     t.caret += clean.len();
+                    t.anchor = None;
+                }
+                egui::Event::Copy | egui::Event::Cut => {
+                    if let Some(range) = chosen.clone() {
+                        copied = Some(words[range].to_string());
+                        if matches!(e, egui::Event::Cut) {
+                            cut(words, &mut t.caret, &mut t.undo);
+                            t.anchor = None;
+                        }
+                    }
                 }
                 egui::Event::Key {
                     key,
@@ -407,18 +666,47 @@ impl Editor {
                 } => match key {
                     Key::Escape => finish = true,
                     Key::Enter if modifiers.command => finish = true,
+                    Key::A if modifiers.command => {
+                        t.anchor = Some(0);
+                        t.caret = words.len();
+                    }
+                    Key::Z if modifiers.command && !t.undo.is_empty() => {
+                        if let Some((was, caret)) = t.undo.pop() {
+                            *words = was;
+                            t.caret = caret.min(words.len());
+                            t.anchor = None;
+                        }
+                    }
                     Key::Enter => {
+                        if !cut(words, &mut t.caret, &mut t.undo) {
+                            t.undo.push((words.clone(), t.caret));
+                        }
                         words.insert(t.caret, '\n');
                         t.caret += 1;
+                        t.anchor = None;
+                    }
+                    Key::Backspace | Key::Delete if chosen.is_some() => {
+                        cut(words, &mut t.caret, &mut t.undo);
+                        t.anchor = None;
                     }
                     Key::Backspace if t.caret > 0 => {
+                        t.undo.push((words.clone(), t.caret));
                         let from = prev_char(words, t.caret);
                         words.replace_range(from..t.caret, "");
                         t.caret = from;
                     }
                     Key::Delete if t.caret < words.len() => {
+                        t.undo.push((words.clone(), t.caret));
                         let to = next_char(words, t.caret);
                         words.replace_range(t.caret..to, "");
+                    }
+                    Key::ArrowLeft if !shift && chosen.is_some() => {
+                        t.caret = chosen.clone().map_or(t.caret, |r| r.start);
+                        t.anchor = None;
+                    }
+                    Key::ArrowRight if !shift && chosen.is_some() => {
+                        t.caret = chosen.clone().map_or(t.caret, |r| r.end);
+                        t.anchor = None;
                     }
                     Key::ArrowLeft => t.caret = prev_char(words, t.caret),
                     Key::ArrowRight => t.caret = next_char(words, t.caret),
@@ -448,7 +736,17 @@ impl Editor {
                 },
                 _ => {}
             }
+            if moving && !shift {
+                t.anchor = None;
+            }
+            t.run = match e {
+                egui::Event::Text(_) => true,
+                _ => t.run && !acted,
+            };
         });
+        if let Some(text) = copied {
+            ui.ctx().copy_text(text);
+        }
         if finish {
             self.finish_typing()?;
         }
@@ -490,6 +788,7 @@ impl Editor {
         let o = self.screen(view, rect, vec2(0.0, 0.0));
         let ex = self.screen(view, rect, vec2(1.0, 0.0)) - o;
         let ey = self.screen(view, rect, vec2(0.0, 1.0)) - o;
+        let laid = self.typing_layout().and_then(|l| bounds(&l));
         let Some(t) = self.text_edit.as_mut() else {
             return;
         };
@@ -499,14 +798,30 @@ impl Editor {
         if t.shown.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
-        let made = typeset::picture(&t.bytes, &t.text, m, t.fill).ok().flatten().map(|p| {
-            let handle = texture(ctx, "typing", &p);
-            let min = pos2(p.left as f32 / ppp, p.top as f32 / ppp);
-            (
-                handle,
-                Rect::from_min_size(min, vec2(p.width as f32, p.height as f32) / ppp),
-            )
+        let limit = ctx.input(|i| i.max_texture_side).min(PICTURE_MOST) as f32 * PICTURE_ROOM;
+        let side = laid.map_or(0.0, |[x0, y0, x1, y1]| {
+            let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| apply(m, x, y));
+            let (lo, hi) = corners
+                .iter()
+                .fold((corners[0], corners[0]), |(lo, hi), c| (lo.min(*c), hi.max(*c)));
+            (hi - lo).max_elem()
         });
+        let k = match side > limit {
+            true => limit / side,
+            false => 1.0,
+        };
+        let scaled = m.map(|v| v * k);
+        let made = typeset::picture(&t.bytes, &t.text, scaled, t.fill)
+            .ok()
+            .flatten()
+            .map(|p| {
+                let handle = texture(ctx, "typing", &p);
+                let min = pos2(p.left as f32, p.top as f32) / (k * ppp);
+                (
+                    handle,
+                    Rect::from_min_size(min, vec2(p.width as f32, p.height as f32) / (k * ppp)),
+                )
+            });
         t.shown = Some((key, made));
     }
 
@@ -530,6 +845,32 @@ impl Editor {
             let x1 = x1.max(x0 + t.text.size * 0.3);
             let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)].map(|(x, y)| to_screen(x, y));
             painter.add(egui::Shape::dashed_line(&corners, Stroke::new(1.0, accent), 5.0, 4.0));
+        }
+        if let Some(range) = t
+            .anchor
+            .filter(|a| *a != t.caret)
+            .map(|a| a.min(t.caret)..a.max(t.caret))
+        {
+            layout.lines.iter().for_each(|line| {
+                let at = |i: usize| line.carets.iter().find(|(c, _)| *c == i).map(|(_, x)| *x);
+                let first = line
+                    .carets
+                    .iter()
+                    .map(|(c, _)| *c)
+                    .filter(|c| range.contains(c) || *c == range.end);
+                let (lo, hi) = first.fold((usize::MAX, 0), |(lo, hi), c| (lo.min(c), hi.max(c)));
+                if let (Some(x0), Some(x1)) = (at(lo), at(hi))
+                    && lo < hi
+                {
+                    let (top, bottom) = (line.baseline - layout.ascent, line.baseline + layout.descent);
+                    let corners = [(x0, top), (x1, top), (x1, bottom), (x0, bottom)].map(|(x, y)| to_screen(x, y));
+                    painter.add(egui::Shape::convex_polygon(
+                        corners.to_vec(),
+                        accent.gamma_multiply(SELECTED_TEXT),
+                        Stroke::NONE,
+                    ));
+                }
+            });
         }
         if let Some((x, top, bottom)) = layout.caret(t.caret) {
             let line = [to_screen(x, top), to_screen(x, bottom)];
@@ -777,14 +1118,15 @@ impl Editor {
             && let Some(axis) = std::fs::read(path).ok().and_then(|b| typeset::weight_axis(&b))
         {
             let mut value = self.text_tool.weight.or(implied).unwrap_or(axis.default);
-            if ui
-                .add(
+            if super::options::whole(ui, "weight", |ui| {
+                ui.add(
                     egui::Slider::new(&mut value, axis.min..=axis.max)
                         .step_by(1.0)
                         .text("weight"),
                 )
-                .hint("this font comes in every weight: 400 is regular, 700 bold")
-                .changed()
+            })
+            .hint("this font comes in every weight: 400 is regular, 700 bold")
+            .changed()
             {
                 self.text_tool.weight = Some(value);
             }
@@ -839,7 +1181,8 @@ impl Editor {
             }
             t.fill = colour;
         }
-        ui.label(
+        super::options::note(
+            ui,
             RichText::new(
                 "click to type, Return for a new line, Esc to finish; the first colour fills it; click text to edit it",
             )

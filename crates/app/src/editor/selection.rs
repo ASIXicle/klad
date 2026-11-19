@@ -5,7 +5,7 @@ use crate::messages::Tone;
 use crate::pen::PenEvent;
 use crate::theme;
 use anyhow::Result;
-use egui::{Id, RichText, vec2};
+use egui::{Id, RichText};
 use klad_core::doc::Item;
 use klad_core::markedit::{LassoAction, MarkTransform};
 use klad_core::ops::{Op, Place};
@@ -17,6 +17,8 @@ use serde_json::{Map, Value, json};
 pub(super) struct Held {
     events: Vec<PenEvent>,
 }
+
+const BAR_GAP: f32 = 6.0;
 
 impl Held {
     pub fn admit(&mut self, busy: bool, events: Vec<PenEvent>) -> Vec<PenEvent> {
@@ -45,7 +47,7 @@ pub(super) enum Selected {
     Points,
 }
 
-fn strip_ids(value: &mut Value) {
+pub(super) fn strip_ids(value: &mut Value) {
     if let Value::Object(map) = value {
         map.remove("id");
         map.values_mut().for_each(strip_ids);
@@ -99,7 +101,7 @@ impl Editor {
         }
     }
 
-    fn group_nodes(&self) -> Vec<(String, klad_core::doc::Node)> {
+    pub(super) fn group_nodes(&self) -> Vec<(String, klad_core::doc::Node)> {
         self.shapes()
             .into_iter()
             .filter_map(|id| match self.scene.bundle.doc.item(&id) {
@@ -292,7 +294,7 @@ impl Editor {
                         })
                     })
                     .collect::<Result<Vec<Op>>>()?;
-                let applied = self.scene.apply_with(&ops, &self.brushes);
+                let applied = self.write(&ops);
                 match applied {
                     Ok((dirty, applied)) => {
                         self.dirty.extend(dirty);
@@ -301,7 +303,10 @@ impl Editor {
                             [(id, _)] => id.clone(),
                             many => format!("{} shapes", many.len()),
                         };
-                        self.say(Tone::Done, format!("duplicated {what} in place"));
+                        self.say(
+                            Tone::Done,
+                            format!("duplicated {what} in place: the copy is selected and sits on the original, drag to move it"),
+                        );
                         Ok(())
                     }
                     Err(e) => {
@@ -326,19 +331,27 @@ impl Editor {
             Selected::Points => None,
             _ => self.handles().map(|(_, c)| c),
         };
-        let at = match corners {
+        let (at, above) = match corners {
             Some(corners) => {
                 let screen: Vec<egui::Pos2> = corners.iter().map(|c| self.screen(view, rect, *c)).collect();
                 let (lo, hi) = screen
                     .iter()
                     .fold((screen[0], screen[0]), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
                 match hi.y + 30.0 + 40.0 < rect.bottom() {
-                    true => egui::pos2((lo.x + hi.x) / 2.0, hi.y + 30.0),
-                    false => egui::pos2((lo.x + hi.x) / 2.0, lo.y - 72.0),
+                    true => (egui::pos2((lo.x + hi.x) / 2.0, hi.y + 30.0), false),
+                    false => (
+                        egui::pos2((lo.x + hi.x) / 2.0, lo.y - super::KNOB - theme::GRAB - BAR_GAP),
+                        true,
+                    ),
                 }
             }
-            None => egui::pos2(rect.center().x, rect.bottom() - 60.0),
+            None => (egui::pos2(rect.center().x, rect.bottom() - 60.0), false),
         };
+        self.bar_above = above;
+        let in_use = egui::Popup::is_any_open(ctx) || ctx.egui_wants_keyboard_input();
+        if ctx.input(|i| i.modifiers.shift) && !in_use {
+            return;
+        }
         let at = egui::pos2(
             at.x.clamp(rect.left() + 8.0, rect.right() - 8.0),
             at.y.max(rect.top() + 8.0),
@@ -413,9 +426,17 @@ impl Editor {
             _ => 0,
         };
         let writing = self.writing();
-        egui::Area::new(Id::unique("selection bar"))
+        let bar = Id::unique("selection bar");
+        let pressed = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
+        if pressed.is_some_and(|p| ctx.memory(|m| m.area_rect(bar)).is_some_and(|r| r.contains(p))) {
+            self.focus = super::Focus::Canvas;
+        }
+        egui::Area::new(bar)
             .order(egui::Order::Foreground)
-            .pivot(egui::Align2::CENTER_TOP)
+            .pivot(match above {
+                true => egui::Align2::CENTER_BOTTOM,
+                false => egui::Align2::CENTER_TOP,
+            })
             .fixed_pos(at)
             .constrain(true)
             .show(ctx, |ui| {
@@ -426,16 +447,11 @@ impl Editor {
                                 self.command_button(ui, Cmd::AttachedOnly, Some(&format!("{attached} attached")));
                                 self.command_button(ui, Cmd::Detach, None);
                             }
-                            if *cmd == Cmd::Recolour {
-                                let swatch = crate::color::color32(self.color);
-                                let r = self.command_button(ui, *cmd, None);
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(r.rect.right_bottom() - vec2(9.0, 9.0), vec2(7.0, 7.0)),
-                                    1.0,
-                                    swatch,
-                                );
-                            } else {
-                                self.command_button(ui, *cmd, None);
+                            match super::Dye::of(*cmd) {
+                                Some(dye) => self.dye_button(ui, *cmd, dye),
+                                None => {
+                                    self.command_button(ui, *cmd, None);
+                                }
                             }
                         });
                         if let Some((_, chosen)) = self.chosen_marks().filter(|_| self.on_marks()) {

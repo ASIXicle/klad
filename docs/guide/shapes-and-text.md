@@ -1,8 +1,8 @@
-_Last updated: 2026-11-10 21:45_
+_Last updated: 2026-11-19 14:00_
 
 # Shapes, paths and text
 
-Draw shapes and text that stay sharp at any size and keep their points editable. They go on a vector layer: click **vector** in the Layers pane first.
+Draw shapes and text that stay sharp at any size and keep their points editable. They go on a vector layer. Click **vector** in the Layers pane to add one, or just draw: while a paint layer is active, klad puts the shape on a new vector layer above it.
 
 ## Draw a rectangle or an ellipse
 
@@ -32,7 +32,7 @@ Select the shape with **V**, then in layer settings switch its fill to **linear*
 
 ## Write text
 
-Press **T**, click and type, and press **Esc** to finish. The font picker also finds any family on Google Fonts, and the font is kept inside the drawing.
+Press **T**, click and type, and press **Esc** to finish. The font picker also finds any family on Google Fonts, and the font is kept inside the drawing. On a pixel layer the text becomes pixels when you finish it (see [pixel art](pixel-art.md)).
 
 ## Repeat a shape
 

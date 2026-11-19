@@ -147,6 +147,8 @@ pub struct Scene {
     hashes: BTreeMap<String, (Stamp, u64)>,
     pub keep_after: std::time::Duration,
     pub lean: bool,
+    previews: BTreeMap<String, Layer>,
+    unshown: bool,
 }
 
 pub type Plan = Vec<(String, Vec<Ghost>)>;
@@ -372,7 +374,7 @@ fn read_picture(dir: &Path, key: u64) -> Option<FrameImage> {
 }
 
 fn write_picture(dir: &Path, image: &FrameImage) -> Result<()> {
-    fs::create_dir_all(dir)?;
+    klad_core::bundle::make_folder(dir)?;
     let mut bytes = PICTURE.to_vec();
     [klad_brush::ENGINE_VERSION, image.width, image.height]
         .iter()
@@ -962,6 +964,7 @@ fn structure(doc: &Document, frame: u32) -> u64 {
             out.extend(serde_json::to_vec(&l.effects).unwrap_or_default());
             out.extend(l.depth.unwrap_or(-1.0).to_le_bytes());
             out.push(l.reference as u8);
+            out.push(l.map.is_some() as u8);
             if let Some(adjust) = l.adjustment() {
                 out.extend(serde_json::to_vec(adjust).unwrap_or_default());
             }
@@ -1047,6 +1050,8 @@ impl Scene {
             onions: Onions::new(),
             onion_key: FNV_OFFSET,
             hashes: BTreeMap::new(),
+            previews: BTreeMap::new(),
+            unshown: false,
         };
         scene.active = scene.default_active();
         Ok(scene)
@@ -1098,6 +1103,8 @@ impl Scene {
             onions: Onions::new(),
             onion_key: FNV_OFFSET,
             hashes: BTreeMap::new(),
+            previews: BTreeMap::new(),
+            unshown: false,
         };
         scene.active = scene.default_active();
         scene.trim();
@@ -1167,6 +1174,10 @@ impl Scene {
         self.active_cel()
             .and_then(|c| self.cels.get(&c))
             .map_or(&[], |d| d.marks())
+    }
+
+    pub fn knows_marks(&self, cel: &str) -> bool {
+        self.cels.contains_key(cel)
     }
 
     pub fn marks_of(&self, cel: &str) -> &[Mark] {
@@ -1300,6 +1311,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             rasters,
@@ -1516,6 +1528,35 @@ impl Scene {
     }
 
     pub fn preview_layer(&mut self, layer: Layer) -> Result<()> {
+        if !self.previews.contains_key(&layer.id) {
+            let Some(original) = self.bundle.doc.layer(&layer.id).cloned() else {
+                return Err(crate::report::bug(format!("layer {} is not in the scene", layer.id)));
+            };
+            self.previews.insert(layer.id.clone(), original);
+        }
+        self.show_layer(layer)
+    }
+
+    pub fn end_preview(&mut self, layer: &str) -> Result<bool> {
+        match self.previews.remove(layer) {
+            Some(original) => self.show_layer(original).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    fn end_previews(&mut self) -> Result<bool> {
+        let shown = std::mem::take(&mut self.previews);
+        let any = !shown.is_empty();
+        self.unshown |= any;
+        shown.into_values().try_for_each(|original| self.show_layer(original))?;
+        Ok(any)
+    }
+
+    pub fn take_unshown(&mut self) -> bool {
+        std::mem::take(&mut self.unshown)
+    }
+
+    fn show_layer(&mut self, layer: Layer) -> Result<()> {
         let Some(Loc::Layer(path)) = self.bundle.doc.locate(&layer.id) else {
             return Err(crate::report::bug(format!("layer {} is not in the scene", layer.id)));
         };
@@ -1675,6 +1716,8 @@ impl Scene {
         buffer: &mut StrokeBuffer,
         blend: StrokeBlend,
     ) -> Result<Vec<usize>> {
+        self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let cel = self.ensure_active_cel()?;
         let raster = self
             .rasters
@@ -1688,6 +1731,8 @@ impl Scene {
     }
 
     pub fn commit_fill(&mut self, fill: Fill, brushes: &BrushSet) -> Result<Vec<usize>> {
+        self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let cel = self.ensure_active_cel()?;
         let raster = self
             .rasters
@@ -1757,6 +1802,8 @@ impl Scene {
         stack: klad_core::history::Stack,
         brushes: &BrushSet,
     ) -> Result<Option<(String, Vec<usize>)>> {
+        self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let touched = klad_core::history::peek(&self.bundle, stack)?
             .and_then(|(_, patch)| patch)
             .and_then(|patch| patch.touched_cels(&self.bundle.doc));
@@ -1842,6 +1889,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             paint: paint.into_iter().filter(|(_, c)| !self.cels.contains_key(c)).collect(),
@@ -2007,6 +2055,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             rasters,
@@ -2040,6 +2089,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: doc.clone(),
             },
             rasters: Rasters::new(),
@@ -2249,6 +2299,7 @@ impl Scene {
     }
 
     pub fn save_active(&mut self, summary: &str) -> Result<usize> {
+        self.end_previews()?;
         let Some(cel) = self.active_cel() else {
             return Ok(0);
         };
@@ -2275,6 +2326,8 @@ impl Scene {
 
     pub fn reload(&mut self, brushes: &BrushSet) -> Result<Vec<usize>> {
         let old = self.bundle.doc.clone();
+        self.unshown |= !self.previews.is_empty();
+        self.previews.clear();
         self.bundle.reload()?;
         self.unsaved = Patch::default();
         self.sync(&old, brushes)
@@ -2285,6 +2338,8 @@ impl Scene {
     }
 
     pub fn apply_with(&mut self, ops: &[Op], brushes: &BrushSet) -> Result<(Vec<usize>, Applied)> {
+        self.end_previews()?;
+        self.bundle.ensure_unchanged()?;
         let old = self.bundle.doc.clone();
         let applied = self.bundle.apply_as(ops, "editor")?;
         self.bundle.stamp("editor")?;
@@ -2329,6 +2384,10 @@ impl Scene {
         rendered: (String, u64, Raster),
         brushes: &BrushSet,
     ) -> Result<Vec<usize>> {
+        if self.end_previews()? {
+            return self.apply(ops, brushes);
+        }
+        self.bundle.ensure_unchanged()?;
         let old = self.bundle.doc.clone();
         self.bundle.apply_as(ops, "editor")?;
         self.bundle.stamp("editor")?;
@@ -2384,6 +2443,7 @@ impl Scene {
             bundle: Bundle {
                 root: self.bundle.root.clone(),
                 seen: self.bundle.seen,
+                folder: self.bundle.folder,
                 doc: self.bundle.doc.clone(),
             },
             frame: self.frame,
@@ -3118,8 +3178,8 @@ mod tests {
     #[test]
     fn a_lean_scene_keeps_only_the_active_pixels_and_shows_and_edits_the_same() {
         let brushes = BrushSet::presets();
-        let dir = layered("lean");
-        let mut full = Scene::open(&dir).unwrap();
+        let (dir, beside) = (layered("lean"), layered("lean-beside"));
+        let mut full = Scene::open(&beside).unwrap();
         let mut lean = Scene::open_lazy(&dir).unwrap();
         lean.lean = true;
         catch_up(&mut lean, &brushes);
@@ -3146,12 +3206,14 @@ mod tests {
         catch_up(&mut lean, &brushes);
         assert_eq!(lean.rasters.len(), 1);
         assert_eq!(shown(&lean), shown(&full));
-        let mut outside = Bundle::open(&dir).unwrap();
-        outside
-            .apply(&ops(
-                r#"{"op":"stroke","layer":"p3","path":"M10 380 L590 20","size":20}"#,
-            ))
-            .unwrap();
+        [&dir, &beside].into_iter().for_each(|folder| {
+            Bundle::open(folder)
+                .unwrap()
+                .apply(&ops(
+                    r#"{"op":"stroke","layer":"p3","path":"M10 380 L590 20","size":20}"#,
+                ))
+                .unwrap();
+        });
         full.reload(&brushes).unwrap();
         lean.reload(&brushes).unwrap();
         assert!(
@@ -3162,6 +3224,7 @@ mod tests {
         assert_eq!(shown(&lean), shown(&full));
         assert_eq!(lean.cels["c3"].marks().len(), full.cels["c3"].marks().len());
         fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&beside).unwrap();
     }
 
     #[test]
@@ -3455,6 +3518,166 @@ mod tests {
         let fresh = rasterize_nodes(&nodes_of(&scene.bundle.doc, "cv"), 600, 300).unwrap();
         assert_eq!(fresh.hash(), after);
         agrees(&scene);
+    }
+
+    #[test]
+    fn a_layer_that_becomes_a_map_layer_or_a_colour_layer_again_redraws_the_canvas() {
+        let brushes = BrushSet::presets();
+        let dir = bundle("map-and-back", Blend::Normal);
+        let mut scene = Scene::open(&dir).unwrap();
+        scene.set_active(vec![2]).unwrap();
+        let map = klad_core::ops::parse_lines(r#"{"op":"set","id":"b","map":"height"}"#).unwrap();
+        scene.apply(&map, &brushes).unwrap();
+        scene.set_active(vec![0]).unwrap();
+        agrees(&scene);
+        let undone = scene.step(klad_core::history::Stack::Undo, &brushes).unwrap().unwrap();
+        assert_eq!(
+            undone.1.len(),
+            scene.all_tiles().len(),
+            "the whole canvas is drawn again"
+        );
+        agrees(&scene);
+        let redone = scene.step(klad_core::history::Stack::Redo, &brushes).unwrap().unwrap();
+        assert_eq!(redone.1.len(), scene.all_tiles().len());
+        agrees(&scene);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_written_over_a_change_made_in_the_folder_meanwhile() {
+        let brushes = BrushSet::presets();
+        let dir = bundle("changed-meanwhile", Blend::Normal);
+        let mut scene = Scene::open(&dir).unwrap();
+        scene.set_active(vec![1, 0]).unwrap();
+        let rename =
+            |to: &str| klad_core::ops::parse_lines(&format!(r#"{{"op":"set","id":"b","name":"{to}"}}"#)).unwrap();
+        let changed = |e: anyhow::Error| e.downcast_ref::<klad_core::bundle::Changed>().is_some();
+        scene.apply(&rename("first"), &brushes).unwrap();
+        Bundle::open(&dir)
+            .unwrap()
+            .apply(&klad_core::ops::parse_lines(r#"{"op":"rm","id":"v"}"#).unwrap())
+            .unwrap();
+        assert!(scene.apply(&rename("second"), &brushes).is_err_and(changed));
+        assert!(
+            scene
+                .step(klad_core::history::Stack::Undo, &brushes)
+                .is_err_and(changed)
+        );
+        let raster = Raster::new(600, 300);
+        assert!(
+            scene
+                .apply_rendered(&rename("third"), ("cv".into(), 0, raster), &brushes)
+                .is_err_and(changed)
+        );
+        let seed = Seed {
+            x: 100.0,
+            y: 100.0,
+            tolerance: 0.1,
+            gap: 0.0,
+            expand: 0.0,
+        };
+        let reference = scene.fill_reference(&FillRef::Layer("a".into()), &brushes).unwrap();
+        let fill = Fill::new(
+            scene.next_mark_id(),
+            [0.9, 0.7, 0.2, 1.0],
+            FillSource::Seed {
+                seed,
+                reference: FillRef::Layer("a".into()),
+            },
+            klad_brush::flood(&reference, &seed),
+        );
+        assert!(scene.commit_fill(fill, &brushes).is_err_and(changed));
+        let disk = Bundle::open(&dir).unwrap().doc;
+        assert!(disk.layer("v").is_none(), "the change made meanwhile is still there");
+        assert_eq!(
+            disk.layer("b").unwrap().name,
+            "first",
+            "and nothing of ours was written over it"
+        );
+        scene.reload(&brushes).unwrap();
+        scene.apply(&rename("second"), &brushes).unwrap();
+        let undone = scene.step(klad_core::history::Stack::Undo, &brushes).unwrap().unwrap();
+        assert!(undone.0.contains("set"), "{}", undone.0);
+        let disk = Bundle::open(&dir).unwrap().doc;
+        assert!(disk.layer("v").is_none() && disk.layer("b").unwrap().name == "first");
+        agrees(&scene);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_is_only_shown_is_never_saved() {
+        let brushes = BrushSet::presets();
+        let dir = bundle("shown-only", Blend::Normal);
+        let mut scene = Scene::open(&dir).unwrap();
+        scene.set_active(vec![1, 0]).unwrap();
+        let rename =
+            |to: &str| klad_core::ops::parse_lines(&format!(r#"{{"op":"set","id":"a","name":"{to}"}}"#)).unwrap();
+        scene.apply(&rename("first"), &brushes).unwrap();
+        let show = |scene: &mut Scene| {
+            let mut hidden = scene.bundle.doc.layer("v").unwrap().clone();
+            hidden.cels_mut().unwrap()[0].nodes[0].visible = false;
+            let mut faint = scene.bundle.doc.layer("b").unwrap().clone();
+            faint.opacity = 0.1;
+            scene.preview_layer(hidden).unwrap();
+            scene.preview_layer(faint).unwrap();
+            assert!(!scene.bundle.doc.layer("v").unwrap().cels()[0].nodes[0].visible);
+        };
+        let kept = |scene: &mut Scene, what: &str| {
+            let disk = Bundle::open(&dir).unwrap().doc;
+            assert!(disk.layer("v").unwrap().cels()[0].nodes[0].visible, "{what}: the file");
+            assert_eq!(disk.layer("b").unwrap().opacity, 0.6, "{what}: the file");
+            assert_eq!(
+                serde_json::to_value(&scene.bundle.doc).unwrap(),
+                serde_json::to_value(&disk).unwrap(),
+                "{what}: the scene holds what the file holds"
+            );
+            assert!(scene.take_unshown(), "{what}: the canvas is to be drawn again");
+            assert!(!scene.take_unshown());
+            agrees(scene);
+        };
+        show(&mut scene);
+        scene.apply(&rename("second"), &brushes).unwrap();
+        kept(&mut scene, "a change");
+        show(&mut scene);
+        scene.step(klad_core::history::Stack::Undo, &brushes).unwrap().unwrap();
+        kept(&mut scene, "an undo");
+        show(&mut scene);
+        scene.step(klad_core::history::Stack::Redo, &brushes).unwrap().unwrap();
+        kept(&mut scene, "a redo");
+        show(&mut scene);
+        let raster = Raster::new(600, 300);
+        scene
+            .apply_rendered(&rename("third"), ("cv".into(), 0, raster), &brushes)
+            .unwrap();
+        kept(&mut scene, "a change that brings its picture");
+        show(&mut scene);
+        let seed = Seed {
+            x: 100.0,
+            y: 100.0,
+            tolerance: 0.1,
+            gap: 0.0,
+            expand: 0.0,
+        };
+        let reference = scene.fill_reference(&FillRef::Layer("v".into()), &brushes).unwrap();
+        let fill = Fill::new(
+            scene.next_mark_id(),
+            [0.9, 0.7, 0.2, 1.0],
+            FillSource::Seed {
+                seed,
+                reference: FillRef::Layer("v".into()),
+            },
+            klad_brush::flood(&reference, &seed),
+        );
+        scene.commit_fill(fill, &brushes).unwrap();
+        scene.save_active("fill").unwrap();
+        kept(&mut scene, "a fill");
+        show(&mut scene);
+        let mut other = Bundle::open(&dir).unwrap();
+        other.apply_as(&rename("fourth"), "agent").unwrap();
+        scene.reload(&brushes).unwrap();
+        kept(&mut scene, "a change made by someone else");
+        assert_eq!(scene.bundle.doc.layer("a").unwrap().name, "fourth");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

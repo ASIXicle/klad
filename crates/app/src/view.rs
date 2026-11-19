@@ -20,6 +20,27 @@ fn mirror(v: Vec2, flip: bool) -> Vec2 {
     }
 }
 
+pub const TURN_STEP: f32 = std::f32::consts::PI / 12.0;
+const DETENT: f32 = 2.5 * std::f32::consts::PI / 180.0;
+
+pub fn next_turn(angle: f32, clockwise: bool) -> f32 {
+    let steps = angle / TURN_STEP;
+    let to = match clockwise {
+        true => (steps + 1e-3).floor() + 1.0,
+        false => (steps - 1e-3).ceil() - 1.0,
+    };
+    to * TURN_STEP
+}
+
+pub fn twisted(raw: f32, snap: bool) -> f32 {
+    let upright = (raw / std::f32::consts::TAU).round() * std::f32::consts::TAU;
+    match snap {
+        true => (raw / TURN_STEP).round() * TURN_STEP,
+        false if (raw - upright).abs() < DETENT => upright,
+        false => raw,
+    }
+}
+
 impl View {
     pub fn fit(canvas: Vec2, area: Vec2) -> Self {
         Self {
@@ -78,6 +99,11 @@ impl View {
         self.keep(anchor, at, area);
     }
 
+    pub fn turned(&self) -> Option<f32> {
+        let degrees = self.angle.to_degrees().rem_euclid(360.0);
+        (degrees > 0.05 && degrees < 359.95).then_some(degrees)
+    }
+
     pub fn rotate_at(&mut self, delta: f32, at: Vec2, area: Vec2) {
         let anchor = self.to_canvas(at, area);
         self.angle += delta;
@@ -117,6 +143,39 @@ mod tests {
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    #[test]
+    fn turns_land_on_tidy_angles_and_a_twist_snaps_with_the_modifier() {
+        let deg = |d: f32| d.to_radians();
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(near(next_turn(0.0, true), deg(15.0)));
+        assert!(
+            near(next_turn(deg(23.0), true), deg(30.0)),
+            "a free angle goes to the next step"
+        );
+        assert!(near(next_turn(deg(23.0), false), deg(15.0)));
+        assert!(near(next_turn(deg(30.0), true), deg(45.0)));
+        assert!(near(next_turn(deg(30.0), false), deg(15.0)));
+        assert!(
+            near(next_turn(deg(-7.0), true), 0.0),
+            "and back to upright from just off it"
+        );
+        assert!(near(twisted(deg(23.0), true), deg(30.0)));
+        assert!(near(twisted(deg(22.0), true), deg(15.0)));
+        assert!(
+            near(twisted(deg(23.0), false), deg(23.0)),
+            "without the modifier the twist is free"
+        );
+        assert!(
+            near(twisted(deg(1.8), false), 0.0),
+            "close to upright it comes to rest upright"
+        );
+        assert!(near(twisted(deg(361.0), false), deg(360.0)));
+        let mut view = View::fit(Vec2::new(400.0, 300.0), Vec2::new(800.0, 600.0));
+        assert_eq!(view.turned(), None);
+        view.angle = deg(-30.0);
+        assert!(view.turned().is_some_and(|d| near(d, 330.0)));
     }
 
     #[test]

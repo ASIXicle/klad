@@ -224,6 +224,11 @@ enum Command {
         sketch: bool,
         #[arg(
             long,
+            help = "Start with a palette of eight colour ramps of four (grey, red, orange, yellow, green, blue, purple, skin), the one the editor gives a new pixel drawing"
+        )]
+        palette: bool,
+        #[arg(
+            long,
             value_name = "WxH",
             help = "A pixel art drawing of that many pixels, for example 64x64: its layers are pixel layers"
         )]
@@ -364,7 +369,7 @@ enum Command {
     },
     #[command(
         about = "Copy strokes and fills into another drawing, with new ids, moving them on the way",
-        long_about = "Copy strokes and fills (<cel>:s<id>) into another drawing. The copies get new ids, printed as a map (c1:s3 -> c9:s12), and land on top of that drawing in the order they had. --to names the drawing; --frame takes the drawing the layer shows at that frame (a new drawing on an empty frame or past the end; a frame that shows a link names its source instead). The marks' own layer unless --layer. The move, turn, scale and flip options are klad transform's, applied to the copies together about the middle of their bounds or --pivot. --cut keeps only the parts inside a polygon.\n\n  klad copy art.klad c1:s3 c1:s4 --frame 4\n  klad copy art.klad c1:s3 --to c9 --move 12,-4 --rotate 8\n  klad copy art.klad c1:s3 --frame 6 --layer shade --flip h --pivot 512,400\n\nAlso a copy op in klad apply: {\"op\":\"copy\",\"ids\":[\"c1:s3\"],\"frame\":4,\"x\":12,\"y\":-4} (or \"to\":\"c9\")."
+        long_about = "Copy strokes and fills (<cel>:s<id>) into another drawing. The copies get new ids, printed as a map (c1:s3 -> c9:s12), and land on top of that drawing in the order they had. --to names the drawing; --frame takes the drawing that starts at that frame; a frame that shows a drawing held from an earlier frame first gets its own copy of that drawing, so the frames before it stay as they were (a new drawing on an empty frame or past the end; a frame that shows a link names its source instead). The marks' own layer unless --layer. The move, turn, scale and flip options are klad transform's, applied to the copies together about the middle of their bounds or --pivot. --cut keeps only the parts inside a polygon.\n\n  klad copy art.klad c1:s3 c1:s4 --frame 4\n  klad copy art.klad c1:s3 --to c9 --move 12,-4 --rotate 8\n  klad copy art.klad c1:s3 --frame 6 --layer shade --flip h --pivot 512,400\n\nAlso a copy op in klad apply: {\"op\":\"copy\",\"ids\":[\"c1:s3\"],\"frame\":4,\"x\":12,\"y\":-4} (or \"to\":\"c9\")."
     )]
     Copy {
         bundle: PathBuf,
@@ -896,12 +901,29 @@ enum Command {
     },
     #[command(
         about = "Apply many edits from JSON lines (stdin or --file) in one write",
-        long_about = "Apply many edits from JSON lines in one transaction: all apply or none.\n\n  {\"op\":\"add\",\"layer\":{\"kind\":\"vector\",\"name\":\"sky\"}}\n  {\"op\":\"add\",\"node\":{\"type\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50,\"fill\":\"#336699\"},\"in\":\"l1\"}\n  {\"op\":\"set\",\"id\":\"n2\",\"fill\":\"#ff0000\",\"transform.rotate\":15}\n  {\"op\":\"rm\",\"id\":\"n2\"}\n  {\"op\":\"mv\",\"id\":\"l1\",\"below\":\"l3\"}\n  {\"op\":\"add\",\"cel\":{\"frame\":4,\"hold\":2},\"in\":\"l3\"}\n\nNew ids are printed in order."
+        long_about = "Apply many edits from JSON lines in one transaction: all apply or none.\n\n  {\"op\":\"add\",\"layer\":{\"kind\":\"vector\",\"name\":\"sky\"}}\n  {\"op\":\"add\",\"node\":{\"type\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50,\"fill\":\"#336699\"},\"in\":\"l1\"}\n  {\"op\":\"set\",\"id\":\"n2\",\"fill\":\"#ff0000\",\"transform.rotate\":15}\n  {\"op\":\"rm\",\"id\":\"n2\"}\n  {\"op\":\"mv\",\"id\":\"l1\",\"below\":\"l3\"}\n  {\"op\":\"add\",\"cel\":{\"frame\":4,\"hold\":2},\"in\":\"l3\"}\n\nNew ids are printed in order.\n\nWith --steps every line is an edit of its own, made in order: a step in the history that can be undone alone, and one the open editor shows as it lands. A line may be a list of ops that belong together ([{\"op\":...},{\"op\":...}]), and {\"pause\":600} waits that many ms between two parts. --delay 120 waits after each step, so a drawing made by a script appears mark by mark for someone watching; without a delay the pauses are skipped and the steps run as fast as they can, which is how to try the same file on a copy first. A line that fails stops the run with the lines before it in the drawing: fix it and go on with --from <line>. Ops that need a batch of their own (inbetween, fill --like, paintover) get one this way.\n\n  klad apply art.klad --file ops.jsonl --steps --delay 120\n  klad apply art.klad --file ops.jsonl --from 48 --delay 120"
     )]
     Apply {
         bundle: PathBuf,
         #[arg(long)]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "One edit per line, in order: each line is its own step in the history, and the open editor shows each one arrive"
+        )]
+        steps: bool,
+        #[arg(
+            long,
+            value_name = "MS",
+            help = "With --steps: wait this long after each step, so someone watching sees the drawing grow"
+        )]
+        delay: Option<u64>,
+        #[arg(
+            long,
+            value_name = "LINE",
+            help = "With --steps: start at this line, to go on after a line that failed"
+        )]
+        from: Option<usize>,
         #[arg(long, default_value_t = 0, help = "Frame to render with --render")]
         frame: u32,
         #[command(flatten)]
@@ -1103,14 +1125,14 @@ enum Command {
     },
     #[command(
         about = "Put whole pixels of one palette colour on a pixel layer, or erase them",
-        long_about = "Put whole pixels of one palette colour on a pixel layer, or erase them. A pixel layer is a grid with no anti-aliasing where one pixel is one canvas pixel; make a pixel drawing with klad new --pixel 64x64, or add a layer with klad add <bundle> layer pixel.\n\n--cells lists them: x,y for one pixel, x0-x1,y for a run along a row, x,y0-y1 for a run down a column and x0-x1,y0-y1 for a block. --color is a palette name, a palette index or #rrggbb; a colour the palette does not have yet is added to it. The pixels become one mark bound to that palette entry, so it can be recoloured (klad set <cel>:s<id> color=...), moved (klad transform) or removed (klad rm) later, and klad strokes lists it. --erase takes those pixels out of the marks under them instead, and leaves no mark of its own.\n\n--path draws SVG path data as a line of pixels: a pixel is the square from x,y to x+1,y+1, so aim at pixel middles (3.5, not 3). Straight segments keep the corners they are given; curves are cleaned so no corner is doubled. --size makes the pencil a square of that many pixels, for --cells and --path alike.\n\n  klad pixel sprite.klad l1 --color '#2b2d42' --cells '3-12,4 3,5-9 12,5-9 3-12,10'\n  klad pixel sprite.klad l1 --color '#2b2d42' --path 'M3.5 20.5 C 10 4 22 4 28.5 20.5'\n  klad pixel sprite.klad l1 --erase --size 3 --path 'M4.5 4.5 L12.5 12.5'\n  klad pixel sprite.klad l1 --color skin --cells '4-11,5-9'\n  klad pixel sprite.klad l1 --erase --cells '7,7 8,7'\n\nShapes on the grid, each one mark: --line x0,y0,x1,y1 is a straight line between two pixels, --rect x,y,w,h and --ellipse x,y,w,h the outline of a rectangle or of the ellipse that fits that box (--filled for all of it), with --size for a thicker outline. --fill x,y is a flood fill: every pixel joined to that one that has exactly its colour, or is empty like it (--diagonal also crosses corners; --ref all reads every visible pixel layer, --ref <layer> another one, so flat colour can go on a layer under the lines).\n\n  klad pixel sprite.klad l1 --color ink --ellipse 4,4,16,12\n  klad pixel sprite.klad l1 --color body --fill 12,10\n  klad pixel sprite.klad colour --color body --fill 12,10 --ref lines\n\nShading: --shade 1 (or -1) draws no colour of its own: every pixel it covers takes the next lighter (or darker) colour of its own ramp, so one call shades a form made of several colours; pixels in no ramp, or at its end, stay. --dither 50 draws only that share of the pixels in an even pattern (50 a checkerboard, 25 one in four), and --second gives the others a second colour, for a blend between two ramp steps. --outline draws a one-pixel outline around what the layer shows (--inside on its own edge pixels, --diagonal with the corners, --ref another layer or all).\n\n  klad pixel sprite.klad l1 --shade -1 --rect 4,12,16,4 --filled\n  klad pixel sprite.klad l1 --color wood-2 --second wood-3 --dither 50 --rect 4,8,16,2 --filled\n  klad pixel sprite.klad l1 --color ink --outline\n\n--grid draws a whole sprite from text, the way klad pixels --plain prints one: legend lines (one character, =, a palette name, a colour, erase or empty), a blank line, then a row of characters per row of pixels. . is empty unless the legend says otherwise. Each character becomes one mark bound to its colour; --at x,y moves the grid's top left.\n\n  klad pixel sprite.klad l1 --grid - <<'GRID'\n  i = ink\n  b = body\n\n  ..iiii..\n  .ibbbbi.\n  .ibbbbi.\n  ..iiii..\n  GRID\n\nAlso a pixel op in klad apply: {\"op\":\"pixel\",\"layer\":\"l1\",\"color\":\"skin\",\"cells\":[[4,5],[5,5]]}, with \"path\":\"M3.5 3.5 L9.5 3.5\" in place of cells, \"size\":2, or \"erase\":true; \"line\":[x0,y0,x1,y1], \"rect\":[x,y,w,h] or \"ellipse\":[x,y,w,h] with \"filled\":true; \"fill\":[x,y] with \"diagonal\" and \"ref\"; and as a grid {\"op\":\"pixel\",\"layer\":\"l1\",\"rows\":[\"..ii..\",\".ibbi.\"],\"legend\":{\"i\":\"ink\",\"b\":\"body\"},\"at\":[0,0]}."
+        long_about = "Put whole pixels of one palette colour on a pixel layer, or erase them. A pixel layer is a grid with no anti-aliasing where one pixel is one canvas pixel; make a pixel drawing with klad new --pixel 64x64, or add a layer with klad add <bundle> layer pixel.\n\n--cells lists them: x,y for one pixel, x0-x1,y for a run along a row, x,y0-y1 for a run down a column and x0-x1,y0-y1 for a block. --color is a palette name, a palette index or #rrggbb; a colour the palette does not have yet is added to it. The pixels become one mark bound to that palette entry, so it can be recoloured (klad set <cel>:s<id> color=...), moved (klad transform) or removed (klad rm) later, and klad strokes lists it. --erase takes those pixels out of the marks under them instead, and leaves no mark of its own.\n\n--path draws SVG path data as a line of pixels: a pixel is the square from x,y to x+1,y+1, so aim at pixel middles (3.5, not 3). Straight segments keep the corners they are given; curves are cleaned so no corner is doubled. --size makes the pencil a square of that many pixels, for --cells and --path alike.\n\n  klad pixel sprite.klad l1 --color '#2b2d42' --cells '3-12,4 3,5-9 12,5-9 3-12,10'\n  klad pixel sprite.klad l1 --color '#2b2d42' --path 'M3.5 20.5 C 10 4 22 4 28.5 20.5'\n  klad pixel sprite.klad l1 --erase --size 3 --path 'M4.5 4.5 L12.5 12.5'\n  klad pixel sprite.klad l1 --color skin --cells '4-11,5-9'\n  klad pixel sprite.klad l1 --erase --cells '7,7 8,7'\n\nShapes on the grid, each one mark: --line x0,y0,x1,y1 is a straight line between two pixels, --rect x,y,w,h and --ellipse x,y,w,h the outline of a rectangle or of the ellipse that fits that box (--filled for all of it), with --size for a thicker outline. --fill x,y is a flood fill: every pixel joined to that one that has exactly its colour, or is empty like it (--diagonal also crosses corners; --ref all reads every visible pixel layer, --ref <layer> another one, so flat colour can go on a layer under the lines).\n\n  klad pixel sprite.klad l1 --color ink --ellipse 4,4,16,12\n  klad pixel sprite.klad l1 --color body --fill 12,10\n  klad pixel sprite.klad colour --color body --fill 12,10 --ref lines\n\nShading: --shade 1 (or -1) draws no colour of its own: every pixel it covers takes the next lighter (or darker) colour of its own ramp, so one call shades a form made of several colours; pixels in no ramp, or at its end, stay. --dither 50 draws only that share of the pixels in an even pattern (50 a checkerboard, 25 one in four), and --second gives the others a second colour, for a blend between two ramp steps. --outline draws a one-pixel outline around what the layer shows (--inside on its own edge pixels, --diagonal with the corners, --ref another layer or all).\n\n  klad pixel sprite.klad l1 --shade -1 --rect 4,12,16,4 --filled\n  klad pixel sprite.klad l1 --color wood-2 --second wood-3 --dither 50 --rect 4,8,16,2 --filled\n  klad pixel sprite.klad l1 --color ink --outline\n\n--grid draws a whole sprite from text, the way klad pixels --plain prints one: legend lines (one character, =, a palette name, a colour, erase or empty), a blank line, then a row of characters per row of pixels. . is empty unless the legend says otherwise. Each character becomes one mark bound to its colour; --at x,y moves the grid's top left.\n\n  klad pixel sprite.klad l1 --grid - <<'GRID'\n  i = ink\n  b = body\n\n  ..iiii..\n  .ibbbbi.\n  .ibbbbi.\n  ..iiii..\n  GRID\n\n--text writes words in whole pixels with hard edges, in --color, its top left at --at; --font picks the font (Inter by default, klad fonts lists them) and --text-size the size of its letters in pixels. The pixels are one mark, as any other, and are not text any more.\n\n  klad pixel sprite.klad l1 --color ink --text 'GO!' --at 2,3 --text-size 9\n\nAlso a pixel op in klad apply: {\"op\":\"pixel\",\"layer\":\"l1\",\"color\":\"skin\",\"cells\":[[4,5],[5,5]]}, with \"path\":\"M3.5 3.5 L9.5 3.5\" in place of cells, \"size\":2, or \"erase\":true; \"line\":[x0,y0,x1,y1], \"rect\":[x,y,w,h] or \"ellipse\":[x,y,w,h] with \"filled\":true; \"fill\":[x,y] with \"diagonal\" and \"ref\"; and as a grid {\"op\":\"pixel\",\"layer\":\"l1\",\"rows\":[\"..ii..\",\".ibbi.\"],\"legend\":{\"i\":\"ink\",\"b\":\"body\"},\"at\":[0,0]}."
     )]
     Pixel {
         bundle: PathBuf,
         layer: String,
         #[arg(
             long,
-            required_unless_present_any = ["path", "grid", "line", "rect", "ellipse", "fill", "outline"],
+            required_unless_present_any = ["path", "grid", "line", "rect", "ellipse", "fill", "outline", "text"],
             help = "The pixels: x,y, a row run x0-x1,y, a column run x,y0-y1 or a block x0-x1,y0-y1, separated by spaces"
         )]
         cells: Option<String>,
@@ -1204,13 +1226,32 @@ enum Command {
         grid: Option<String>,
         #[arg(
             long,
-            requires = "grid",
             value_parser = parse_cell,
             allow_hyphen_values = true,
             default_value = "0,0",
-            help = "Where the grid's top left pixel goes: x,y"
+            help = "Where the grid's or the text's top left pixel goes: x,y"
         )]
         at: [i64; 2],
+        #[arg(
+            long,
+            conflicts_with_all = ["cells", "path", "grid", "line", "rect", "ellipse", "fill", "outline"],
+            help = "Write this text in whole pixels with hard edges, its top left at --at (--font, --text-size)"
+        )]
+        text: Option<String>,
+        #[arg(
+            long,
+            requires = "text",
+            default_value = "Inter",
+            help = "The font of --text: one klad has (klad fonts) or a file in the bundle's fonts folder"
+        )]
+        font: String,
+        #[arg(
+            long = "text-size",
+            requires = "text",
+            default_value_t = 12.0,
+            help = "The size of the --text letters in pixels"
+        )]
+        text_size: f32,
         #[arg(
             long,
             requires = "grid",
@@ -2588,6 +2629,26 @@ fn parse_pair(text: &str) -> Result<[f32; 2]> {
         .map_err(|_| anyhow!("{text:?} is not x,y"))
 }
 
+fn text_cells(bundle: &Path, words: &str, font: &str, size: f32, at: [i64; 2]) -> Result<Vec<[i64; 2]>> {
+    let chosen = klad_render::fonts::bring(bundle, font)?;
+    let bytes = std::fs::read(bundle.join(klad_render::assets::FONTS).join(&chosen.file))
+        .with_context(|| format!("reading the font {}", chosen.file))?;
+    let t = klad_core::generators::Text {
+        text: words.to_string(),
+        font: chosen.file,
+        x: at[0] as f32,
+        y: at[1] as f32,
+        size,
+        weight: chosen.weight,
+        ..klad_core::generators::Text::default()
+    };
+    let cells = klad_render::text::cells(&bytes, &t)?;
+    if cells.is_empty() {
+        bail!("the text {words:?} leaves no pixels at size {size}: give it a larger --text-size");
+    }
+    Ok(cells)
+}
+
 fn parse_cells(text: &str) -> Result<Vec<[i64; 2]>> {
     let span = |part: &str| -> Option<(i64, i64)> {
         let part = part.trim();
@@ -2835,6 +2896,7 @@ fn run() -> Result<()> {
             fps,
             frames,
             sketch,
+            palette,
             pixel,
             wrap,
             tile,
@@ -2851,6 +2913,7 @@ fn run() -> Result<()> {
                     frames,
                     sketch,
                     pixel: size.is_some(),
+                    palette,
                 },
             )?;
             let cut = tile.as_deref().map(tile_size).transpose()?;
@@ -3031,6 +3094,7 @@ fn run() -> Result<()> {
             };
             let spec = CopySpec {
                 ids,
+                held: Vec::new(),
                 to: target,
                 transform: mark_transform(offset, rotate, (scale, sx, sy), pivot, flip.as_deref())?,
                 cut,
@@ -3291,9 +3355,18 @@ fn run() -> Result<()> {
         Command::Apply {
             bundle,
             file,
+            steps,
+            delay,
+            from,
             frame,
             flags,
-        } => agent::apply(&bundle, file, &output(&flags, frame))?,
+        } => {
+            let steps = (steps || delay.is_some() || from.is_some()).then(|| agent::Steps {
+                delay_ms: delay.unwrap_or(0),
+                from: from.unwrap_or(1),
+            });
+            agent::apply(&bundle, file, steps, &output(&flags, frame))?
+        }
         Command::Path {
             bundle,
             node,
@@ -3566,6 +3639,9 @@ fn run() -> Result<()> {
             cells,
             grid,
             at,
+            text,
+            font,
+            text_size,
             tile,
             path,
             line,
@@ -3624,7 +3700,10 @@ fn run() -> Result<()> {
                 frame,
                 color,
                 erase,
-                cells: cells.as_deref().map(parse_cells).transpose()?.unwrap_or_default(),
+                cells: match text {
+                    Some(words) => text_cells(&bundle, &words, &font, text_size, at)?,
+                    None => cells.as_deref().map(parse_cells).transpose()?.unwrap_or_default(),
+                },
                 path,
                 line,
                 rect,

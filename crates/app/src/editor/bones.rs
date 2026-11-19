@@ -2,7 +2,7 @@ use super::{Editor, Tool};
 use crate::jobs::{Spec, Tag};
 use crate::messages::Tone;
 use crate::theme::{self, Hint};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use egui::{Color32, Key, Modifiers, Pos2, RichText, Vec2};
 use klad_core::doc::Kind;
 use klad_core::ops::{BendSpec, BoneSpec, IkSpec, Op, PoseSpec, PosedCel, WeightsSpec};
@@ -133,6 +133,9 @@ fn near_segment(p: Vec2, a: [f32; 2], b: [f32; 2]) -> f32 {
 fn at(p: [f32; 2]) -> Vec2 {
     Vec2::new(p[0], p[1])
 }
+
+const NOTHING_FOLLOWS: &str =
+    "no layer follows these bones yet: attach one with the bone button on its row in the Layers panel";
 
 pub(super) fn pose_args(bundle: &std::path::Path, owner: &str, frame: u32, pose: &Pose) -> Vec<String> {
     let mut args = vec![
@@ -748,6 +751,9 @@ impl Editor {
     }
 
     fn pose_down(&mut self, c: Vec2) {
+        if self.nothing_follows() {
+            self.say(Tone::Refused, NOTHING_FOLLOWS);
+        }
         let (bones, ik) = (self.rig_bones(), self.rig_ik());
         let shown = tips(&bones, &ik, &self.shown_pose());
         let reach = NEAR / self.zoom();
@@ -958,29 +964,88 @@ impl Editor {
         self.apply(vec![Op::Bone(spec)])
     }
 
+    fn nothing_follows(&self) -> bool {
+        self.rig_owner()
+            .is_some_and(|o| klad_core::rig::painted(&self.scene.bundle.doc, &o).is_empty())
+    }
+
+    fn pose_target(&self, owner: &str, frame: u32) -> std::result::Result<u32, String> {
+        let doc = &self.scene.bundle.doc;
+        let layers = klad_core::rig::painted(doc, owner);
+        let on_rest = layers
+            .iter()
+            .any(|l| l.cels().iter().any(|c| c.frame == frame && c.pose.is_none()));
+        if !on_rest {
+            return Ok(frame);
+        }
+        let next = frame + 1;
+        let taken = layers.iter().find(|l| {
+            l.cels().iter().any(|c| {
+                c.frame == next
+                    && c.pose
+                        .as_ref()
+                        .is_none_or(|p| l.content_at(frame).is_none_or(|r| r.id != p.rest))
+            })
+        });
+        match taken {
+            Some(layer) => Err(format!(
+                "this frame holds the drawing the bones are rigged to, and frame {next} has another drawing on {}: go to an empty frame to keep the pose",
+                layer.name
+            )),
+            None => Ok(next),
+        }
+    }
+
     fn pose_drawing(&mut self) -> Result<()> {
         let owner = self.rig_owner().context("no skeleton here")?;
+        if self.nothing_follows() {
+            self.say(Tone::Refused, NOTHING_FOLLOWS);
+            return Ok(());
+        }
         let pose = self.shown_pose();
         if pose.angles.values().all(|v| v.abs() < 1e-3) && pose.root == [0.0, 0.0] && pose.ik.is_empty() {
-            bail!("turn a bone first: drag a bone's end in pose mode");
+            self.say(Tone::Refused, "turn a bone first: drag a bone's end in pose mode");
+            return Ok(());
         }
         let frame = self.scene.frame;
+        let to = match self.pose_target(&owner, frame) {
+            Ok(to) => to,
+            Err(why) => {
+                self.say(Tone::Refused, why);
+                return Ok(());
+            }
+        };
+        if to >= self.scene.bundle.doc.timeline.frames {
+            self.timeline_apply(vec![Op::Timeline {
+                fps: None,
+                frames: Some(to + 1),
+                origin: None,
+            }])?;
+        }
+        let mut args = pose_args(&self.scene.bundle.root, &owner, frame, &pose);
+        if to != frame {
+            if let Some(at) = args.iter().position(|a| a == "--to") {
+                args[at + 1] = to.to_string();
+            }
+            self.say(
+                Tone::Info,
+                format!("frame {frame} holds the drawing the bones are rigged to, so the pose goes on frame {to}"),
+            );
+        }
         self.start_job(Spec {
             tag: Tag::Edit,
-            name: format!("pose at frame {frame}"),
+            name: format!("the pose on frame {to}"),
             exe: PathBuf::new(),
-            args: pose_args(&self.scene.bundle.root, &owner, frame, &pose),
+            args,
             env: Vec::new(),
             reruns: 3,
-            summary: |out, _| {
-                out.lines()
-                    .find(|l| l.starts_with("posed"))
-                    .unwrap_or_default()
-                    .to_string()
-            },
+            summary: |_, _| String::new(),
             failure: |_, err| super::tweens::failure(err),
         });
         self.bones.sent = true;
+        if to != frame {
+            self.go_to(to)?;
+        }
         Ok(())
     }
 
@@ -1209,22 +1274,26 @@ impl Editor {
                 }
             }
             Mode::Weights if !self.bends() => {
-                ui.label(RichText::new("every layer follows a bone: nothing bends by weights").color(theme::WEAK))
+                super::options::note(ui, RichText::new("every layer follows a bone: nothing bends by weights").color(theme::WEAK))
                     .hint("weights are for a layer drawn in one piece across a joint; detach one (draw mode, the picked bone's layers menu, or the bone in its layers row) to paint its weights");
             }
             Mode::Weights => {
                 ui.spacing_mut().slider_width = 56.0;
-                ui.add(
-                    egui::Slider::new(&mut self.bones.radius, 4.0..=200.0)
-                        .logarithmic(true)
-                        .text("size"),
-                )
+                super::options::whole(ui, "weights size", |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut self.bones.radius, 4.0..=200.0)
+                            .logarithmic(true)
+                            .text("size"),
+                    )
+                })
                 .hint("the weight brush's radius in px");
-                ui.add(
-                    egui::Slider::new(&mut self.bones.strength, 0.0..=1.0)
-                        .fixed_decimals(2)
-                        .text("weight"),
-                )
+                super::options::whole(ui, "weights weight", |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut self.bones.strength, 0.0..=1.0)
+                            .fixed_decimals(2)
+                            .text("weight"),
+                    )
+                })
                 .hint("the weight a dab paints; alt paints 0");
                 if ui
                     .button("automatic")

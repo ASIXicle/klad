@@ -84,3 +84,22 @@ ui-time:
 
 drag-time bundle="":
     KLAD_DRAG_BUNDLE={{bundle}} cargo test --release -p klad-app -- --ignored drag_time --nocapture
+
+journeys out="":
+    cargo build -p klad-cli
+    KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- journeys
+
+monkey out="":
+    cargo build -p klad-cli
+    KLAD_STAMP="$(date '+%Y-%m-%d %H:%M')" KLAD_MONKEY_OUT={{out}} cargo test -p klad-app -- --ignored monkey::random_use --nocapture
+
+sizes out="":
+    KLAD_JOURNEY_OUT={{out}} cargo test -p klad-app -- --ignored sizes::
+
+sweep out="":
+    cargo build -p klad-cli
+    KLAD_SWEEP_OUT={{out}} cargo test -p klad-app -- --include-ignored sweep::
+
+inventory out=(justfile_directory() / "scratch"):
+    KLAD_INVENTORY_OUT={{out}}/inventory.md cargo test -p klad-app -- --ignored command_inventory
+    KLAD_INVENTORY_OUT={{out}}/controls.md cargo test -p klad-app -- --ignored editor_inventory

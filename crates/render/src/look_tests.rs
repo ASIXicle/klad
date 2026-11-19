@@ -742,3 +742,42 @@ fn relief_timing() {
         time(&flat, &one)
     );
 }
+
+#[test]
+fn text_becomes_whole_pixels_with_hard_edges() {
+    use klad_core::generators::Text;
+    let root = std::env::temp_dir().join(format!("draw-text-cells-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let file = crate::fonts::bring(&root, "Inter").unwrap().file;
+    let bytes = std::fs::read(root.join("fonts").join(&file)).unwrap();
+    let t = Text {
+        text: "HI".into(),
+        font: file,
+        x: 3.0,
+        y: 2.0,
+        size: 12.0,
+        ..Text::default()
+    };
+    let cells = crate::text::cells(&bytes, &t).unwrap();
+    let smooth = crate::text::picture(&bytes, &t, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap()
+        .unwrap();
+    let soft = smooth
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] > 0 && px[3] < 255)
+        .count();
+    assert!(soft > 0, "the smooth picture has soft edges");
+    assert!(cells.len() > 20, "the letters take pixels: {}", cells.len());
+    assert!(
+        cells
+            .iter()
+            .all(|[x, y]| *x >= 3 && *y >= 2 && *x < 3 + 20 && *y < 2 + 14),
+        "the pixels sit where the text is: {cells:?}"
+    );
+    let unique: std::collections::BTreeSet<_> = cells.iter().collect();
+    assert_eq!(unique.len(), cells.len(), "each pixel once");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -2,18 +2,23 @@ use super::Editor;
 use super::options;
 use crate::messages::Tone;
 use crate::theme::{self, Hint};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use egui::{Color32, RichText, TextureHandle, TextureOptions};
 use klad_core::brushes::{AngleDef, BrushDef, ColorDef, Curve, DualDef, GrainDef, PaintDef, Paper, TIP_IMAGES, TipDef};
 use std::path::Path;
 
 pub(super) const PREVIEW: (u32, u32) = (320, 84);
+const LIST_LEAST: f32 = 200.0;
+const LIST_MOST: f32 = 460.0;
+const FOOTER: f32 = 69.0;
+const LIST_ALL: f32 = 10_000.0;
 
 #[derive(Default)]
 pub(super) struct BrushWindow {
     pub name: String,
     pub picture_path: String,
     preview: Option<(u64, TextureHandle)>,
+    footer: Option<f32>,
 }
 
 fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, text: &str, hint: &str) -> bool {
@@ -98,7 +103,12 @@ impl Editor {
     pub(super) fn draft(&self) -> Result<BrushDef> {
         match &self.custom {
             Some(def) => Ok(def.clone()),
-            None => Ok(self.shaped()?.1),
+            None => Ok(BrushDef {
+                taper: self.tuning.taper,
+                stabilizer: self.tuning.stabilizer,
+                smoothing: self.tuning.smoothing,
+                ..self.shaped()?.1
+            }),
         }
     }
 
@@ -125,7 +135,6 @@ impl Editor {
                 "a picture {name} is in this drawing already with other pixels; brushes using it would change, so give it another name"
             );
         }
-        std::fs::create_dir_all(path.parent().ok_or_else(|| anyhow!("no folder"))?)?;
         klad_core::bundle::write_atomic(&path, bytes)?;
         self.brushes.add_picture(name, picture);
         self.say(
@@ -187,6 +196,16 @@ impl Editor {
     }
 
     pub(super) fn brush_window_ui(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        let room = super::panels::window_room(ui.ctx()) - (ui.cursor().top() - ui.max_rect().top());
+        egui::ScrollArea::vertical()
+            .id_salt("brush window")
+            .max_height(room)
+            .min_scrolled_height(room)
+            .show(ui, |ui| self.brush_window_body(ui, room))
+            .inner
+    }
+
+    fn brush_window_body(&mut self, ui: &mut egui::Ui, room: f32) -> Result<()> {
         let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
             i.raw
                 .dropped_files
@@ -284,370 +303,380 @@ impl Editor {
             "body",
             "how thick the paint lies: strokes leave ridges that a relief effect on the layer lights; 0 is flat paint",
         );
-        egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
-            ui.set_max_width(380.0);
-            ui.label(RichText::new("tip").strong());
-            ui.vertical(|ui| {
-                changed |= tip_choice(
-                    ui,
-                    "brush tip",
-                    &mut def.tip,
-                    &pictures,
-                    "the shape each dab stamps: round, chalk or a picture",
-                );
-                if matches!(def.tip, TipDef::Round { .. }) {
-                    changed |= slider(
+        let above = ui.cursor().top() - ui.max_rect().top();
+        let footer = self.brush_window.footer.unwrap_or(FOOTER);
+        let list = match room - above - footer {
+            fits if fits >= LIST_LEAST => fits.min(LIST_MOST),
+            _ => LIST_ALL,
+        };
+        egui::ScrollArea::vertical()
+            .max_height(list)
+            .min_scrolled_height(list)
+            .show(ui, |ui| {
+                ui.set_max_width(380.0);
+                ui.label(RichText::new("tip").strong());
+                ui.vertical(|ui| {
+                    changed |= tip_choice(
                         ui,
-                        &mut def.feather,
-                        0.0..=1.0,
-                        "feather",
-                        "how far in the edge fades out like an airbrush; overlapping dabs don't build it back up",
+                        "brush tip",
+                        &mut def.tip,
+                        &pictures,
+                        "the shape each dab stamps: round, chalk or a picture",
                     );
-                }
-                changed |= slider(
-                    ui,
-                    &mut def.fringe,
-                    0.0..=1.0,
-                    "fringe",
-                    "breaks the edge into streaks along the stroke, like a dry brush",
-                );
-            });
-            ui.vertical(|ui| {
-                changed |= slider(
-                    ui,
-                    &mut def.spacing,
-                    0.01..=2.0,
-                    "spacing",
-                    "the gap between dabs, as a part of the size",
-                );
-                changed |= slider(ui, &mut def.roundness, 0.05..=1.0, "roundness", "squash the tip");
-            });
-            ui.vertical(|ui| {
-                let mut follow = def.angle == AngleDef::Follow;
-                let mut tilt = def.angle == AngleDef::Tilt;
-                if ui
-                    .checkbox(&mut follow, "turn with the stroke")
-                    .hint("the tip turns along the stroke")
-                    .changed()
-                {
-                    def.angle = if follow { AngleDef::Follow } else { AngleDef::Fixed(0.0) };
-                    changed = true;
-                }
-                if ui
-                    .checkbox(&mut tilt, "turn with the pen's tilt")
-                    .hint("the tip turns with the pen's tilt")
-                    .changed()
-                {
-                    def.angle = if tilt { AngleDef::Tilt } else { AngleDef::Fixed(0.0) };
-                    changed = true;
-                }
-                if let AngleDef::Fixed(angle) = &mut def.angle {
-                    changed |= slider(ui, angle, -3.15..=3.15, "angle", "the tip's fixed angle, in radians");
-                }
-            });
-            ui.vertical(|ui| {
-                changed |= slider(
-                    ui,
-                    &mut def.jitter.size,
-                    0.0..=1.0,
-                    "size jitter",
-                    "each dab's size varies by up to this much",
-                );
-                changed |= slider(
-                    ui,
-                    &mut def.jitter.angle,
-                    0.0..=6.3,
-                    "angle jitter",
-                    "each dab turns by up to this much",
-                );
-                changed |= slider(
-                    ui,
-                    &mut def.jitter.scatter,
-                    0.0..=4.0,
-                    "scatter",
-                    "dabs stray across the stroke by up to this many sizes",
-                );
-            });
-            ui.separator();
-            ui.label(RichText::new("pressure and tilt").strong());
-            ui.vertical(|ui| {
-                let mut size = curve_of(def.dynamics.size.pressure);
-                let mut flow = curve_of(def.dynamics.flow.pressure);
-                let mut opacity = curve_of(def.dynamics.opacity.pressure);
-                let a = slider(
-                    ui,
-                    &mut size.min,
-                    0.0..=1.0,
-                    "size at the lightest press",
-                    "how big a light press draws",
-                );
-                let b = slider(
-                    ui,
-                    &mut size.gamma,
-                    0.3..=3.0,
-                    "size curve",
-                    "below 1 light presses grow sooner, above 1 later",
-                );
-                let c = slider(
-                    ui,
-                    &mut flow.min,
-                    0.0..=1.0,
-                    "flow at the lightest press",
-                    "how much paint a light press lays",
-                );
-                let d = slider(
-                    ui,
-                    &mut opacity.min,
-                    0.0..=1.0,
-                    "opacity at the lightest press",
-                    "how dark a light press can get",
-                );
-                if a || b || c || d {
-                    def.dynamics.size.pressure = plain(size);
-                    def.dynamics.flow.pressure = plain(flow);
-                    def.dynamics.opacity.pressure = plain(opacity);
-                    changed = true;
-                }
-                let mut tilt_size = curve_of(def.dynamics.size.tilt);
-                let mut tilt_opacity = curve_of(def.dynamics.opacity.tilt);
-                let e = slider(
-                    ui,
-                    &mut tilt_size.max,
-                    0.2..=4.0,
-                    "size at full tilt",
-                    "a tilted pen paints this much bigger",
-                );
-                let f = slider(
-                    ui,
-                    &mut tilt_opacity.max,
-                    0.0..=1.0,
-                    "opacity at full tilt",
-                    "a tilted pen paints this light",
-                );
-                if e || f {
-                    def.dynamics.size.tilt = plain(tilt_size);
-                    def.dynamics.opacity.tilt = plain(tilt_opacity);
-                    changed = true;
-                }
-            });
-            ui.vertical(|ui| {
-                changed |= slider(ui, &mut def.flow, 0.001..=1.0, "flow", "paint per dab");
-                changed |= slider(
-                    ui,
-                    &mut def.opacity,
-                    0.001..=1.0,
-                    "opacity",
-                    "the most one stroke can cover",
-                );
-                changed |= slider(
-                    ui,
-                    &mut def.taper[0],
-                    0.0..=200.0,
-                    "taper in px",
-                    "the start comes to full size over this length",
-                );
-                changed |= slider(
-                    ui,
-                    &mut def.taper[1],
-                    0.0..=200.0,
-                    "taper out px",
-                    "the end comes to a point over this length",
-                );
-                changed |= slider(
-                    ui,
-                    &mut def.stabilizer,
-                    0.0..=200.0,
-                    "stabiliser ms",
-                    "the line follows the pen's average over this many ms",
-                );
-                changed |= slider(
-                    ui,
-                    &mut def.smoothing,
-                    0.0..=100.0,
-                    "pressure smoothing ms",
-                    "evens out pressure over this many ms",
-                );
-            });
-            ui.separator();
-            if let Some(d) = def.dual.as_mut() {
-                ui.vertical(|ui| {
-                    changed |= tip_choice(ui, "dual tip", &mut d.tip, &pictures, "the second tip");
-                    changed |= slider(ui, &mut d.size, 0.05..=2.0, "its size", "as a part of the main tip");
-                    changed |= slider(ui, &mut d.scatter, 0.0..=4.0, "its scatter", "how far its stamps stray");
-                    let mut count = d.count as f32;
-                    if slider(
-                        ui,
-                        &mut count,
-                        1.0..=8.0,
-                        "stamps per dab",
-                        "more stamps fill the mark in",
-                    ) {
-                        d.count = count.round() as u32;
-                        changed = true;
-                    }
-                });
-            }
-            if let Some(g) = def.grain.as_mut() {
-                ui.vertical(|ui| {
-                    let current = g.image.clone().unwrap_or_else(|| "paper".into());
-                    egui::ComboBox::from_id_salt("brush texture")
-                        .selected_text(&current)
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(g.image.is_none(), "paper").clicked() && g.image.is_some() {
-                                g.image = None;
-                                g.paper = Some(Paper { seed: 23, feature: 4 });
-                                changed = true;
-                            }
-                            pictures.iter().for_each(|name| {
-                                if ui.selectable_label(g.image.as_deref() == Some(name), name).clicked()
-                                    && g.image.as_deref() != Some(name)
-                                {
-                                    g.image = Some(name.clone());
-                                    g.paper = None;
-                                    changed = true;
-                                }
-                            });
-                        })
-                        .response
-                        .hint("the texture: paper noise or a picture");
-                    if let Some(paper) = g.paper.as_mut() {
-                        let mut feature = paper.feature as f32;
-                        if slider(ui, &mut feature, 1.0..=64.0, "grain size", "how coarse the paper is") {
-                            paper.feature = feature.round() as usize;
-                            changed = true;
-                        }
+                    if matches!(def.tip, TipDef::Round { .. }) {
+                        changed |= slider(
+                            ui,
+                            &mut def.feather,
+                            0.0..=1.0,
+                            "feather",
+                            "how far in the edge fades out like an airbrush; overlapping dabs don't build it back up",
+                        );
                     }
                     changed |= slider(
                         ui,
-                        &mut g.strength,
+                        &mut def.fringe,
                         0.0..=1.0,
-                        "strength",
-                        "how much the texture takes away",
-                    );
-                    changed |= slider(ui, &mut g.scale, 0.05..=20.0, "scale", "the texture's size");
-                    changed |= slider(
-                        ui,
-                        &mut g.contrast,
-                        0.0..=8.0,
-                        "contrast",
-                        "harder or softer texture edges",
-                    );
-                    changed |= slider(
-                        ui,
-                        &mut g.pressure,
-                        0.0..=1.0,
-                        "pressed in",
-                        "a hard press fills the texture in by this much",
+                        "fringe",
+                        "breaks the edge into streaks along the stroke, like a dry brush",
                     );
                 });
-            }
-            if let Some(c) = def.color.as_mut() {
                 ui.vertical(|ui| {
                     changed |= slider(
                         ui,
-                        &mut c.hue,
-                        0.0..=180.0,
-                        "hue per dab",
-                        "degrees each dab's hue can move",
+                        &mut def.spacing,
+                        0.01..=2.0,
+                        "spacing",
+                        "the gap between dabs, as a part of the size",
                     );
-                    changed |= slider(
-                        ui,
-                        &mut c.saturation,
-                        0.0..=1.0,
-                        "saturation per dab",
-                        "how far each dab's saturation can move",
-                    );
-                    changed |= slider(
-                        ui,
-                        &mut c.value,
-                        0.0..=1.0,
-                        "value per dab",
-                        "how far each dab's lightness can move",
-                    );
-                    changed |= slider(
-                        ui,
-                        &mut c.stroke_hue,
-                        0.0..=180.0,
-                        "hue per stroke",
-                        "degrees each stroke's hue can move",
-                    );
-                    changed |= slider(
-                        ui,
-                        &mut c.stroke_saturation,
-                        0.0..=1.0,
-                        "saturation per stroke",
-                        "per stroke",
-                    );
-                    changed |= slider(ui, &mut c.stroke_value, 0.0..=1.0, "value per stroke", "per stroke");
-                    let mut by_pressure = c.pressure.is_some();
+                    changed |= slider(ui, &mut def.roundness, 0.05..=1.0, "roundness", "squash the tip");
+                });
+                ui.vertical(|ui| {
+                    let mut follow = def.angle == AngleDef::Follow;
+                    let mut tilt = def.angle == AngleDef::Tilt;
                     if ui
-                        .checkbox(&mut by_pressure, "second colour at light pressure")
-                        .hint("a light press paints the second colour, a full press the first")
+                        .checkbox(&mut follow, "turn with the stroke")
+                        .hint("the tip turns along the stroke")
                         .changed()
                     {
-                        c.pressure = by_pressure.then_some(Curve {
-                            min: 0.0,
-                            max: 1.0,
-                            gamma: 1.0,
-                        });
+                        def.angle = if follow { AngleDef::Follow } else { AngleDef::Fixed(0.0) };
                         changed = true;
                     }
+                    if ui
+                        .checkbox(&mut tilt, "turn with the pen's tilt")
+                        .hint("the tip turns with the pen's tilt")
+                        .changed()
+                    {
+                        def.angle = if tilt { AngleDef::Tilt } else { AngleDef::Fixed(0.0) };
+                        changed = true;
+                    }
+                    if let AngleDef::Fixed(angle) = &mut def.angle {
+                        changed |= slider(ui, angle, -3.15..=3.15, "angle", "the tip's fixed angle, in radians");
+                    }
+                });
+                ui.vertical(|ui| {
                     changed |= slider(
                         ui,
-                        &mut c.along,
-                        0.0..=2000.0,
-                        "to the second colour over px",
-                        "the colour turns into the second over this length (0: off)",
+                        &mut def.jitter.size,
+                        0.0..=1.0,
+                        "size jitter",
+                        "each dab's size varies by up to this much",
+                    );
+                    changed |= slider(
+                        ui,
+                        &mut def.jitter.angle,
+                        0.0..=6.3,
+                        "angle jitter",
+                        "each dab turns by up to this much",
+                    );
+                    changed |= slider(
+                        ui,
+                        &mut def.jitter.scatter,
+                        0.0..=4.0,
+                        "scatter",
+                        "dabs stray across the stroke by up to this many sizes",
                     );
                 });
-            }
-            ui.vertical(|ui| match def.paint.as_mut() {
-                Some(PaintDef::Wet {
-                    wetness,
-                    pickup,
-                    dilution,
-                }) => {
+                ui.separator();
+                ui.label(RichText::new("pressure and tilt").strong());
+                ui.vertical(|ui| {
+                    let mut size = curve_of(def.dynamics.size.pressure);
+                    let mut flow = curve_of(def.dynamics.flow.pressure);
+                    let mut opacity = curve_of(def.dynamics.opacity.pressure);
+                    let a = slider(
+                        ui,
+                        &mut size.min,
+                        0.0..=1.0,
+                        "size at the lightest press",
+                        "how big a light press draws",
+                    );
+                    let b = slider(
+                        ui,
+                        &mut size.gamma,
+                        0.3..=3.0,
+                        "size curve",
+                        "below 1 light presses grow sooner, above 1 later",
+                    );
+                    let c = slider(
+                        ui,
+                        &mut flow.min,
+                        0.0..=1.0,
+                        "flow at the lightest press",
+                        "how much paint a light press lays",
+                    );
+                    let d = slider(
+                        ui,
+                        &mut opacity.min,
+                        0.0..=1.0,
+                        "opacity at the lightest press",
+                        "how dark a light press can get",
+                    );
+                    if a || b || c || d {
+                        def.dynamics.size.pressure = plain(size);
+                        def.dynamics.flow.pressure = plain(flow);
+                        def.dynamics.opacity.pressure = plain(opacity);
+                        changed = true;
+                    }
+                    let mut tilt_size = curve_of(def.dynamics.size.tilt);
+                    let mut tilt_opacity = curve_of(def.dynamics.opacity.tilt);
+                    let e = slider(
+                        ui,
+                        &mut tilt_size.max,
+                        0.2..=4.0,
+                        "size at full tilt",
+                        "a tilted pen paints this much bigger",
+                    );
+                    let f = slider(
+                        ui,
+                        &mut tilt_opacity.max,
+                        0.0..=1.0,
+                        "opacity at full tilt",
+                        "a tilted pen paints this light",
+                    );
+                    if e || f {
+                        def.dynamics.size.tilt = plain(tilt_size);
+                        def.dynamics.opacity.tilt = plain(tilt_opacity);
+                        changed = true;
+                    }
+                });
+                ui.vertical(|ui| {
+                    changed |= slider(ui, &mut def.flow, 0.001..=1.0, "flow", "paint per dab");
                     changed |= slider(
                         ui,
+                        &mut def.opacity,
+                        0.001..=1.0,
+                        "opacity",
+                        "the most one stroke can cover",
+                    );
+                    changed |= slider(
+                        ui,
+                        &mut def.taper[0],
+                        0.0..=200.0,
+                        "taper in px",
+                        "the start comes to full size over this length",
+                    );
+                    changed |= slider(
+                        ui,
+                        &mut def.taper[1],
+                        0.0..=200.0,
+                        "taper out px",
+                        "the end comes to a point over this length",
+                    );
+                    changed |= slider(
+                        ui,
+                        &mut def.stabilizer,
+                        0.0..=200.0,
+                        "stabiliser ms",
+                        "the line follows the pen's average over this many ms",
+                    );
+                    changed |= slider(
+                        ui,
+                        &mut def.smoothing,
+                        0.0..=100.0,
+                        "pressure smoothing ms",
+                        "evens out pressure over this many ms",
+                    );
+                });
+                ui.separator();
+                if let Some(d) = def.dual.as_mut() {
+                    ui.vertical(|ui| {
+                        changed |= tip_choice(ui, "dual tip", &mut d.tip, &pictures, "the second tip");
+                        changed |= slider(ui, &mut d.size, 0.05..=2.0, "its size", "as a part of the main tip");
+                        changed |= slider(ui, &mut d.scatter, 0.0..=4.0, "its scatter", "how far its stamps stray");
+                        let mut count = d.count as f32;
+                        if slider(
+                            ui,
+                            &mut count,
+                            1.0..=8.0,
+                            "stamps per dab",
+                            "more stamps fill the mark in",
+                        ) {
+                            d.count = count.round() as u32;
+                            changed = true;
+                        }
+                    });
+                }
+                if let Some(g) = def.grain.as_mut() {
+                    ui.vertical(|ui| {
+                        let current = g.image.clone().unwrap_or_else(|| "paper".into());
+                        egui::ComboBox::from_id_salt("brush texture")
+                            .selected_text(&current)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(g.image.is_none(), "paper").clicked() && g.image.is_some() {
+                                    g.image = None;
+                                    g.paper = Some(Paper { seed: 23, feature: 4 });
+                                    changed = true;
+                                }
+                                pictures.iter().for_each(|name| {
+                                    if ui.selectable_label(g.image.as_deref() == Some(name), name).clicked()
+                                        && g.image.as_deref() != Some(name)
+                                    {
+                                        g.image = Some(name.clone());
+                                        g.paper = None;
+                                        changed = true;
+                                    }
+                                });
+                            })
+                            .response
+                            .hint("the texture: paper noise or a picture");
+                        if let Some(paper) = g.paper.as_mut() {
+                            let mut feature = paper.feature as f32;
+                            if slider(ui, &mut feature, 1.0..=64.0, "grain size", "how coarse the paper is") {
+                                paper.feature = feature.round() as usize;
+                                changed = true;
+                            }
+                        }
+                        changed |= slider(
+                            ui,
+                            &mut g.strength,
+                            0.0..=1.0,
+                            "strength",
+                            "how much the texture takes away",
+                        );
+                        changed |= slider(ui, &mut g.scale, 0.05..=20.0, "scale", "the texture's size");
+                        changed |= slider(
+                            ui,
+                            &mut g.contrast,
+                            0.0..=8.0,
+                            "contrast",
+                            "harder or softer texture edges",
+                        );
+                        changed |= slider(
+                            ui,
+                            &mut g.pressure,
+                            0.0..=1.0,
+                            "pressed in",
+                            "a hard press fills the texture in by this much",
+                        );
+                    });
+                }
+                if let Some(c) = def.color.as_mut() {
+                    ui.vertical(|ui| {
+                        changed |= slider(
+                            ui,
+                            &mut c.hue,
+                            0.0..=180.0,
+                            "hue per dab",
+                            "degrees each dab's hue can move",
+                        );
+                        changed |= slider(
+                            ui,
+                            &mut c.saturation,
+                            0.0..=1.0,
+                            "saturation per dab",
+                            "how far each dab's saturation can move",
+                        );
+                        changed |= slider(
+                            ui,
+                            &mut c.value,
+                            0.0..=1.0,
+                            "value per dab",
+                            "how far each dab's lightness can move",
+                        );
+                        changed |= slider(
+                            ui,
+                            &mut c.stroke_hue,
+                            0.0..=180.0,
+                            "hue per stroke",
+                            "degrees each stroke's hue can move",
+                        );
+                        changed |= slider(
+                            ui,
+                            &mut c.stroke_saturation,
+                            0.0..=1.0,
+                            "saturation per stroke",
+                            "per stroke",
+                        );
+                        changed |= slider(ui, &mut c.stroke_value, 0.0..=1.0, "value per stroke", "per stroke");
+                        let mut by_pressure = c.pressure.is_some();
+                        if ui
+                            .checkbox(&mut by_pressure, "second colour at light pressure")
+                            .hint("a light press paints the second colour, a full press the first")
+                            .changed()
+                        {
+                            c.pressure = by_pressure.then_some(Curve {
+                                min: 0.0,
+                                max: 1.0,
+                                gamma: 1.0,
+                            });
+                            changed = true;
+                        }
+                        changed |= slider(
+                            ui,
+                            &mut c.along,
+                            0.0..=2000.0,
+                            "to the second colour over px",
+                            "the colour turns into the second over this length (0: off)",
+                        );
+                    });
+                }
+                ui.vertical(|ui| match def.paint.as_mut() {
+                    Some(PaintDef::Wet {
                         wetness,
-                        0.0..=1.0,
-                        "wetness",
-                        "how much of the picked-up colour it lays",
-                    );
-                    changed |= slider(
-                        ui,
                         pickup,
-                        0.0..=1.0,
-                        "pickup",
-                        "how fast it takes on the colour under it",
-                    );
-                    changed |= slider(ui, dilution, 0.0..=1.0, "dilution", "thinner, lighter paint");
-                }
-                Some(PaintDef::Smudge { strength } | PaintDef::Blend { strength }) => {
-                    changed |= slider(ui, strength, 0.0..=1.0, "strength", "how strongly it moves the paint");
-                }
-                None => {}
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                let label = ui.label("picture from a file");
-                ui.add(egui::TextEdit::singleline(&mut self.brush_window.picture_path).desired_width(180.0))
+                        dilution,
+                    }) => {
+                        changed |= slider(
+                            ui,
+                            wetness,
+                            0.0..=1.0,
+                            "wetness",
+                            "how much of the picked-up colour it lays",
+                        );
+                        changed |= slider(
+                            ui,
+                            pickup,
+                            0.0..=1.0,
+                            "pickup",
+                            "how fast it takes on the colour under it",
+                        );
+                        changed |= slider(ui, dilution, 0.0..=1.0, "dilution", "thinner, lighter paint");
+                    }
+                    Some(PaintDef::Smudge { strength } | PaintDef::Blend { strength }) => {
+                        changed |= slider(ui, strength, 0.0..=1.0, "strength", "how strongly it moves the paint");
+                    }
+                    None => {}
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    let label = ui.label("picture from a file");
+                    ui.add(egui::TextEdit::singleline(&mut self.brush_window.picture_path).desired_width(180.0))
                     .labelled_by(label.id)
                     .hint("a PNG for a tip or a texture: dark is paint, or its alpha; or drop the file on this window");
-                if ui
-                    .button("add the picture")
-                    .hint("copy the PNG into this drawing's brushes/images")
-                    .clicked()
-                {
-                    let path = std::path::PathBuf::from(self.brush_window.picture_path.trim());
-                    self.check(|e| e.add_picture_from(&path));
-                }
+                    if ui
+                        .button("add the picture")
+                        .hint("copy the PNG into this drawing's brushes/images")
+                        .clicked()
+                    {
+                        let path = std::path::PathBuf::from(self.brush_window.picture_path.trim());
+                        self.check(|e| e.add_picture_from(&path));
+                    }
+                });
             });
-        });
         if changed {
             def.validate()?;
             self.custom = Some(def);
         }
+        let below = ui.cursor().top();
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             let label = ui.label("name");
@@ -672,6 +701,11 @@ impl Editor {
         });
         if self.custom.is_some() {
             ui.label(RichText::new("you draw with these settings now; save them to keep them").color(theme::WEAK));
+        }
+        let drawn = ui.cursor().top() - below;
+        if self.brush_window.footer.is_none_or(|was| (was - drawn).abs() > 0.5) {
+            self.brush_window.footer = Some(drawn);
+            ui.ctx().request_repaint();
         }
         Ok(())
     }

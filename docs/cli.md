@@ -240,6 +240,9 @@ Options:
       --sketch
           Add a vector layer named sketch on top, for blocking in shapes
 
+      --palette
+          Start with a palette of eight colour ramps of four (grey, red, orange, yellow, green, blue, purple, skin), the one the editor gives a new pixel drawing
+
       --pixel <WxH>
           A pixel art drawing of that many pixels, for example 64x64: its layers are pixel layers
 
@@ -551,7 +554,7 @@ Options:
 ## klad copy
 
 ```text
-Copy strokes and fills (<cel>:s<id>) into another drawing. The copies get new ids, printed as a map (c1:s3 -> c9:s12), and land on top of that drawing in the order they had. --to names the drawing; --frame takes the drawing the layer shows at that frame (a new drawing on an empty frame or past the end; a frame that shows a link names its source instead). The marks' own layer unless --layer. The move, turn, scale and flip options are klad transform's, applied to the copies together about the middle of their bounds or --pivot. --cut keeps only the parts inside a polygon.
+Copy strokes and fills (<cel>:s<id>) into another drawing. The copies get new ids, printed as a map (c1:s3 -> c9:s12), and land on top of that drawing in the order they had. --to names the drawing; --frame takes the drawing that starts at that frame; a frame that shows a drawing held from an earlier frame first gets its own copy of that drawing, so the frames before it stay as they were (a new drawing on an empty frame or past the end; a frame that shows a link names its source instead). The marks' own layer unless --layer. The move, turn, scale and flip options are klad transform's, applied to the copies together about the middle of their bounds or --pivot. --cut keeps only the parts inside a polygon.
 
   klad copy art.klad c1:s3 c1:s4 --frame 4
   klad copy art.klad c1:s3 --to c9 --move 12,-4 --rotate 8
@@ -1718,6 +1721,11 @@ Apply many edits from JSON lines in one transaction: all apply or none.
 
 New ids are printed in order.
 
+With --steps every line is an edit of its own, made in order: a step in the history that can be undone alone, and one the open editor shows as it lands. A line may be a list of ops that belong together ([{"op":...},{"op":...}]), and {"pause":600} waits that many ms between two parts. --delay 120 waits after each step, so a drawing made by a script appears mark by mark for someone watching; without a delay the pauses are skipped and the steps run as fast as they can, which is how to try the same file on a copy first. A line that fails stops the run with the lines before it in the drawing: fix it and go on with --from <line>. Ops that need a batch of their own (inbetween, fill --like, paintover) get one this way.
+
+  klad apply art.klad --file ops.jsonl --steps --delay 120
+  klad apply art.klad --file ops.jsonl --from 48 --delay 120
+
 Usage: klad apply [OPTIONS] <BUNDLE>
 
 Arguments:
@@ -1727,6 +1735,15 @@ Arguments:
 Options:
       --file <FILE>
 
+
+      --steps
+          One edit per line, in order: each line is its own step in the history, and the open editor shows each one arrive
+
+      --delay <MS>
+          With --steps: wait this long after each step, so someone watching sees the drawing grow
+
+      --from <LINE>
+          With --steps: start at this line, to go on after a line that failed
 
       --frame <FRAME>
           Frame to render with --render
@@ -2047,6 +2064,10 @@ Shading: --shade 1 (or -1) draws no colour of its own: every pixel it covers tak
   ..iiii..
   GRID
 
+--text writes words in whole pixels with hard edges, in --color, its top left at --at; --font picks the font (Inter by default, klad fonts lists them) and --text-size the size of its letters in pixels. The pixels are one mark, as any other, and are not text any more.
+
+  klad pixel sprite.klad l1 --color ink --text 'GO!' --at 2,3 --text-size 9
+
 Also a pixel op in klad apply: {"op":"pixel","layer":"l1","color":"skin","cells":[[4,5],[5,5]]}, with "path":"M3.5 3.5 L9.5 3.5" in place of cells, "size":2, or "erase":true; "line":[x0,y0,x1,y1], "rect":[x,y,w,h] or "ellipse":[x,y,w,h] with "filled":true; "fill":[x,y] with "diagonal" and "ref"; and as a grid {"op":"pixel","layer":"l1","rows":["..ii..",".ibbi."],"legend":{"i":"ink","b":"body"},"at":[0,0]}.
 
 Usage: klad pixel [OPTIONS] <BUNDLE> <LAYER>
@@ -2102,9 +2123,22 @@ Options:
           Draw a grid of characters from a file (- reads stdin): a legend (i = ink), a blank line, then one row of characters per row of pixels
 
       --at <AT>
-          Where the grid's top left pixel goes: x,y
+          Where the grid's or the text's top left pixel goes: x,y
 
           [default: 0,0]
+
+      --text <TEXT>
+          Write this text in whole pixels with hard edges, its top left at --at (--font, --text-size)
+
+      --font <FONT>
+          The font of --text: one klad has (klad fonts) or a file in the bundle's fonts folder
+
+          [default: Inter]
+
+      --text-size <TEXT_SIZE>
+          The size of the --text letters in pixels
+
+          [default: 12]
 
       --tile <COLUMN,ROW>
           With --grid, in a drawing cut into tiles: put the grid's top left on that tile's (0,0 is the first tile)

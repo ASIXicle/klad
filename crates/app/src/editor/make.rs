@@ -69,11 +69,90 @@ fn on_vector(editor: &Editor) -> Option<String> {
     editor
         .scene
         .active_layer()
-        .filter(|l| l.kind() == Kind::Vector && !l.locked && !editor.scene.active_is_mask())
+        .filter(|l| l.kind() == Kind::Vector && !l.locked && !l.reference && !editor.scene.active_is_mask())
         .map(|l| l.id.clone())
 }
 
+pub(super) struct Home {
+    pub ops: Vec<Op>,
+    pub layer: String,
+    pub made: Option<String>,
+}
+
+impl Home {
+    pub(super) fn place(&self, frame: u32) -> Place {
+        Place {
+            into: Some(self.layer.clone()),
+            frame: Some(frame),
+            ..Place::default()
+        }
+    }
+
+    pub(super) fn said(&self) -> String {
+        match &self.made {
+            Some(over) => format!(" on a new vector layer {over}"),
+            None => String::new(),
+        }
+    }
+}
+
 impl Editor {
+    pub(super) fn draws_on_vector(&self) -> bool {
+        on_vector(self).is_some()
+    }
+
+    pub(super) fn vector_home(&self, name: &str) -> Home {
+        if let Some(layer) = on_vector(self) {
+            return Home {
+                ops: Vec::new(),
+                layer,
+                made: None,
+            };
+        }
+        self.new_vector_layer(name, self.scene.frame)
+    }
+
+    pub(super) fn new_vector_layer(&self, name: &str, frame: u32) -> Home {
+        let doc = &self.scene.bundle.doc;
+        let names: Vec<String> = doc.all_layers().iter().map(|l| l.name.clone()).collect();
+        let name = std::iter::once(name.to_string())
+            .chain((2..).map(|n| format!("{name} {n}")))
+            .find(|n| !names.contains(n))
+            .unwrap_or_else(|| name.to_string());
+        let name = name.as_str();
+        let taken = self.scene.bundle.doc.ids();
+        let layer = (1..)
+            .map(|n| format!("l{n}"))
+            .find(|id| !taken.contains(id))
+            .unwrap_or_default();
+        let active = &self.scene.active;
+        let owner = match self.scene.active_is_mask() {
+            true => &active[..active.len() - 1],
+            false => &active[..],
+        };
+        let under = self.scene.bundle.doc.locate_path(owner);
+        Home {
+            ops: vec![Op::AddLayer {
+                layer: json!({"id": layer, "kind": "vector", "name": name, "cels": [{"frame": frame}]}),
+                place: Place {
+                    above: under.map(|l| l.id.clone()),
+                    ..Place::default()
+                },
+            }],
+            layer,
+            made: Some(under.map_or("on top".to_string(), |l| format!("above {}", l.name))),
+        }
+    }
+
+    pub(super) fn move_in(&mut self, home: &Home) -> Result<()> {
+        if home.made.is_some()
+            && let Some(Loc::Layer(path)) = self.scene.bundle.doc.locate(&home.layer)
+        {
+            self.activate(path)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn shape_now(&self) -> Option<[f32; 4]> {
         self.shapes
             .drag
@@ -82,16 +161,10 @@ impl Editor {
 
     pub(super) fn shape_down(&mut self, c: Vec2) {
         if self.scene.on_grid() {
-            if self.scene.can_paint() {
-                self.shapes.drag = Some((c, c));
+            match self.paint_target(false) {
+                super::Target::Refused(why) => self.say(crate::messages::Tone::Refused, why),
+                _ => self.shapes.drag = Some((c, c)),
             }
-            return;
-        }
-        if on_vector(self).is_none() {
-            self.say(
-                Tone::Refused,
-                "U draws rectangles and ellipses on a vector layer: add one with the layers panel's vector button",
-            );
             return;
         }
         self.shapes.drag = Some((c, c));
@@ -114,12 +187,13 @@ impl Editor {
         }
         let made = self.shape_now();
         self.shapes.drag = None;
-        let (Some([x, y, w, h]), Some(layer)) = (made, on_vector(self)) else {
+        let Some([x, y, w, h]) = made else {
             return Ok(());
         };
         if w < 2.0 || h < 2.0 {
             return Ok(());
         }
+        let home = self.vector_home("shapes");
         let (colour, outline) = (color::hex(self.color), color::hex(self.second));
         let (mut node, what) = match self.shapes.kind {
             ShapeKind::Rect => (
@@ -138,17 +212,15 @@ impl Editor {
         if self.pen_stroke || !self.pen_fill {
             node["stroke"] = json!({ "paint": outline, "width": self.pen_width });
         }
-        let frame = self.scene.frame;
-        self.apply(vec![Op::AddNode {
-            node,
-            place: Place {
-                into: Some(layer),
-                frame: Some(frame),
-                ..Place::default()
-            },
-        }])?;
+        let place = home.place(self.scene.frame);
+        let ops = home.ops.iter().cloned().chain([Op::AddNode { node, place }]).collect();
+        self.apply(ops)?;
+        self.move_in(&home)?;
         self.used_colour();
-        self.say(Tone::Done, format!("{what} added: V moves it, A edits its points"));
+        self.say(
+            Tone::Done,
+            format!("{what} added{}: V moves it, A edits its points", home.said()),
+        );
         Ok(())
     }
 
@@ -604,6 +676,23 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn choose_picture(&mut self) {
+        let Some(path) = crate::picker::choose_picture(None, "Import") else {
+            return;
+        };
+        self.import_from(&path);
+    }
+
+    fn import_from(&mut self, path: &std::path::Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => self.check(|e| e.import_picture(&bytes, &path.display().to_string())),
+            Err(e) => self.say(
+                Tone::Refused,
+                format!("could not read {}: {}", path.display(), crate::report::io_words(&e)),
+            ),
+        }
+    }
+
     pub(super) fn import_window(&mut self, ctx: &egui::Context) {
         if !self.windows.import {
             return;
@@ -622,17 +711,9 @@ impl Editor {
                     .hint("copy the picture into the drawing and place it on a new layer")
                     .clicked()
                 {
-                    let path = self.import_path.trim().to_string();
-                    match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            self.check(|e| e.import_picture(&bytes, &path));
-                            self.windows.import = false;
-                        }
-                        Err(e) => self.say(
-                            Tone::Refused,
-                            format!("could not read {path}: {}", crate::report::io_words(&e)),
-                        ),
-                    }
+                    let path = std::path::PathBuf::from(self.import_path.trim());
+                    self.windows.import = !path.is_file();
+                    self.import_from(&path);
                 }
                 ui.small("or drop a PNG or JPEG on the canvas");
             });
@@ -653,17 +734,11 @@ impl Editor {
                 .filter(|p| {
                     p.extension()
                         .and_then(|e| e.to_str())
-                        .is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str()))
+                        .is_some_and(|e| crate::picker::PICTURES.contains(&e.to_ascii_lowercase().as_str()))
                 })
                 .collect()
         });
-        files.into_iter().for_each(|path| match std::fs::read(&path) {
-            Ok(bytes) => self.check(|e| e.import_picture(&bytes, &path.display().to_string())),
-            Err(e) => self.say(
-                Tone::Refused,
-                format!("could not read {}: {}", path.display(), crate::report::io_words(&e)),
-            ),
-        });
+        files.iter().for_each(|path| self.import_from(path));
     }
 }
 

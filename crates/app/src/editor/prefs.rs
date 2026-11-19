@@ -275,6 +275,9 @@ impl Editor {
                     .clicked()
                 {
                     self.settings.layout = Layout::default();
+                    self.timeline_still = None;
+                    self.dock_kept = None;
+                    self.folded_for_room.clear();
                     self.settings_dirty = true;
                 }
             });

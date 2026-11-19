@@ -129,6 +129,7 @@ impl Start {
                 background: self.paper.then(|| format!("#{r:02x}{g:02x}{b:02x}")),
                 fps: self.fps,
                 pixel: true,
+                palette: true,
                 ..Blank::default()
             };
         }
@@ -335,6 +336,7 @@ impl Start {
                     .labelled_by(label.id);
                 if !self.focused && self.section == Section::New {
                     name.request_focus();
+                    theme::select_all(ui.ctx(), name.id, &self.name);
                 }
                 entered = name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.end_row();
@@ -545,10 +547,9 @@ impl Start {
             .rect(rect, 6.0, fill, look.bg_stroke, egui::StrokeKind::Inside);
         let picture = egui::Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(THUMB, THUMB));
         if let Some(texture) = there.then(|| self.thumb(ui.ctx(), key, bundle, png)).flatten() {
-            egui::Image::new(&texture).paint_at(
-                ui,
-                egui::Rect::from_center_size(picture.center(), fit(texture.size_vec2())),
-            );
+            let at = egui::Rect::from_center_size(picture.center(), fit(texture.size_vec2()));
+            checks(ui.painter(), at);
+            egui::Image::new(&texture).paint_at(ui, at);
         }
         let colour = match there {
             true => look.text_color(),
@@ -622,6 +623,7 @@ impl Start {
 }
 
 fn row(ui: &mut egui::Ui, salt: &str, cards: impl FnOnce(&mut egui::Ui)) {
+    ui.spacing_mut().scroll = crate::theme::shown_scroll();
     egui::ScrollArea::horizontal()
         .id_salt(salt)
         .auto_shrink([false, true])
@@ -631,6 +633,24 @@ fn row(ui: &mut egui::Ui, salt: &str, cards: impl FnOnce(&mut egui::Ui)) {
                 cards(ui);
             });
             ui.add_space(14.0);
+        });
+}
+
+const CHECK: f32 = 8.0;
+
+fn checks(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(240));
+    let (cols, rows) = (
+        (rect.width() / CHECK).ceil() as usize,
+        (rect.height() / CHECK).ceil() as usize,
+    );
+    (0..rows)
+        .flat_map(|r| (0..cols).map(move |c| (r, c)))
+        .filter(|(r, c)| (r + c) % 2 == 1)
+        .for_each(|(r, c)| {
+            let min = rect.min + vec2(c as f32 * CHECK, r as f32 * CHECK);
+            let cell = egui::Rect::from_min_size(min, vec2(CHECK, CHECK)).intersect(rect);
+            painter.rect_filled(cell, 0.0, egui::Color32::from_gray(205));
         });
 }
 
@@ -701,6 +721,20 @@ pub fn brought_in(path: &Path) -> Result<(PathBuf, Option<String>)> {
     Ok((made, Some(told)))
 }
 
+const PICTURES: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+pub fn is_picture(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| PICTURES.iter().any(|p| x.eq_ignore_ascii_case(p)))
+}
+
+pub fn picture_words(name: &str) -> String {
+    format!(
+        "{name} is a picture, not a klad drawing: make a drawing, then bring the picture in with File > Import picture… or drop it on the window"
+    )
+}
+
 pub fn openable(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         bail!("paste the path of a .klad drawing");
@@ -709,6 +743,9 @@ pub fn openable(path: &Path) -> Result<()> {
         bail!("{} does not exist", path.display());
     }
     if !path.is_dir() {
+        if is_picture(path) {
+            bail!("{}", picture_words(&path.display().to_string()));
+        }
         bail!("{} is not a klad drawing", path.display());
     }
     if !path.join("doc.json").is_file() {

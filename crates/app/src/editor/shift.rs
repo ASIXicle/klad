@@ -129,6 +129,9 @@ impl Editor {
 
     pub(super) fn finish_shift_drag(&mut self, drag: &Drag) -> Result<()> {
         if !drag.moved() {
+            if drag.outside {
+                self.end_shift();
+            }
             return Ok(());
         }
         let every = self.shifting.as_ref().is_some_and(|s| s.every);
@@ -139,6 +142,20 @@ impl Editor {
         let before = self.scene.bundle.doc.rev;
         let dirty = self.commit(ops)?;
         self.finish_preview(shown, dirty, before);
+        let (rev, frame) = (self.scene.bundle.doc.rev, self.scene.frame);
+        if let Some(layer) = self.shifting.as_ref().map(|s| s.layer.clone()) {
+            let found = targets(&self.scene.bundle, &layer, Some(frame))?;
+            let turned = drag.preview();
+            if let (Some(s), Some(upright)) = (self.shifting.as_mut(), corners(&found)) {
+                s.corners = match super::upright(&turned) {
+                    true => upright,
+                    false => turned,
+                };
+                s.found = found;
+                s.rev = rev;
+                s.frame = frame;
+            }
+        }
         Ok(())
     }
 
@@ -155,7 +172,7 @@ impl Editor {
         ui.checkbox(&mut s.every, "every drawing").on_hover_text(
             "on: every drawing on it moves (with its bones and poses); off: only the drawing shown here",
         );
-        ui.label(RichText::new("drag inside, a corner or outside; Esc: done").color(crate::theme::WEAK))
+        super::options::note(ui, RichText::new("drag inside, a corner or outside; Esc: done").color(crate::theme::WEAK))
             .on_hover_text("drag inside to move, a corner to scale, an edge to stretch, outside to turn; Esc, Return or a click outside ends it");
     }
 }

@@ -117,6 +117,9 @@ pub mod icon {
     pub const FILE: &str = "\u{E230}";
     pub const FILE_PLUS: &str = "\u{E236}";
     pub const FOLDER_OPEN: &str = "\u{E256}";
+    pub const SAVE: &str = "\u{E248}";
+    pub const STACK_PLUS: &str = "\u{EDF6}";
+    pub const CARDS: &str = "\u{E0F6}";
 }
 
 pub fn install(ctx: &egui::Context) {
@@ -217,6 +220,13 @@ pub fn apply(style: &mut Style) {
     });
 }
 
+pub fn shown_scroll() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle {
+        dormant_handle_opacity: 0.5,
+        ..egui::style::ScrollStyle::floating()
+    }
+}
+
 pub fn surround(rgb: [u8; 3]) -> [f32; 4] {
     let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
     [r, g, b, 1.0]
@@ -226,13 +236,49 @@ fn hinted_id() -> Id {
     Id::unique("klad hinted controls")
 }
 
+#[cfg(test)]
+fn hint_texts_id() -> Id {
+    Id::unique("klad hint texts")
+}
+
+#[cfg(test)]
+fn hint_parts_id() -> Id {
+    Id::unique("klad hint parts")
+}
+
 pub fn clear_hints(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp::<Vec<Rect>>(hinted_id(), Vec::new()));
+    #[cfg(test)]
+    ctx.data_mut(|d| {
+        d.insert_temp::<Vec<(Rect, String)>>(hint_texts_id(), Vec::new());
+        d.insert_temp::<Vec<(Rect, Rect, String)>>(hint_parts_id(), Vec::new());
+    });
 }
 
 #[cfg(test)]
 pub fn hinted(ctx: &egui::Context) -> Vec<Rect> {
     ctx.data(|d| d.get_temp::<Vec<Rect>>(hinted_id()).unwrap_or_default())
+}
+
+#[cfg(test)]
+pub fn hints(ctx: &egui::Context) -> Vec<(Rect, String)> {
+    ctx.data(|d| d.get_temp::<Vec<(Rect, String)>>(hint_texts_id()).unwrap_or_default())
+}
+
+#[cfg(test)]
+pub fn hint_parts(ctx: &egui::Context) -> Vec<(Rect, Rect, String)> {
+    ctx.data(|d| {
+        d.get_temp::<Vec<(Rect, Rect, String)>>(hint_parts_id())
+            .unwrap_or_default()
+    })
+}
+
+pub fn select_all(ctx: &egui::Context, field: Id, text: &str) {
+    let mut state = egui::text_edit::TextEditState::load(ctx, field).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::select_all_str(text)));
+    state.store(ctx, field);
 }
 
 pub trait Hint {
@@ -242,8 +288,17 @@ pub trait Hint {
 impl Hint for Response {
     fn hint(self, text: impl Into<WidgetText>) -> Response {
         let rect = self.rect;
+        let text = text.into();
+        #[cfg(test)]
+        let seen = self.interact_rect;
         self.ctx.data_mut(|d| {
             d.get_temp_mut_or_default::<Vec<Rect>>(hinted_id()).push(rect);
+            #[cfg(test)]
+            d.get_temp_mut_or_default::<Vec<(Rect, String)>>(hint_texts_id())
+                .push((rect, text.text().to_string()));
+            #[cfg(test)]
+            d.get_temp_mut_or_default::<Vec<(Rect, Rect, String)>>(hint_parts_id())
+                .push((rect, seen, text.text().to_string()));
         });
         self.on_hover_text(text)
     }

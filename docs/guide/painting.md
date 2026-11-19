@@ -1,4 +1,4 @@
-_Last updated: 2026-11-09 21:30_
+_Last updated: 2026-11-19 08:00_
 
 # Painting
 
@@ -10,11 +10,15 @@ Paint with klad's brushes, blend colours on the canvas and make brushes of your 
 
 Press **B** and paint on a paint layer. **E** switches to the eraser and back, and so does the eraser end of the pen. **[** and **]** make the brush smaller and bigger. With the eraser on, **feather** in the bar fades its edge like an airbrush.
 
+A click paints a dot, and a stroke ends where you lift the pen. For strokes that start and end in a point, click **more** in the brush bar and set **taper in px** and **taper out px**.
+
 An eraser stroke stays with the strokes it erased, like a mask that travels with them: move them and the cut goes along, without biting into what they land on. Smudges and blends stay with their strokes the same way. [Move an eraser on its own](selecting.md#move-an-eraser-on-its-own) to change that.
 
 ## Pick a brush and a colour
 
-Click a brush in the **Brush** pane: Inking pen, Pencil and Marker for lines, Oil, Loaded oil and the bristle brushes for paint. Hold **alt** and click the canvas to pick up a colour from it.
+Click a brush in the **Brush** pane: Inking pen, Pencil and Marker for lines, Oil, Loaded oil and the bristle brushes for paint. Lean the pen with the Pencil to shade: the line grows wider and lighter. Hold **alt** and click the canvas to pick up a colour from it.
+
+In the **Colour** pane, mix a colour on the wheel or with the sliders next to it. **HSV**, **HSL**, **RGB** and **Lab** above the sliders choose what they change: for the shadow of a colour, pick **Lab** and lower **L**.
 
 ## Blend colours
 

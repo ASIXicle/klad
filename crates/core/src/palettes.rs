@@ -149,6 +149,26 @@ pub fn ramp(base: Rgba, steps: usize) -> Vec<Rgba> {
         .collect()
 }
 
+const STARTER: [(&str, &str); 8] = [
+    ("grey", "#8a8a8a"),
+    ("red", "#c0483c"),
+    ("orange", "#dc8a3a"),
+    ("yellow", "#e0c44a"),
+    ("green", "#4c9a4a"),
+    ("blue", "#4a72c4"),
+    ("purple", "#8a5ab4"),
+    ("skin", "#e0a884"),
+];
+const STARTER_STEPS: usize = 4;
+
+pub fn starter() -> Result<Vec<Swatch>> {
+    STARTER
+        .iter()
+        .map(|(name, base)| ramp_swatches(name, base, STARTER_STEPS))
+        .collect::<Result<Vec<_>>>()
+        .map(|ramps| ramps.concat())
+}
+
 pub fn ramp_swatches(name: &str, base: &str, steps: usize) -> Result<Vec<Swatch>> {
     let name = name.trim();
     if name.is_empty() || name.starts_with('#') {

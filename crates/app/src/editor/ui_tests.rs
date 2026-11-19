@@ -1,3 +1,4 @@
+use super::testkit::copy_dir;
 use super::{Direct, Editor, Picked, Tool};
 use crate::commands::Cmd;
 use crate::layout::{self, Pane};
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 const LAYERS: [&str; 7] = ["lines", "colour", "shade", "notes", "rim", "ground", "sky"];
 
-fn sample(name: &str) -> PathBuf {
+pub(super) fn sample(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("draw-ui-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut doc = Document::new(512, 384);
@@ -50,14 +51,15 @@ fn sample(name: &str) -> PathBuf {
     dir
 }
 
-fn editor(path: &Path) -> Editor {
+pub(super) fn editor(path: &Path) -> Editor {
     let mut editor = Editor::open(egui::Context::default(), path).unwrap();
     editor.settings = Settings::default();
     editor.settings_path = None;
+    editor.tool = Tool::Brush;
     editor
 }
 
-fn harness(editor: Editor, size: egui::Vec2) -> Harness<'static, Editor> {
+pub(super) fn harness(editor: Editor, size: egui::Vec2) -> Harness<'static, Editor> {
     harness_stepping(editor, size, 0.25)
 }
 
@@ -73,7 +75,7 @@ fn harness_stepping(editor: Editor, size: egui::Vec2, step: f32) -> Harness<'sta
     h
 }
 
-fn activate(h: &mut Harness<'static, Editor>, name: &str) {
+pub(super) fn activate(h: &mut Harness<'static, Editor>, name: &str) {
     let path = {
         let ed = h.state();
         let id = ed.scene.bundle.doc.find_layer(name).unwrap().id.clone();
@@ -102,7 +104,7 @@ fn ready(h: &mut Harness<'static, Editor>) {
     assert!(h.state().canvas_current(), "the canvas never caught up");
 }
 
-const CONTROLS: [Role; 9] = [
+pub(super) const CONTROLS: [Role; 9] = [
     Role::Button,
     Role::CheckBox,
     Role::Slider,
@@ -323,6 +325,7 @@ fn a_lasso_picks_strokes_on_every_layer_when_all_layers_is_on() {
     activate(&mut h, "lines");
     h.key_press(Key::S);
     h.run_steps(2);
+    h.state_mut().select_box = false;
     let lasso = |h: &mut Harness<'static, Editor>| {
         let corners = [(5.0, 5.0), (505.0, 5.0), (505.0, 379.0), (5.0, 379.0), (5.0, 10.0)];
         let at: Vec<egui::Pos2> = corners.iter().map(|(x, y)| canvas_at(h, *x, *y)).collect();
@@ -668,12 +671,126 @@ fn the_shell_fits_a_small_window_without_scrolling() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
+fn still(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("draw-ui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut doc = Document::new(512, 384);
+    LAYERS.iter().rev().enumerate().for_each(|(i, name)| {
+        doc.layers.push(Layer::paint(&format!("l{i}"), name, &format!("c{i}")));
+    });
+    doc.next_id = 40;
+    Bundle::create(&dir, doc).unwrap();
+    dir
+}
+
+#[test]
+fn a_still_opens_with_the_timeline_folded_and_a_dock_that_shares_the_window() {
+    [(1.0, 0.45), (1.5, 0.25)].into_iter().for_each(|(scale, share)| {
+        let path = still(&format!("still-{scale}"));
+        let mut first = editor(&path);
+        first.settings.ui_scale = scale;
+        let mut h = harness(first, vec2(1280.0, 720.0));
+        h.run_steps(4);
+        let ed = h.state();
+        assert!(ed.settings.layout.timeline_folded, "one frame: the timeline is folded");
+        assert!(ed.timeline_shown < 80.0, "folded to its bar: {}", ed.timeline_shown);
+        let window = h.ctx.content_rect();
+        let canvas = ed.canvas_rect;
+        let got = canvas.area() / window.area();
+        assert!(got > share, "at {scale} the canvas gets {got:.2} of the window");
+        let bodies = ed.settings.layout.bodies(ed.dock_room, &ed.dock_fit);
+        let used: f32 = bodies.iter().map(|(_, b)| b.unwrap_or(0.0) + layout::TITLE).sum();
+        assert!(used <= ed.dock_room + 0.5, "no panel runs past the dock: {bodies:?}");
+        let rows = bodies
+            .iter()
+            .find(|(p, _)| *p == Pane::Layers)
+            .and_then(|(_, b)| *b)
+            .unwrap();
+        assert!(
+            rows + 0.5 >= ed.dock_fit.layers_least,
+            "Layers keeps three rows: {rows}"
+        );
+        ed.settings.layout.panes.iter().filter(|p| p.open).for_each(|p| {
+            let title = h.get_by_label(p.pane.title()).rect();
+            assert!(
+                title.bottom() <= canvas.bottom() + 0.5,
+                "{} has its title above the timeline at {scale}",
+                p.pane.title()
+            );
+        });
+        h.state_mut().invoke(Cmd::InsertFrameAll).unwrap();
+        h.run_steps(4);
+        let ed = h.state();
+        assert_eq!(ed.scene.bundle.doc.timeline.frames, 2);
+        assert!(!ed.settings.layout.timeline_folded, "a second frame opens the timeline");
+        assert!(
+            ed.timeline_shown <= layout::TIMELINE_DEFAULT / scale + 1.0,
+            "at {scale} the timeline keeps its size on screen: {}",
+            ed.timeline_shown
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    });
+}
+
+#[test]
+fn window_history_shows_a_folded_history_at_once_and_ticks_only_what_shows() {
+    let path = sample("history-menu");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    assert_eq!(h.state().is_on(Cmd::HistoryPane), Some(false), "folded: not ticked");
+    h.state_mut().invoke(Cmd::HistoryPane).unwrap();
+    h.run_steps(4);
+    let ed = h.state();
+    assert_eq!(ed.is_on(Cmd::HistoryPane), Some(true));
+    let bodies = ed.settings.layout.bodies(ed.dock_room, &ed.dock_fit);
+    let history = bodies.iter().find(|(p, _)| *p == Pane::History).and_then(|(_, b)| *b);
+    assert!(
+        history.is_some_and(|b| b >= Pane::History.min_body()),
+        "one choice shows the panel with its content: {bodies:?}"
+    );
+    h.state_mut().invoke(Cmd::HistoryPane).unwrap();
+    h.run_steps(2);
+    assert!(
+        !h.state().settings.layout.is_open(Pane::History),
+        "chosen again, it closes"
+    );
+    let mut small = harness(editor(&path), vec2(1280.0, 720.0));
+    small.run_steps(4);
+    let folded = small.state().folded_for_room.clone();
+    assert!(!folded.is_empty(), "a short dock shows some panels folded");
+    let pane = folded[0];
+    let cmd = [
+        (Pane::Brush, Cmd::BrushPane),
+        (Pane::Tool, Cmd::ToolPane),
+        (Pane::Inspector, Cmd::InspectorPane),
+    ]
+    .into_iter()
+    .find(|(p, _)| *p == pane)
+    .map(|(_, c)| c)
+    .unwrap();
+    assert_eq!(small.state().is_on(cmd), Some(false), "folded for room: not ticked");
+    small.state_mut().invoke(cmd).unwrap();
+    small.run_steps(4);
+    let ed = small.state();
+    assert!(ed.settings.layout.is_open(pane) && ed.is_on(cmd) == Some(true));
+    let bodies = ed.settings.layout.bodies(ed.dock_room, &ed.dock_fit);
+    assert!(
+        bodies
+            .iter()
+            .find(|(p, _)| *p == pane)
+            .and_then(|(_, b)| *b)
+            .is_some_and(|b| b >= layout::USABLE),
+        "{pane:?} is brought up, others give way: {bodies:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 #[test]
 fn the_layout_comes_back_as_it_was_left() {
     let path = sample("layout");
     let mut first = editor(&path);
     first.settings.layout.dock_width = 410.0;
     first.settings.layout.timeline_height = 300.0;
+    first.settings.layout.toggle(Pane::History);
     first.settings.layout.toggle(Pane::History);
     let mut h = harness(first, vec2(1440.0, 900.0));
     let layout = h.state().settings.layout.clone();
@@ -767,7 +884,11 @@ fn every_command_answers_whether_it_can_run_and_toggles_say_their_state() {
     activate(&mut h, "lines");
     let ed = h.state();
     let runnable: Vec<Cmd> = Cmd::ALL.into_iter().filter(|c| ed.can_run(*c).is_none()).collect();
-    assert!(runnable.contains(&Cmd::NewDrawing) && runnable.contains(&Cmd::Play));
+    assert!(runnable.contains(&Cmd::NewDrawingAfter) && runnable.contains(&Cmd::Play));
+    assert_eq!(
+        ed.can_run(Cmd::NewDrawing).as_deref(),
+        Some("this frame has a drawing already: shift K makes the next one after it")
+    );
     assert!(ed.can_run(Cmd::Copy).is_some() && ed.can_run(Cmd::Pan).is_some());
     assert_eq!(ed.is_on(Cmd::Brush), Some(true));
     assert_eq!(ed.is_on(Cmd::LayersPane), Some(true));
@@ -776,21 +897,6 @@ fn every_command_answers_whether_it_can_run_and_toggles_say_their_state() {
     h.state_mut().tool = Tool::Strokes;
     assert!(h.state().can_run(Cmd::Copy).is_none());
     let _ = std::fs::remove_dir_all(&path);
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    std::fs::read_dir(from).unwrap().for_each(|e| {
-        let e = e.unwrap();
-        let target = to.join(e.file_name());
-        match e.file_type().unwrap().is_dir() {
-            true if e.file_name() == ".cache" => {}
-            true => copy_dir(&e.path(), &target),
-            false => {
-                std::fs::copy(e.path(), target).unwrap();
-            }
-        }
-    });
 }
 
 #[test]
@@ -1048,6 +1154,59 @@ fn each_tool_shows_its_options_and_the_strip_shows_the_eraser() {
 }
 
 #[test]
+fn a_click_paints_a_dot_at_once_and_a_stroke_has_no_taper_unless_asked() {
+    let path = sample("dot");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "notes");
+    assert_eq!(h.state().brush, "ink");
+    assert_eq!(
+        h.state().tuning.taper,
+        [0.0, 0.0],
+        "the brush in hand starts without a taper"
+    );
+    let at = canvas_at(&h, 200.0, 150.0);
+    h.hover_at(at);
+    h.run_steps(1);
+    h.drag_at(at);
+    h.run_steps(1);
+    let touched = h.state().buffer.touched().len();
+    assert!(touched > 0, "the press alone lays paint, before any drag");
+    h.drop_at(at);
+    h.run_steps(3);
+    let marks = h.state().scene.active_marks().to_vec();
+    assert_eq!(marks.len(), 1, "a click leaves one mark");
+    let dot = marks[0].as_stroke().unwrap();
+    assert_eq!(dot.taper, [0.0, 0.0]);
+    let (a, b) = (canvas_at(&h, 60.0, 300.0), canvas_at(&h, 260.0, 300.0));
+    pen_line(&mut h, a, b);
+    let line = h
+        .state()
+        .scene
+        .active_marks()
+        .last()
+        .and_then(|m| m.as_stroke().cloned())
+        .unwrap();
+    assert_eq!(line.taper, [0.0, 0.0]);
+    let bounds = klad_core::stroke::Mark::Stroke(line).bounds().unwrap();
+    assert!(
+        bounds[0] <= 60.0 && bounds[2] >= 260.0,
+        "the line covers from where the press began to where it was let go: {bounds:?}"
+    );
+    h.state_mut().tuning.taper = [12.0, 12.0];
+    let (a, b) = (canvas_at(&h, 60.0, 340.0), canvas_at(&h, 260.0, 340.0));
+    pen_line(&mut h, a, b);
+    let asked = h
+        .state()
+        .scene
+        .active_marks()
+        .last()
+        .and_then(|m| m.as_stroke().cloned())
+        .unwrap();
+    assert_eq!(asked.taper, [12.0, 12.0], "a taper set in the more menu is used");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn a_stroke_in_a_flipped_view_lands_under_the_pen() {
     let path = sample("flip");
     let mut h = harness(editor(&path), vec2(1440.0, 900.0));
@@ -1147,7 +1306,7 @@ fn settle(h: &mut Harness<'static, Editor>, done: impl Fn(&Editor) -> bool) {
     assert!(done(h.state()), "the editor did not settle");
 }
 
-fn drag(h: &mut Harness<'static, Editor>, from: egui::Pos2, to: egui::Pos2) {
+pub(super) fn drag(h: &mut Harness<'static, Editor>, from: egui::Pos2, to: egui::Pos2) {
     h.hover_at(from);
     h.run_steps(1);
     h.drag_at(from);
@@ -1455,6 +1614,7 @@ fn several_shapes_select_with_shift_or_a_lasso_move_together_align_and_distribut
 fn a_pixel_layer_is_added_shows_its_marks_hard_and_keeps_brush_strokes_out() {
     let path = sample("pixel-layer");
     let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    h.state_mut().show_pane(Pane::Inspector);
     activate(&mut h, "notes");
     assert!(h.state().can_run(Cmd::NewPixelLayer).is_none());
     h.state_mut().invoke(Cmd::NewPixelLayer).unwrap();
@@ -1524,7 +1684,7 @@ fn a_pixel_layer_is_added_shows_its_marks_hard_and_keeps_brush_strokes_out() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-fn pixel_sample(name: &str) -> PathBuf {
+pub(super) fn pixel_sample(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("draw-ui-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut bundle = Bundle::blank(
@@ -2691,13 +2851,35 @@ fn layer_rows_drag_rename_duplicate_group_and_delete() {
     activate(&mut h, "rim");
     h.state_mut().invoke(Cmd::RenameLayer).unwrap();
     h.run_steps(2);
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    assert!(
+        h.query_all(By::new().role(Role::Label).label("rename"))
+            .next()
+            .is_none(),
+        "the row shows the name to type over, not the word rename"
+    );
+    h.event(egui::Event::Text("rim light".into()));
     h.run_steps(1);
-    h.get_by_role_and_label(Role::TextInput, "rename")
-        .type_text("rim light");
-    h.run_steps(1);
+    assert_eq!(
+        h.get_by_role_and_label(Role::TextInput, "rename")
+            .accesskit_node()
+            .value()
+            .as_deref(),
+        Some("rim light"),
+        "the name was selected, so typing replaces it"
+    );
     h.key_press(egui::Key::Enter);
     h.run_steps(2);
+    assert_eq!(top_down(&h)[0], "rim light");
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Fill, "the keys work again once the name is kept");
+    h.state_mut().invoke(Cmd::RenameLayer).unwrap();
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_press(egui::Key::B);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Brush, "and after Esc left the name as it was");
     assert_eq!(top_down(&h)[0], "rim light");
     activate(&mut h, "lines");
     h.state_mut().invoke(Cmd::DuplicateLayer).unwrap();
@@ -2781,11 +2963,678 @@ fn timeline_cells_select_by_dragging_copy_paste_move_and_open_the_clip() {
         geom.cell_centre(14, 0),
     );
     h.run_steps(2);
-    assert!(starts(&h).contains(&(14, Some(4))), "{:?}", starts(&h));
+    assert!(
+        starts(&h).contains(&(11, Some(4))),
+        "a drag from the dot of a frame that is not selected selects: {:?}",
+        starts(&h)
+    );
+    assert_eq!(h.state().timeline.span.as_ref().map(|s| (s.from, s.to)), Some((11, 14)));
+    drag(
+        &mut h,
+        geom.cell_centre(11, 0) + vec2(3.0, 0.0),
+        geom.cell_centre(14, 0),
+    );
+    h.run_steps(2);
+    assert!(
+        starts(&h).contains(&(14, Some(4))),
+        "the dot of a selected frame moves its drawing: {:?}",
+        starts(&h)
+    );
     h.state_mut().go_to(3).unwrap();
     h.state_mut().invoke(Cmd::ClipSettings).unwrap();
     h.run_steps(2);
     assert!(h.query_all(By::new().label_contains("Clip walk")).count() > 0);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+fn said(h: &Harness<'static, Editor>) -> String {
+    h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default()
+}
+
+fn marks_on(h: &Harness<'static, Editor>, layer: &Layer) -> usize {
+    layer
+        .cels()
+        .iter()
+        .map(|c| {
+            h.state()
+                .scene
+                .bundle
+                .read_marks(&layer.id, &c.id)
+                .map_or(0, |m| m.len())
+        })
+        .sum()
+}
+
+fn right_click(h: &mut Harness<'static, Editor>, at: egui::Pos2) {
+    h.hover_at(at);
+    h.run_steps(1);
+    [true, false].into_iter().for_each(|pressed| {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.run_steps(1);
+    });
+    h.run_steps(2);
+}
+
+#[test]
+fn frame_keys_wait_for_the_timeline_and_cmd_d_repeats_the_selected_frames() {
+    use super::Focus;
+    let path = sample("frame-keys");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let frames = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.timeline.frames;
+    let shown = |h: &Harness<'static, Editor>, name: &str| -> Vec<(u32, Option<u32>)> {
+        layer_named(h, name).cels().iter().map(|c| (c.frame, c.hold)).collect()
+    };
+    assert_eq!(h.state().focus, Focus::Canvas);
+    h.key_press(Key::Equals);
+    h.run_steps(2);
+    assert_eq!(frames(&h), 24, "+ changes nothing while the canvas has the keys");
+    assert!(
+        said(&h).contains("timeline key") && said(&h).contains("Frame > Hold longer"),
+        "and says where it works: {}",
+        said(&h)
+    );
+    h.key_press(Key::I);
+    h.run_steps(2);
+    assert_eq!(shown(&h, "lines"), [(0, None)]);
+    assert!(said(&h).contains("Frame > Insert frame"), "{}", said(&h));
+    h.state_mut().invoke(Cmd::HoldLonger).unwrap();
+    h.run_steps(2);
+    assert_eq!(frames(&h), 25, "the menu still runs it from anywhere");
+    h.state_mut().invoke(Cmd::HoldShorter).unwrap();
+    h.run_steps(2);
+    assert_eq!(frames(&h), 24);
+
+    let geom = h.state().timeline.geom.unwrap();
+    click_with(&mut h, geom.cell_centre(0, 0), Modifiers::NONE);
+    assert_eq!(
+        h.state().focus,
+        Focus::Timeline,
+        "a click on a frame gives the timeline the keys"
+    );
+    let before: Vec<_> = LAYERS.iter().map(|name| shown(&h, name)).collect();
+    h.key_press(Key::Equals);
+    h.run_steps(2);
+    assert_eq!(
+        frames(&h),
+        25,
+        "+ makes a drawing that runs to the end one frame longer"
+    );
+    h.key_press(Key::Minus);
+    h.run_steps(2);
+    assert_eq!(frames(&h), 24, "and - takes exactly that back");
+    assert_eq!(
+        LAYERS.iter().map(|name| shown(&h, name)).collect::<Vec<_>>(),
+        before,
+        "on every layer"
+    );
+
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(2);
+    let span = h.state().timeline.span.clone().expect("cmd A selects the frames");
+    assert_eq!((span.from, span.to), (0, 23));
+    assert!(span.rows.len() >= LAYERS.len(), "{:?}", span.rows);
+    let lines = layer_named(&h, "lines").id.clone();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(3);
+    assert_eq!(
+        frames(&h),
+        48,
+        "cmd D repeats the selected frames after themselves: {}",
+        said(&h)
+    );
+    assert_eq!(shown(&h, "lines"), [(0, None), (24, Some(24))]);
+    let copy = layer_named(&h, "lines").cels()[1].clone();
+    assert!(copy.link.is_none(), "as a copy, not a link");
+    assert_eq!(h.state().scene.bundle.read_marks(&lines, &copy.id).unwrap().len(), 2);
+    let span = h.state().timeline.span.clone().unwrap();
+    assert_eq!(
+        (span.from, span.to, h.state().scene.frame),
+        (24, 47, 24),
+        "the copies are selected"
+    );
+    assert!(said(&h).contains("frames 0 to 23"), "{}", said(&h));
+
+    h.key_press(Key::Delete);
+    h.run_steps(3);
+    assert_eq!(shown(&h, "lines"), [(0, None)], "Delete takes the selected drawings");
+    assert!(
+        said(&h).contains("drawings in the selected frames (cmd Z brings them back)"),
+        "and says so: {}",
+        said(&h)
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    h.state_mut().timeline.span = None;
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(3);
+    assert_eq!(
+        shown(&h, "lines").len(),
+        3,
+        "with no frames selected cmd D copies the drawing under the playhead: {:?}",
+        shown(&h, "lines")
+    );
+
+    h.key_press(Key::B);
+    h.run_steps(2);
+    let spot = canvas_at(&h, 450.0, 350.0);
+    click_with(&mut h, spot, Modifiers::NONE);
+    assert_eq!(
+        h.state().focus,
+        Focus::Canvas,
+        "a press on the canvas gives the keys back"
+    );
+    let cels = shown(&h, "lines");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::D);
+    h.run_steps(2);
+    assert_eq!(shown(&h, "lines"), cels, "cmd D on the canvas leaves the frames alone");
+    assert!(
+        said(&h).contains("select strokes (S) or a shape (V) first"),
+        "{}",
+        said(&h)
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_bar_at_a_selection_acts_on_the_canvas_even_after_a_click_in_the_timeline() {
+    use super::Focus;
+    let path = sample("bar-focus");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(3);
+    let geom = h.state().timeline.geom.unwrap();
+    click_with(&mut h, geom.cell_centre(0, 0), Modifiers::NONE);
+    assert_eq!(h.state().focus, Focus::Timeline);
+    assert!(h.state().picked.is_some(), "the strokes stay selected");
+    let bin = crate::theme::hints(&h.ctx)
+        .into_iter()
+        .find(|(_, text)| text.starts_with("delete the selection"))
+        .map(|(rect, _)| rect)
+        .expect("the bar at the selection has a delete button");
+    click_with(&mut h, bin.center(), Modifiers::NONE);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().focus,
+        Focus::Canvas,
+        "a press on the bar gives the canvas the keys"
+    );
+    assert_eq!(
+        (
+            layer_named(&h, "lines").cels().len(),
+            marks_on(&h, layer_named(&h, "lines"))
+        ),
+        (1, 0),
+        "its delete takes the selected strokes and leaves the drawing in the timeline"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_right_click_on_the_canvas_moves_what_is_selected_to_a_new_layer() {
+    let path = sample("to-new-layer");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let layers = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.all_layers().len();
+    let before = layers(&h);
+    let spot = canvas_at(&h, 450.0, 350.0);
+    right_click(&mut h, spot);
+    let item = h
+        .query_all_by_label("Move to new layer")
+        .next()
+        .expect("a right click on the canvas opens a menu");
+    assert!(
+        item.accesskit_node().is_disabled(),
+        "greyed out while nothing is selected"
+    );
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(2);
+    right_click(&mut h, spot);
+    h.get_by_label("Move to new layer").click();
+    h.run_steps(3);
+    assert_eq!(layers(&h), before + 1, "{}", said(&h));
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        (made.name.as_str(), made.kind(), marks_on(&h, &made)),
+        ("lines part", klad_core::doc::Kind::Paint, 2),
+        "both strokes are on the new layer, which is the active one"
+    );
+    assert_eq!(marks_on(&h, layer_named(&h, "lines")), 0, "and gone from the old one");
+    let order: Vec<String> = top_down(&h);
+    let place = |name: &str| order.iter().position(|n| n == name).unwrap();
+    assert_eq!(place("lines part") + 1, place("lines"), "right above it: {order:?}");
+    assert_eq!(
+        h.state().picked.as_ref().map(|p| p.ids.len()),
+        Some(2),
+        "they stay selected"
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        (layers(&h), marks_on(&h, layer_named(&h, "lines"))),
+        (before, 2),
+        "one undo puts them back"
+    );
+
+    activate(&mut h, "shapes");
+    let id = layer_named(&h, "shapes").cels()[0].nodes[0].id.clone();
+    h.state_mut().tool = Tool::Select;
+    h.state_mut().picked = None;
+    h.state_mut().selection = Some(id.clone());
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::MoveToNewLayer).unwrap();
+    h.run_steps(3);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        (made.name.as_str(), made.kind()),
+        ("shapes part", klad_core::doc::Kind::Vector)
+    );
+    assert_eq!(
+        made.cels()[0].nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+        std::slice::from_ref(&id),
+        "a shape moves as it is, with its id"
+    );
+    assert!(layer_named(&h, "shapes").cels()[0].nodes.is_empty());
+    assert_eq!(h.state().selection, Some(id));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn shapes_copy_and_paste_and_the_keys_say_why_when_they_cannot() {
+    let path = sample("shape-copy");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "shapes");
+    let shapes = layer_named(&h, "shapes").id.clone();
+    let nodes = |h: &Harness<'static, Editor>| {
+        h.state().scene.bundle.doc.layer(&shapes).unwrap().cels()[0]
+            .nodes
+            .clone()
+    };
+    let id = nodes(&h)[0].id.clone();
+    h.state_mut().tool = Tool::Select;
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::C);
+    h.run_steps(2);
+    assert!(
+        said(&h).contains("select strokes (S) or a shape (V) first"),
+        "cmd C with nothing selected says what to do: {}",
+        said(&h)
+    );
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+    h.run_steps(2);
+    assert!(said(&h).contains("nothing is copied yet"), "{}", said(&h));
+    h.state_mut().selection = Some(id.clone());
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::C);
+    h.run_steps(2);
+    assert!(said(&h).contains("copied one shape"), "{}", said(&h));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+    h.run_steps(3);
+    let now = nodes(&h);
+    assert_eq!(now.len(), 2, "cmd V pastes the shape: {}", said(&h));
+    assert_eq!(now[1].shape, now[0].shape, "in place");
+    assert_ne!(now[1].id, id);
+    assert_eq!(
+        h.state().selection,
+        Some(now[1].id.clone()),
+        "the copy is the selection"
+    );
+    assert!(said(&h).contains("pasted one shape"), "{}", said(&h));
+
+    activate(&mut h, "lines");
+    let before = h.state().scene.bundle.doc.all_layers().len();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+    h.run_steps(3);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(h.state().scene.bundle.doc.all_layers().len(), before + 1);
+    assert_eq!(
+        (made.kind(), made.cels()[0].nodes.len(), made.id != shapes),
+        (klad_core::doc::Kind::Vector, 1, true),
+        "pasted while a paint layer is active, the shape gets a vector layer of its own above it"
+    );
+    assert!(said(&h).contains("on a new vector layer above lines"), "{}", said(&h));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_shape_drawn_on_a_paint_layer_gets_a_vector_layer_of_its_own() {
+    let path = sample("auto-vector");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "colour");
+    let before = h.state().scene.bundle.doc.all_layers().len();
+    h.key_press(Key::U);
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("it goes on a new vector layer above this one")
+            .count()
+            > 0,
+        "the options bar says where the shape will go"
+    );
+    let (from, to) = (canvas_at(&h, 200.0, 120.0), canvas_at(&h, 320.0, 220.0));
+    drag(&mut h, from, to);
+    h.run_steps(3);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        before + 1,
+        "{}",
+        said(&h)
+    );
+    assert_eq!(
+        (made.kind(), made.name.as_str(), made.cels()[0].nodes.len()),
+        (klad_core::doc::Kind::Vector, "shapes 2", 1)
+    );
+    assert!(
+        said(&h).contains("rectangle added on a new vector layer above colour"),
+        "{}",
+        said(&h)
+    );
+    let (from, to) = (canvas_at(&h, 60.0, 260.0), canvas_at(&h, 160.0, 330.0));
+    drag(&mut h, from, to);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        before + 1,
+        "the next shape lands on that layer"
+    );
+    assert_eq!(h.state().scene.active_layer().unwrap().cels()[0].nodes.len(), 2);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_colour_panel_mixes_in_hsl_rgb_and_lab_and_keeps_the_choice() {
+    let path = sample("colour-models");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut().set_colour([0.2, 0.4, 0.6, 1.0]);
+    h.run_steps(2);
+    assert!(
+        h.query_by_role_and_label(Role::Slider, "V").is_some(),
+        "the wheel's own numbers show first"
+    );
+    let slide = |h: &mut Harness<'static, Editor>, name: &str, across: f32| {
+        let rect = h.get_by_role_and_label(Role::Slider, name).rect();
+        let at = egui::pos2(rect.left() + rect.width() * across, rect.center().y);
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(2);
+    };
+    h.get_by_label("RGB").click();
+    h.run_steps(2);
+    assert_eq!(
+        h.state().settings.colour_model,
+        crate::color::Model::Rgb,
+        "the choice goes into the settings"
+    );
+    slide(&mut h, "R", 1.0);
+    assert_eq!(crate::color::hex(h.state().color), "#ff6699", "R all the way up");
+    slide(&mut h, "B", 0.0);
+    assert_eq!(crate::color::hex(h.state().color), "#ff6600");
+
+    h.get_by_label("HSL").click();
+    h.run_steps(2);
+    slide(&mut h, "L", 0.0);
+    assert_eq!(crate::color::hex(h.state().color), "#000000", "lightness 0 is black");
+    slide(&mut h, "L", 0.5);
+    assert_eq!(
+        crate::color::hex(h.state().color),
+        "#ff6600",
+        "and the hue and saturation are still there when the lightness comes back"
+    );
+
+    h.get_by_label("Lab").click();
+    h.state_mut().set_colour([0.6, 0.45, 0.35, 1.0]);
+    h.run_steps(2);
+    let lab = klad_core::color::to_lab(h.state().color);
+    slide(&mut h, "L", 0.25);
+    let darker = klad_core::color::to_lab(h.state().color);
+    assert!(
+        (darker[0] - 25.0).abs() < 1.5 && (darker[1] - lab[1]).abs() < 3.0 && (darker[2] - lab[2]).abs() < 3.0,
+        "L alone makes a darker shade of the same colour: {lab:?} {darker:?}"
+    );
+    slide(&mut h, "A", 0.5);
+    assert!((h.state().color[3] - 0.5).abs() < 0.02, "A sets how see-through it is");
+    audit(&h, "the colour panel in Lab");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_recolour_button_opens_a_picker_with_the_palette() {
+    let path = sample("recolour-picker");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut()
+        .apply(parse_lines(r##"{"op":"palette","add":"#3060c0","name":"sea"}"##).unwrap())
+        .unwrap();
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.state_mut().pick_new_colour([1.0, 0.5, 0.0, 1.0]);
+    h.run_steps(3);
+    let lines = layer_named(&h, "lines").clone();
+    let colours = |h: &Harness<'static, Editor>| -> Vec<String> {
+        h.state()
+            .scene
+            .bundle
+            .read_marks(&lines.id, &lines.cels()[0].id)
+            .unwrap()
+            .iter()
+            .map(|m| klad_core::color::to_hex(m.color()))
+            .collect()
+    };
+    let before = colours(&h);
+    h.get_by_role_and_label(Role::Button, "the colour of the selected strokes")
+        .click();
+    h.run_steps(3);
+    let wheels = |h: &Harness<'static, Editor>| h.query_all_by_label("colour wheel").count();
+    assert_eq!(colours(&h), before, "the button opens a picker and changes nothing yet");
+    assert_eq!(wheels(&h), 2, "a wheel of its own beside the Colour panel's");
+    assert_eq!(
+        h.query_all_by_label("palette").count(),
+        2,
+        "with the drawing's palette in it"
+    );
+    audit(&h, "the recolour picker");
+    h.query_all(By::new().role(Role::Button).label("#3060c0"))
+        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .expect("the palette colour in the picker over the canvas")
+        .click();
+    h.run_steps(3);
+    assert_eq!(
+        colours(&h),
+        ["#3060c0", "#3060c0"],
+        "a palette colour recolours the selection"
+    );
+    assert_eq!(
+        crate::color::hex(h.state().color),
+        "#ff8000",
+        "and leaves the colour you paint with alone"
+    );
+    assert_eq!(wheels(&h), 2, "the picker stays open for another try");
+    h.get_by_label("use the current colour").click();
+    h.run_steps(3);
+    let close = |hex: &String, to: &str| {
+        let (a, b) = (
+            crate::color::to_srgb(crate::color::rgba_of(hex).unwrap()),
+            crate::color::to_srgb(crate::color::rgba_of(to).unwrap()),
+        );
+        a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 1)
+    };
+    assert!(
+        colours(&h).iter().all(|c| close(c, "#ff8000")),
+        "the colour in hand is one click away: {:?}",
+        colours(&h)
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert_eq!(colours(&h), ["#3060c0", "#3060c0"], "each choice is one undo step");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn windows_open_in_the_middle_and_stay_where_they_are_put() {
+    let path = sample("middle");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let middle = egui::pos2(720.0, 500.0);
+    let window = |h: &Harness<'static, Editor>, title: &str| {
+        h.query_all_by_label_contains(title)
+            .find(|n| n.accesskit_node().role() == Role::Window)
+            .map(|n| n.rect())
+            .unwrap_or_else(|| panic!("no window {title}"))
+    };
+    [
+        (Cmd::Export, "Export image"),
+        (Cmd::ExportGif, "Export GIF"),
+        (Cmd::OnionSettings, "Onion skin"),
+        (Cmd::AddFont, "Add a font"),
+        (Cmd::ClipSettings, "Clip walk"),
+    ]
+    .into_iter()
+    .for_each(|(cmd, title)| {
+        h.state_mut().invoke(cmd).unwrap();
+        h.run_steps(6);
+        let rect = window(&h, title);
+        assert!(
+            (rect.center() - middle).length() < 4.0,
+            "{title} opens in the middle of the window: {rect:?}"
+        );
+        h.state_mut().invoke(cmd).unwrap();
+        h.run_steps(2);
+    });
+    h.state_mut().invoke(Cmd::Export).unwrap();
+    h.run_steps(6);
+    h.state_mut().invoke(Cmd::ExportGodotWindow).unwrap();
+    h.run_steps(6);
+    let rect = window(&h, "Export for Godot");
+    assert!(
+        (rect.center() - middle).length() < 4.0,
+        "choosing another export while one is open shows that one in the middle too: {rect:?}"
+    );
+    let grab = egui::pos2(rect.center().x, rect.top() + 14.0);
+    drag(&mut h, grab, grab + vec2(-200.0, -120.0));
+    h.run_steps(3);
+    let moved = window(&h, "Export for Godot");
+    assert!(
+        (moved.center() - rect.center() - vec2(-200.0, -120.0)).length() < 4.0,
+        "a window stays where it is dragged: {moved:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn each_export_shows_only_what_it_uses_and_says_where_the_file_went() {
+    use super::export::What;
+    use crate::jobs::Tag;
+    let path = sample("export-kinds");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let has = |h: &Harness<'static, Editor>, label: &str| h.query_all_by_label(label).count() > 0;
+    h.state_mut().invoke(Cmd::Export).unwrap();
+    h.run_steps(4);
+    assert!(has(&h, "folder") && has(&h, "save as") && has(&h, "16 bits per channel"));
+    assert!(
+        !has(&h, "frames") && !has(&h, "Godot folder") && !has(&h, "padding px"),
+        "one image has no frames to name and nothing of Godot's or the sheet's"
+    );
+    audit(&h, "the export window for an image");
+    h.state_mut().invoke(Cmd::ExportSheet).unwrap();
+    h.run_steps(4);
+    assert!(h.state().exporting(What::Sheet) && has(&h, "frames") && has(&h, "padding px"));
+    h.state_mut().invoke(Cmd::ExportGodotWindow).unwrap();
+    h.run_steps(4);
+    assert!(has(&h, "Godot folder") && has(&h, "an animated sprite") && has(&h, "cast shadows"));
+    assert!(!has(&h, "folder") && !has(&h, "16 bits per channel") && !has(&h, "frames"));
+    audit(&h, "the export window for Godot");
+
+    h.state_mut().invoke(Cmd::Export).unwrap();
+    h.run_steps(3);
+    let out = path
+        .parent()
+        .unwrap()
+        .join(format!("export-kinds-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    {
+        let form = &mut h.state_mut().export;
+        form.folder = out.display().to_string();
+        form.name = "hero".into();
+    }
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("hero.png").count() > 0,
+        "the window says where the file will go before it is written"
+    );
+    hush(&mut h);
+    h.get_by_role_and_label(Role::Button, "Export").click();
+    h.run_steps(2);
+    settle(&mut h, |ed| !ed.jobs.busy(Tag::Export));
+    h.run_steps(3);
+    assert!(
+        out.join("hero.png").is_file(),
+        "the folder is made and the file has the name typed"
+    );
+    assert!(
+        said(&h).starts_with("exported to ") && said(&h).ends_with("hero.png"),
+        "the message is where the file is, in plain words: {}",
+        said(&h)
+    );
+    assert!(has(&h, "Show the folder"), "and the window offers to open that folder");
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_turned_view_snaps_with_shift_and_goes_back_upright_from_the_canvas_or_a_key() {
+    let path = sample("twist");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let angle = |h: &Harness<'static, Editor>| h.state().view.unwrap().angle.to_degrees();
+    let twist = |h: &mut Harness<'static, Editor>, degrees: f32, modifiers: Modifiers| {
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        h.hover_at(canvas_at(h, 256.0, 192.0));
+        h.event(egui::Event::Rotate(degrees.to_radians()));
+        h.run_steps(2);
+        h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(1);
+    };
+    assert!(h.query_all_by_label_contains("upright").count() == 0);
+    twist(&mut h, 23.0, Modifiers::NONE);
+    assert!(
+        (angle(&h) - 23.0).abs() < 0.01,
+        "a twist turns the view freely: {}",
+        angle(&h)
+    );
+    assert!(
+        h.query_all_by_label_contains("view turned 23").count() > 0,
+        "and a note on the canvas says it is turned"
+    );
+    twist(&mut h, 4.0, Modifiers::SHIFT);
+    assert!(
+        (angle(&h) - 30.0).abs() < 0.01,
+        "with shift it snaps to 15 degree steps: {}",
+        angle(&h)
+    );
+    h.key_press(Key::R);
+    h.run_steps(2);
+    assert!((angle(&h) - 45.0).abs() < 0.01);
+    h.get_by_label_contains("upright").click();
+    h.run_steps(3);
+    assert!(angle(&h).abs() < 0.01, "the button on the canvas puts it back");
+    assert!(h.query_all_by_label_contains("upright").count() == 0, "and goes away");
+    twist(&mut h, -40.0, Modifiers::NONE);
+    h.key_press_modifiers(Modifiers::ALT, Key::R);
+    h.run_steps(2);
+    assert!(angle(&h).abs() < 0.01, "alt R does the same");
+    twist(&mut h, 1.5, Modifiers::NONE);
+    assert!(
+        angle(&h).abs() < 0.01,
+        "a twist that ends close to upright rests upright"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -2859,6 +3708,7 @@ fn notes_stay_one_line_inside_the_pane_and_done_ones_clear_together() {
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
     [
         (Pane::Tool, true),
+        (Pane::Brush, true),
         (Pane::Layers, true),
         (Pane::Inspector, true),
         (Pane::Notes, false),
@@ -2909,9 +3759,7 @@ fn a_note_pinned_on_the_canvas_is_marked_done_by_the_agent_and_edited_from_its_p
     let path = sample("notes");
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
     h.state_mut().go_to(12).unwrap();
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Notes) {
-        p.collapsed = false;
-    }
+    h.state_mut().show_pane(Pane::Notes);
     h.state_mut().tool = Tool::Note;
     h.run_steps(3);
     let c = h.state().canvas_rect.center();
@@ -3227,6 +4075,11 @@ fn the_eraser_has_a_feather_slider_that_stays_and_reaches_its_strokes() {
         "it stays when the eraser comes back"
     );
     let c = h.state().canvas_rect.center();
+    h.key_press(Key::B);
+    h.run_steps(2);
+    pen_line(&mut h, c + vec2(-60.0, 0.0), c + vec2(60.0, 0.0));
+    h.key_press(Key::E);
+    h.run_steps(2);
     pen_line(&mut h, c + vec2(-40.0, 0.0), c + vec2(40.0, 0.0));
     let marks = h.state().scene.active_marks().to_vec();
     let brush = marks
@@ -3303,9 +4156,7 @@ fn a_checkout_under_the_open_editor_shows_the_drawing_it_brings() {
 fn an_agent_edit_while_the_editor_is_open_shows_in_the_history_and_keeps_its_author() {
     let path = sample("agent-row");
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::History) {
-        p.collapsed = false;
-    }
+    h.state_mut().show_pane(Pane::History);
     h.run_steps(3);
     Bundle::open(&path)
         .unwrap()
@@ -3552,9 +4403,42 @@ fn the_pen_draws_closed_and_open_paths_on_a_vector_layer() {
         h.drop_at(p);
         h.run_steps(1);
     };
+    let layers = h.state().scene.bundle.doc.all_layers().len();
     click(&mut h, at(300.0, 100.0));
-    let refused = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
-    assert!(refused.contains("vector layer"), "{refused}");
+    click(&mut h, at(380.0, 140.0));
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    let made = h.state().scene.active_layer().unwrap().clone();
+    assert_eq!(
+        (made.kind(), made.name.as_str(), made.cels()[0].nodes.len()),
+        (klad_core::doc::Kind::Vector, "paths", 1),
+        "a path drawn on a paint layer goes on a new vector layer, which becomes the active one"
+    );
+    assert_eq!(h.state().scene.bundle.doc.all_layers().len(), layers + 1);
+    let order: Vec<String> = h
+        .state()
+        .scene
+        .bundle
+        .doc
+        .layers
+        .iter()
+        .map(|l| l.name.clone())
+        .collect();
+    let place = |name: &str| order.iter().position(|n| n == name).unwrap();
+    assert_eq!(
+        place("paths").abs_diff(place("lines")),
+        1,
+        "right next to the layer in hand: {order:?}"
+    );
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert!(said.contains("on a new vector layer above lines"), "{said}");
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        layers,
+        "one undo takes the path and its layer back"
+    );
     activate(&mut h, "shapes");
     let nodes = |h: &Harness<'static, Editor>| layer_named(h, "shapes").cels()[0].nodes.clone();
     let before = nodes(&h).len();
@@ -3638,7 +4522,7 @@ fn the_brush_window_edits_a_brush_shows_it_and_saves_it_in_the_drawing() {
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
     activate(&mut h, "lines");
     h.key_press(Key::F5);
-    h.run_steps(3);
+    h.run_steps(10);
     assert!(h.state().windows.brush);
     let shown = |h: &Harness<'static, Editor>| h.state().brush_window_preview_key();
     let before = shown(&h);
@@ -3676,7 +4560,7 @@ fn the_brush_window_edits_a_brush_shows_it_and_saves_it_in_the_drawing() {
         "drawn with the edited brush as a variant: {drawn}"
     );
     h.key_press(Key::F5);
-    h.run_steps(2);
+    h.run_steps(10);
     h.state_mut().brush_window.name = "Wet Dry".into();
     h.get_by_role_and_label(Role::Button, "save in this drawing").click();
     h.run_steps(3);
@@ -4131,6 +5015,9 @@ fn heavy_edits_and_revisits_keep_the_ui_free() {
 fn a_closed_panel_comes_back_from_the_strip() {
     let path = sample("panels");
     let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    h.state_mut().show_pane(Pane::Inspector);
+    h.run_steps(2);
+    assert_eq!(h.state().is_on(Cmd::InspectorPane), Some(true));
     h.state_mut().invoke(Cmd::InspectorPane).unwrap();
     h.run_steps(2);
     assert!(!h.state().settings.layout.is_open(Pane::Inspector));
@@ -4189,6 +5076,7 @@ fn strokes_select_move_and_copy_across_cmd_clicked_layers() {
     assert_eq!(h.state().also, vec!["l5".to_string()]);
     h.key_press(Key::S);
     h.run_steps(2);
+    h.state_mut().select_box = false;
     let view = h.state().view.unwrap();
     let rect = h.state().canvas_rect;
     let at = |x: f32, y: f32| rect.min + view.to_screen(egui::Vec2::new(x, y), rect.size());
@@ -4324,7 +5212,176 @@ fn a_lasso_cut_spans_the_selected_layers() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-fn canvas_at(h: &Harness<'static, Editor>, x: f32, y: f32) -> egui::Pos2 {
+fn marks_at(h: &Harness<'static, Editor>, layer: &str, frame: u32) -> Vec<klad_core::stroke::Mark> {
+    let bundle = &h.state().scene.bundle;
+    match bundle.doc.layer(layer).and_then(|l| l.content_at(frame)) {
+        Some(cel) => bundle.read_marks(layer, &cel.id).unwrap(),
+        None => Vec::new(),
+    }
+}
+
+fn in_hand(h: &Harness<'static, Editor>) -> String {
+    h.state().scene.active_id().unwrap()
+}
+
+fn pick(h: &mut Harness<'static, Editor>, parts: &[&str], cut: Option<Vec<[f32; 2]>>) {
+    let whole = cut.is_none();
+    let of = |h: &Harness<'static, Editor>, layer: &str| {
+        let cel = h.state().scene.bundle.doc.layer(layer).unwrap().content_at(0).unwrap();
+        let ids: Vec<u32> = marks_at(h, layer, 0).iter().map(klad_core::stroke::Mark::id).collect();
+        (cel.id.clone(), if whole { ids } else { Vec::new() })
+    };
+    let (cel, ids) = of(h, parts[0]);
+    let more = parts[1..]
+        .iter()
+        .map(|layer| {
+            let (cel, ids) = of(h, layer);
+            super::Part {
+                layer: layer.to_string(),
+                cel,
+                ids,
+            }
+        })
+        .collect();
+    h.state_mut().tool = Tool::Strokes;
+    h.state_mut().picked = Some(Picked { cel, ids, cut, more });
+    if !whole {
+        h.state_mut().refresh_cut();
+    }
+    h.run_steps(2);
+}
+
+fn run_all(h: &mut Harness<'static, Editor>, cmds: &[Cmd]) {
+    cmds.iter().for_each(|cmd| {
+        h.state_mut().invoke(*cmd).unwrap();
+        h.run_steps(3);
+    });
+}
+
+fn starts_of(marks: &[klad_core::stroke::Mark]) -> Vec<(f32, f32)> {
+    marks
+        .iter()
+        .filter_map(|m| m.as_stroke().map(|s| s.samples[0].pos()))
+        .collect()
+}
+
+#[test]
+fn what_was_copied_is_pasted_whatever_happened_to_the_original() {
+    let path = sample("copied-then-deleted");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let before = marks_at(&h, "l6", 0);
+    pick(&mut h, &["l6"], None);
+    run_all(&mut h, &[Cmd::Copy, Cmd::Delete, Cmd::NewPaintLayer, Cmd::Paste]);
+    let said = h.state().messages.latest().map(|m| (m.tone, m.text.clone())).unwrap();
+    assert_eq!(said.0, Tone::Done, "{}", said.1);
+    let new = in_hand(&h);
+    assert_ne!(new, "l6");
+    assert!(marks_at(&h, "l6", 0).is_empty(), "the originals are deleted");
+    assert_eq!(
+        starts_of(&marks_at(&h, &new, 0)),
+        starts_of(&before),
+        "the strokes are on the new layer as they were copied"
+    );
+    run_all(&mut h, &[Cmd::Undo, Cmd::Undo, Cmd::Undo]);
+    assert_eq!(marks_at(&h, "l6", 0).len(), before.len());
+    activate(&mut h, "lines");
+    pick(&mut h, &["l6"], None);
+    run_all(&mut h, &[Cmd::Copy]);
+    let address = klad_core::markedit::address(&h.state().scene.active_cel().unwrap(), before[0].id());
+    h.state_mut()
+        .apply(parse_lines(&format!(r#"{{"op":"transform","ids":["{address}"],"x":70}}"#)).unwrap())
+        .unwrap();
+    h.run_steps(2);
+    assert_ne!(starts_of(&marks_at(&h, "l6", 0)), starts_of(&before));
+    run_all(&mut h, &[Cmd::NewPaintLayer, Cmd::Paste]);
+    assert_eq!(
+        starts_of(&marks_at(&h, &in_hand(&h), 0)),
+        starts_of(&before),
+        "a stroke moved after the copy is pasted as it was copied"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn parts_cut_out_by_a_loop_are_pasted_after_they_were_deleted() {
+    let path = sample("copied-parts");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let before = marks_at(&h, "l6", 0).len();
+    let left = vec![[0.0, 0.0], [200.0, 0.0], [200.0, 384.0], [0.0, 384.0]];
+    pick(&mut h, &["l6"], Some(left));
+    run_all(&mut h, &[Cmd::Copy, Cmd::Delete]);
+    let kept = marks_at(&h, "l6", 0).len();
+    run_all(&mut h, &[Cmd::NewPaintLayer, Cmd::Paste]);
+    let said = h.state().messages.latest().map(|m| (m.tone, m.text.clone())).unwrap();
+    assert_eq!(said.0, Tone::Done, "{}", said.1);
+    let new = in_hand(&h);
+    assert_eq!(
+        marks_at(&h, "l6", 0).len(),
+        kept,
+        "nothing is put back on the old layer"
+    );
+    assert_eq!(marks_at(&h, &new, 0).len(), before, "the parts are on the new layer");
+    let cel = h.state().scene.active_cel().unwrap();
+    let drawn = h.state().scene.raster_of(&cel).unwrap();
+    assert!(
+        drawn.occupied().next().is_some(),
+        "and they are the parts that were inside the loop, not empty marks"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn strokes_copied_from_several_layers_land_on_the_layer_in_hand_or_stay_on_their_own() {
+    let path = sample("copied-layers");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut()
+        .apply(
+            parse_lines(r##"{"op":"stroke","layer":"l5","path":"M50 60 L280 210","size":20,"color":"#d08040"}"##)
+                .unwrap(),
+        )
+        .unwrap();
+    activate(&mut h, "lines");
+    let (lines, colour) = (marks_at(&h, "l6", 0).len(), marks_at(&h, "l5", 0).len());
+    pick(&mut h, &["l6", "l5"], None);
+    run_all(&mut h, &[Cmd::Copy, Cmd::NewPaintLayer, Cmd::Paste]);
+    let new = in_hand(&h);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap();
+    assert_eq!(
+        (
+            marks_at(&h, "l6", 0).len(),
+            marks_at(&h, "l5", 0).len(),
+            marks_at(&h, &new, 0).len()
+        ),
+        (lines, colour, lines + colour),
+        "on another layer everything lands on the layer in hand: {said}"
+    );
+    assert_eq!(
+        starts_of(&marks_at(&h, &new, 0))[0],
+        starts_of(&marks_at(&h, "l5", 0))[0],
+        "the strokes of the lower layer come first, so they stay under the others"
+    );
+    activate(&mut h, "lines");
+    run_all(&mut h, &[Cmd::Paste]);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap();
+    assert_eq!(
+        (
+            marks_at(&h, "l6", 0).len(),
+            marks_at(&h, "l5", 0).len(),
+            marks_at(&h, &new, 0).len()
+        ),
+        (lines * 2, colour * 2, lines + colour),
+        "on one of their own layers each goes to the layer it came from: {said}"
+    );
+    assert!(
+        said.contains("lines") && said.contains("colour"),
+        "and the message names the layers: {said}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+pub(super) fn canvas_at(h: &Harness<'static, Editor>, x: f32, y: f32) -> egui::Pos2 {
     let view = h.state().view.unwrap();
     let rect = h.state().canvas_rect;
     rect.min + view.to_screen(egui::Vec2::new(x, y), rect.size())
@@ -4398,9 +5455,12 @@ fn a_selected_shape_turns_into_a_repeat_and_back() {
     use klad_core::doc::Shape;
     let path = sample("wrap");
     let mut h = harness(editor(&path), vec2(1440.0, 1200.0));
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
-        p.collapsed = false;
-    }
+    [Pane::Tool, Pane::Brush].into_iter().for_each(|pane| {
+        if let Some(p) = h.state_mut().settings.layout.pane_mut(pane) {
+            p.collapsed = true;
+        }
+    });
+    h.state_mut().show_pane(Pane::Inspector);
     activate(&mut h, "shapes");
     let rect = h.state().scene.bundle.doc.find_layer("shapes").unwrap().cels()[0].nodes[0]
         .id
@@ -4512,9 +5572,11 @@ fn holding_d_builds_a_plane_per_layer_and_the_inspector_sets_depth_and_fog() {
 fn an_imported_picture_lands_on_its_own_layer_and_can_be_a_reference() {
     let path = sample("picture");
     let mut h = harness(editor(&path), vec2(1440.0, 1200.0));
-    if let Some(p) = h.state_mut().settings.layout.pane_mut(Pane::Inspector) {
-        p.collapsed = false;
-    }
+    [Pane::Tool, Pane::Brush].into_iter().for_each(|pane| {
+        if let Some(p) = h.state_mut().settings.layout.pane_mut(pane) {
+            p.collapsed = true;
+        }
+    });
     activate(&mut h, "lines");
     let rgba = klad_render::assets::Rgba {
         width: 4,
@@ -4642,10 +5704,11 @@ fn the_cli_only_features_run_from_the_editor_and_give_what_the_cli_gives() {
     assert_eq!(h.state().fonts(), ["Phosphor.ttf"]);
 
     h.state_mut().invoke(Cmd::Export).unwrap();
-    h.state_mut().export.out = base.join("ours.png").to_string_lossy().to_string();
+    h.state_mut().export.folder = base.to_string_lossy().to_string();
+    h.state_mut().export.name = "ours".into();
     h.run_steps(2);
     hush(&mut h);
-    h.get_by_role_and_label(Role::Button, "export").click();
+    h.get_by_role_and_label(Role::Button, "Export").click();
     h.run_steps(2);
     settle(&mut h, idle(Tag::Export));
     run(&[
@@ -4681,7 +5744,7 @@ fn the_brush_window_feathers_and_frays_a_round_brush() {
     activate(&mut h, "lines");
     h.state_mut().pick("ink");
     h.key_press(Key::F5);
-    h.run_steps(3);
+    h.run_steps(10);
     assert!(h.state().windows.brush);
     ["feather", "fringe"].iter().for_each(|label| {
         let track = h.get_by_role_and_label(Role::Slider, label).rect();
@@ -4734,7 +5797,7 @@ fn paint_with_body_from_the_brush_window_lit_by_a_relief_turned_with_its_dial() 
     activate(&mut h, "lines");
     h.state_mut().pick("oil");
     h.key_press(Key::F5);
-    h.run_steps(3);
+    h.run_steps(10);
     assert!(h.state().windows.brush);
     let track = h.get_by_role_and_label(Role::Slider, "body").rect();
     let at = egui::pos2(track.left() + track.width() * 0.9, track.center().y);
@@ -4968,6 +6031,267 @@ fn text_is_typed_on_the_canvas_and_edited_in_place() {
 }
 
 #[test]
+fn a_drawing_put_back_as_another_folder_stays_open_and_one_that_is_gone_asks_to_close() {
+    let path = sample("put-back");
+    let shelf = path.with_extension("shelf");
+    let away = shelf.join("put-back");
+    let _ = std::fs::remove_dir_all(&shelf);
+    std::fs::create_dir_all(&shelf).unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    let before = h.state().scene.total_marks();
+    std::fs::rename(&path, &away).unwrap();
+    copy_dir(&away, &path);
+    std::fs::create_dir_all(path.join(".cache")).unwrap();
+    std::fs::copy(klad_core::here::path(&away), klad_core::here::path(&path)).unwrap();
+    Bundle::open(&path)
+        .unwrap()
+        .apply(&parse_lines(r#"{"op":"stroke","layer":"l6","path":"M10 10 L90 90","size":6}"#).unwrap())
+        .unwrap();
+    h.run_steps(6);
+    assert!(h.state().wants.is_none(), "the drawing stays open");
+    assert_eq!(
+        h.state().scene.total_marks(),
+        before + 1,
+        "and shows what the folder that was put back holds"
+    );
+    let (from, to) = (canvas_at(&h, 100.0, 300.0), canvas_at(&h, 300.0, 320.0));
+    drag(&mut h, from, to);
+    h.run_steps(4);
+    let on_disk = |path: &Path| Bundle::open(path).unwrap().read_marks("l6", "c6").unwrap().len();
+    assert_eq!((on_disk(&path), on_disk(&away)), (before + 2, before));
+    std::fs::remove_dir_all(&path).unwrap();
+    h.run_steps(3);
+    assert!(
+        matches!(h.state().wants, Some(super::Want::Gone)),
+        "a drawing whose folder is gone asks to be closed"
+    );
+    let (from, to) = (canvas_at(&h, 100.0, 100.0), canvas_at(&h, 300.0, 120.0));
+    drag(&mut h, from, to);
+    h.run_steps(20);
+    assert!(!path.exists(), "and nothing makes the folder again");
+    let _ = std::fs::remove_dir_all(&shelf);
+}
+
+#[test]
+fn making_a_map_layer_is_one_step_to_undo_with_the_maps_it_turned_on() {
+    let path = sample("map-one-undo");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    let maps_on = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.maps.is_some();
+    let role = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.find_layer("lines").unwrap().map;
+    let layers = |h: &Harness<'static, Editor>| h.state().scene.bundle.doc.all_layers().len();
+    let count = layers(&h);
+    assert!(!maps_on(&h));
+    h.state_mut().invoke(Cmd::MakeMapLayer).unwrap();
+    h.run_steps(3);
+    assert!(maps_on(&h) && role(&h).is_some(), "the command turns the maps on too");
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert!(
+        !maps_on(&h) && role(&h).is_none(),
+        "one undo takes back the whole command"
+    );
+    h.state_mut().invoke(Cmd::Redo).unwrap();
+    h.run_steps(3);
+    assert!(maps_on(&h) && role(&h).is_some());
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    h.state_mut().invoke(Cmd::NewMapLayer).unwrap();
+    h.run_steps(3);
+    assert!(maps_on(&h) && layers(&h) == count + 1);
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    assert!(
+        !maps_on(&h) && layers(&h) == count,
+        "and so does one undo of a new map layer"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_editor_never_writes_over_what_was_changed_in_the_folder_a_moment_ago() {
+    let path = sample("stale");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    h.state_mut().watch = None;
+    let agent = |line: &str| {
+        Bundle::open(&path).unwrap().apply(&parse_lines(line).unwrap()).unwrap();
+    };
+    let on_disk = || Bundle::open(&path).map(|b| b.doc);
+    let lines = |doc: &Document| doc.layer("l6").map(|l| l.cels()[0].id.clone()).unwrap();
+    let marks = || {
+        let bundle = Bundle::open(&path).unwrap();
+        bundle.read_marks("l6", &lines(&bundle.doc)).unwrap().len()
+    };
+    let agrees = |h: &Harness<'static, Editor>, what: &str| {
+        let disk = on_disk().unwrap_or_else(|e| panic!("{what}: the drawing no longer opens: {e:#}"));
+        assert_eq!(
+            serde_json::to_value(&h.state().scene.bundle.doc).unwrap(),
+            serde_json::to_value(&disk).unwrap(),
+            "{what}: the editor and the folder hold the same drawing"
+        );
+    };
+    let before = marks();
+
+    agent(r#"{"op":"stroke","layer":"l6","path":"M10 10 L90 90","size":6}"#);
+    let (from, to) = (canvas_at(&h, 100.0, 300.0), canvas_at(&h, 300.0, 320.0));
+    drag(&mut h, from, to);
+    h.run_steps(4);
+    assert_eq!(
+        marks(),
+        before + 2,
+        "a stroke right after the agent's keeps both strokes"
+    );
+    agrees(&h, "a stroke");
+
+    agent(r#"{"op":"add","layer":{"kind":"paint","name":"from the agent","cels":[{"frame":0}]}}"#);
+    h.state_mut().invoke(Cmd::NewVectorLayer).unwrap();
+    h.run_steps(3);
+    let doc = on_disk().unwrap();
+    assert!(
+        doc.find_layer("from the agent").is_ok()
+            && doc.all_layers().len() == h.state().scene.bundle.doc.all_layers().len(),
+        "a new layer right after the agent's keeps both layers"
+    );
+    agrees(&h, "a new layer");
+
+    let count = on_disk().unwrap().all_layers().len();
+    agent(r#"{"op":"rm","id":"l2"}"#);
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(3);
+    let doc = on_disk().unwrap_or_else(|e| panic!("an undo right after the agent removed a layer: {e:#}"));
+    assert_eq!(
+        doc.all_layers().len(),
+        count,
+        "the undo takes back the agent's step, once"
+    );
+    agrees(&h, "an undo");
+
+    agent(r#"{"op":"stroke","layer":"l6","path":"M20 10 L90 60","size":6}"#);
+    let address = klad_core::markedit::address(&lines(&h.state().scene.bundle.doc), 1);
+    h.state_mut()
+        .apply(parse_lines(&format!(r#"{{"op":"transform","ids":["{address}"],"x":5}}"#)).unwrap())
+        .unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        marks(),
+        before + 3,
+        "a change right after the agent's stroke keeps that stroke"
+    );
+    agrees(&h, "a change of a stroke");
+
+    agent(r#"{"op":"set","id":"l5","name":"renamed by the agent"}"#);
+    h.state_mut().invoke(Cmd::NewClip).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        on_disk().unwrap().layer("l5").unwrap().name,
+        "renamed by the agent",
+        "a timeline change right after the agent's rename keeps the name"
+    );
+    agrees(&h, "a new clip");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+fn text_shows(doc: &klad_core::doc::Document, id: &str) -> Option<bool> {
+    match doc.item(id) {
+        Some(klad_core::doc::Item::Node(_, _, n)) => Some(n.visible),
+        _ => None,
+    }
+}
+
+fn open_text(h: &mut Harness<'static, Editor>, at: egui::Pos2) {
+    h.key_press(Key::T);
+    h.run_steps(2);
+    click(h, at);
+    h.run_steps(2);
+}
+
+#[test]
+fn a_text_open_for_editing_is_never_saved_hidden() {
+    let path = sample("text-open-saved");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let at = canvas_at(&h, 200.0, 150.0);
+    open_text(&mut h, at);
+    h.event(egui::Event::Text("Hello".into()));
+    h.run_steps(1);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    let id = texts(&h)[0].0.clone();
+    let on = canvas_at(&h, 215.0, 145.0);
+    let on_disk = |path: &Path| Bundle::open(path).unwrap().doc;
+    [
+        (Cmd::NewPaintLayer, "a new layer"),
+        (Cmd::Undo, "an undo"),
+        (Cmd::Redo, "a redo"),
+        (Cmd::NewClip, "a new clip"),
+    ]
+    .into_iter()
+    .for_each(|(cmd, what)| {
+        open_text(&mut h, on);
+        assert_eq!(
+            h.state().text_edit.as_ref().and_then(|t| t.id.clone()),
+            Some(id.clone()),
+            "the text is open before {what}"
+        );
+        assert_eq!(
+            text_shows(&h.state().scene.bundle.doc, &id),
+            Some(false),
+            "the open text is out of the picture, so its words do not show twice"
+        );
+        h.state_mut().run_later(cmd);
+        h.run_steps(3);
+        assert_eq!(
+            text_shows(&on_disk(&path), &id),
+            Some(true),
+            "{what} while the text is open saves the text as it is, not hidden"
+        );
+        assert!(h.state().text_edit.is_some(), "{what} leaves the text open");
+        assert_eq!(
+            text_shows(&h.state().scene.bundle.doc, &id),
+            Some(false),
+            "after {what} the open text is out of the picture again"
+        );
+        h.key_press(Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().text_edit.is_none());
+        assert_eq!(
+            serde_json::to_value(&h.state().scene.bundle.doc).unwrap(),
+            serde_json::to_value(on_disk(&path)).unwrap(),
+            "after {what} and Esc the editor and the file hold the same drawing"
+        );
+        assert_eq!(text_shows(&on_disk(&path), &id), Some(true));
+    });
+    open_text(&mut h, on);
+    h.event(egui::Event::Text("more".into()));
+    h.run_steps(1);
+    let before = h.state().scene.bundle.doc.rev;
+    (0..40).for_each(|_| {
+        if text_shows(&h.state().scene.bundle.doc, &id).is_some() {
+            h.state_mut().run_later(Cmd::Undo);
+            h.run_steps(2);
+        }
+    });
+    assert_ne!(h.state().scene.bundle.doc.rev, before);
+    assert_eq!(
+        text_shows(&on_disk(&path), &id),
+        None,
+        "the step that made the text is undone"
+    );
+    h.run_steps(2);
+    assert!(
+        h.state().text_edit.is_none(),
+        "a text that is no longer in the drawing is no longer open"
+    );
+    assert_eq!(
+        serde_json::to_value(&h.state().scene.bundle.doc).unwrap(),
+        serde_json::to_value(on_disk(&path)).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn first_steps_tick_as_a_shape_is_drawn_filled_and_handed_to_an_agent() {
     let path = sample("first-steps");
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
@@ -5049,9 +6373,20 @@ fn the_menu_bar_reaches_commands_shows_their_state_and_greys_what_cannot_run() {
     h.get_by_label("File").click();
     h.run_steps(2);
     assert!(h.query_by_label("Close cmd W").is_some(), "items carry their keys");
-    h.get_by_label("Export… cmd E").click();
+    h.hover_at(item(&h, "Export").center());
     h.run_steps(3);
-    assert!(h.state().windows.export, "File > Export… opens the export window");
+    h.get_by_label("Image… cmd E").click();
+    h.run_steps(3);
+    assert!(
+        h.state().exporting(super::export::What::Image),
+        "File > Export > Image… opens the export window on a single image"
+    );
+    assert!(
+        h.query_all_by_label_contains("Export image").count() > 0 && h.query_by_label("Godot folder").is_none(),
+        "the window is named after what it writes and shows nothing of the other kinds"
+    );
+    h.state_mut().windows.export = false;
+    h.run_steps(2);
     assert!(h.state().settings.layout.timeline);
     h.get_by_label("Window").click();
     h.run_steps(2);
@@ -5793,6 +7128,7 @@ fn bones_are_picked_from_the_list_and_the_canvas_and_edited_in_place() {
 fn a_layer_is_keyed_from_the_inspector_and_eases_between_its_keys() {
     let path = sample("keyed-layer");
     let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.state_mut().show_pane(Pane::Inspector);
     activate(&mut h, "lines");
     let id = h.state().scene.active_id().unwrap();
     h.state_mut()
@@ -6451,8 +7787,16 @@ fn shine_glow_and_z_are_set_in_layer_settings_and_the_maps_are_checked_and_expor
     h.state_mut().windows.export = true;
     h.run_steps(3);
     h.get_by_role_and_label(Role::CheckBox, "normal").click();
-    h.get_by_role_and_label(Role::CheckBox, "shadows").click();
     h.run_steps(2);
+    assert!(
+        h.query_by_label("cast shadows").is_none(),
+        "what only Godot uses is not in the sheet's window"
+    );
+    h.state_mut().export.what = super::export::What::Godot;
+    h.run_steps(6);
+    h.get_by_role_and_label(Role::CheckBox, "cast shadows").click();
+    h.run_steps(2);
+    h.state_mut().export.what = super::export::What::Sheet;
     let form = h.state().export.clone();
     assert_eq!(form.maps, vec![klad_render::maps::Map::Normal]);
     assert!(form.occluders);
@@ -6915,4 +8259,1046 @@ fn shine_fog_ambient_and_fill_squares_open_the_picker_with_the_current_colour() 
         "the fill takes the current colour"
     );
     let _ = std::fs::remove_dir_all(&path);
+}
+
+fn drawing_of(path: &Path, name: &str) -> (serde_json::Value, Vec<usize>, String) {
+    let bundle = Bundle::open(path).unwrap();
+    let layer = bundle.doc.find_layer(name).unwrap().clone();
+    let marks: Vec<Vec<klad_core::stroke::Mark>> = layer
+        .cels()
+        .iter()
+        .map(|c| bundle.read_marks(&layer.id, &c.id).unwrap_or_default())
+        .collect();
+    let mut value = serde_json::to_value(&layer).unwrap();
+    value.as_object_mut().unwrap().remove("locked");
+    value["frames"] = serde_json::json!(bundle.doc.timeline.frames);
+    (value, marks.iter().map(Vec::len).collect(), format!("{marks:?}"))
+}
+
+#[test]
+fn a_locked_layer_does_not_change_until_it_is_unlocked() {
+    let path = sample("locked-layer");
+    let lines = Bundle::open(&path).unwrap().doc.find_layer("lines").unwrap().id.clone();
+    Bundle::open(&path)
+        .unwrap()
+        .apply(&parse_lines(&format!(r#"{{"op":"set","id":"{lines}","locked":true}}"#)).unwrap())
+        .unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let before = drawing_of(&path, "lines");
+    assert_eq!(before.1, vec![2], "the sample's lines layer holds two strokes");
+    let select = |h: &mut Harness<'static, Editor>| {
+        h.key_press(Key::Escape);
+        h.state_mut().invoke(Cmd::FirstFrame).unwrap();
+        h.state_mut().invoke(Cmd::Shapes).unwrap();
+        h.run_steps(2);
+        let at = canvas_at(h, 170.0, 120.0);
+        click_with(h, at, Modifiers::NONE);
+        h.run_steps(3);
+        if h.state().picked.is_none() {
+            ready(h);
+            click_with(h, at, Modifiers::NONE);
+        }
+        assert!(
+            h.state().picked.is_some(),
+            "the strokes of a locked layer can still be selected"
+        );
+    };
+    let tried: Vec<String> = [
+        Cmd::Delete,
+        Cmd::NudgeRight,
+        Cmd::Recolour,
+        Cmd::FlipH,
+        Cmd::TurnLeft90,
+        Cmd::Thinner,
+        Cmd::Thicker,
+        Cmd::MoveToNewLayer,
+        Cmd::NewDrawingAfter,
+        Cmd::Duplicate,
+        Cmd::DeleteDrawing,
+        Cmd::HoldLonger,
+        Cmd::HoldShorter,
+        Cmd::InsertFrame,
+        Cmd::RemoveFrame,
+        Cmd::MoveLater,
+    ]
+    .into_iter()
+    .filter_map(|cmd| {
+        select(&mut h);
+        let heard = h.state().messages.latest().map(|m| (m.id, m.times));
+        h.state_mut().run_later(cmd);
+        h.run_steps(3);
+        let now = drawing_of(&path, "lines");
+        let message = h.state().messages.latest().filter(|m| Some((m.id, m.times)) != heard);
+        let named = message.is_some_and(|m| m.tone == Tone::Refused && m.text.contains("lines is locked"));
+        let found = (now != before || !named).then(|| {
+            format!(
+                "{}: {}{}",
+                cmd.spec().id,
+                if now != before { "changed the layer, " } else { "" },
+                message.map_or("said nothing".to_string(), |m| format!(
+                    "said {:?} {:?}",
+                    m.tone, m.text
+                ))
+            )
+        });
+        (0..3).for_each(|_| {
+            if drawing_of(&path, "lines") != before {
+                h.state_mut().invoke(Cmd::Undo).unwrap();
+                h.run_steps(3);
+            }
+        });
+        assert_eq!(
+            drawing_of(&path, "lines"),
+            before,
+            "{}: undo brings the layer back",
+            cmd.spec().id
+        );
+        found
+    })
+    .collect();
+    assert!(
+        tried.is_empty(),
+        "a locked layer changed, or the refusal did not name the lock: {tried:#?}"
+    );
+    h.key_press(Key::ArrowLeft);
+    h.run_steps(3);
+    assert_eq!(
+        drawing_of(&path, "lines"),
+        before,
+        "the arrow keys do not move a locked layer's strokes"
+    );
+    h.state_mut().invoke(Cmd::ToggleLocked).unwrap();
+    h.run_steps(3);
+    select(&mut h);
+    h.state_mut().invoke(Cmd::Delete).unwrap();
+    h.run_steps(3);
+    assert_eq!(
+        drawing_of(&path, "lines").1,
+        vec![1],
+        "once unlocked, Delete removes the stroke"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn with_a_mask_picked_the_pen_the_shape_tool_and_the_text_tool_draw_on_a_new_layer_above_the_masked_one() {
+    let path = sample("mask-vector");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let pick_the_mask = |h: &mut Harness<'static, Editor>| {
+        let shade = h.state().scene.bundle.doc.find_layer("shade").unwrap().id.clone();
+        let Some(klad_core::doc::Loc::Layer(at)) = h.state().scene.bundle.doc.locate(&shade) else {
+            panic!("no shade layer");
+        };
+        h.state_mut()
+            .activate([at, vec![klad_core::doc::MASK]].concat())
+            .unwrap();
+        h.run_steps(2);
+        ready(h);
+        assert!(h.state().scene.active_is_mask());
+    };
+    let made: Vec<String> = [Cmd::Pen, Cmd::ShapeTool, Cmd::TextTool]
+        .into_iter()
+        .map(|tool| {
+            pick_the_mask(&mut h);
+            h.state_mut().invoke(tool).unwrap();
+            h.run_steps(2);
+            let heard = h.state().messages.latest().map(|m| (m.id, m.times));
+            let (a, b) = (canvas_at(&h, 200.0, 150.0), canvas_at(&h, 280.0, 210.0));
+            match tool {
+                Cmd::ShapeTool => drag(&mut h, a, b),
+                Cmd::Pen => {
+                    click_with(&mut h, a, Modifiers::NONE);
+                    click_with(&mut h, b, Modifiers::NONE);
+                    h.key_press(Key::Enter);
+                }
+                _ => {
+                    click_with(&mut h, a, Modifiers::NONE);
+                    h.event(egui::Event::Text("hi".to_string()));
+                    h.run_steps(1);
+                    h.key_press(Key::Escape);
+                }
+            }
+            h.run_steps(3);
+            let message = h.state().messages.latest().filter(|m| Some((m.id, m.times)) != heard);
+            assert!(
+                message.is_none_or(|m| m.tone != Tone::Error),
+                "{tool:?} ends in an error: {:?}",
+                message.map(|m| m.text.clone())
+            );
+            let doc = &Bundle::open(&path).unwrap().doc;
+            let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+            let shade = names.iter().position(|n| *n == "shade").unwrap();
+            let above = doc.layers.get(shade + 1).unwrap();
+            assert_eq!(above.kind(), klad_core::doc::Kind::Vector, "{tool:?}: {names:?}");
+            assert_eq!(
+                above.cels()[0].nodes.len(),
+                1,
+                "{tool:?}: what was drawn is on the new layer"
+            );
+            assert!(
+                doc.find_layer("shade").unwrap().mask.is_some(),
+                "the mask stays with its layer"
+            );
+            above.name.clone()
+        })
+        .collect();
+    assert_eq!(made, ["paths", "shapes 2", "text"]);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn messages_lie_under_windows_wrap_and_a_press_on_an_error_paints_nothing() {
+    let path = sample("messages-under");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "colour");
+    h.state_mut().invoke(Cmd::Brush).unwrap();
+    let long = "exported to ~/game/art/creature.png and 3 more files beside it (note: the scene places the timeline's origin on the node's position; note: the sprite frames hold every clip with its own speed)";
+    h.state_mut().say(Tone::Error, "the first thing went wrong");
+    h.state_mut().say(Tone::Error, long);
+    h.run_steps(3);
+    let held: Vec<Rect> = ["the first thing went wrong", long]
+        .iter()
+        .filter_map(|text| h.query_by_label(text).map(|n| n.rect()))
+        .collect();
+    assert_eq!(held.len(), 2, "both errors are on the canvas");
+    assert!(
+        held.iter().all(|r| r.width() <= 380.0),
+        "a long message wraps instead of running across the window: {held:?}"
+    );
+    let before = h.state().scene.total_marks();
+    drag(&mut h, held[0].center(), held[0].center() + vec2(40.0, 0.0));
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.total_marks(),
+        before,
+        "a press on an error message paints nothing"
+    );
+    h.state_mut().invoke(Cmd::MessageLog).unwrap();
+    h.run_steps(4);
+    let windows: Vec<(egui::LayerId, Rect)> = h.ctx.memory(|m| {
+        m.layer_ids()
+            .filter(|l| l.order == egui::Order::Middle && m.areas().is_visible(l))
+            .filter_map(|l| m.area_rect(l.id).map(|r| (l, r)))
+            .collect()
+    });
+    let covered: Vec<(egui::Pos2, Option<egui::LayerId>, egui::LayerId)> = held
+        .iter()
+        .flat_map(|r| {
+            [
+                r.left_top() + vec2(8.0, 8.0),
+                r.center(),
+                r.right_bottom() - vec2(8.0, 8.0),
+            ]
+        })
+        .filter_map(|p| {
+            windows
+                .iter()
+                .rev()
+                .find(|(_, r)| r.contains(p))
+                .map(|(l, _)| (p, h.ctx.layer_id_at(p), *l))
+        })
+        .collect();
+    assert!(
+        !covered.is_empty(),
+        "the message log opens over the messages in this window"
+    );
+    assert!(
+        covered.iter().all(|(_, at, window)| *at == Some(*window)),
+        "where a window lies over a message, the window is on top: {covered:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+fn bar_cuts(h: &Harness<'static, Editor>) -> Vec<String> {
+    let canvas = h.state().canvas_rect;
+    theme::hint_parts(&h.ctx)
+        .into_iter()
+        .filter(|(rect, _, _)| rect.bottom() <= canvas.top() + 1.0 && rect.center().x > canvas.left())
+        .filter(|(rect, _, _)| rect.left() < canvas.right() - 1.0 && rect.top() > 20.0)
+        .filter(|(rect, seen, _)| seen.width() < rect.width() - 1.0)
+        .map(|(_, _, hint)| hint)
+        .collect()
+}
+
+#[test]
+fn a_tools_bar_moves_what_does_not_fit_to_its_next_row_and_keeps_its_hint_on_one_line() {
+    let painted = sample("bar-rows");
+    let pixels = pixel_sample("bar-rows-pixels");
+    [
+        (&painted, Cmd::Brush, ""),
+        (&painted, Cmd::Eraser, ""),
+        (&painted, Cmd::Fill, "click inside lines to fill"),
+        (&painted, Cmd::Strokes, "click strokes, or drag around them"),
+        (&pixels, Cmd::Brush, "draws whole pixels"),
+    ]
+    .into_iter()
+    .for_each(|(path, tool, hint)| {
+        let mut h = harness(editor(path), vec2(1280.0, 720.0));
+        h.state_mut().invoke(tool).unwrap();
+        h.run_steps(4);
+        let cut = bar_cuts(&h);
+        assert!(cut.is_empty(), "{tool:?}: cut off at the bar's edge: {cut:?}");
+        if hint.is_empty() {
+            return;
+        }
+        let canvas = h.state().canvas_rect;
+        let line = h.ctx.global_style().spacing.interact_size.y + 2.0;
+        let note = h
+            .query_all(By::new().predicate(move |n| {
+                n.label().is_some_and(|l| l.starts_with(hint)) || n.value().is_some_and(|v| v.starts_with(hint))
+            }))
+            .map(|n| n.rect())
+            .next()
+            .unwrap_or_else(|| panic!("{tool:?}: its hint is not in the bar"));
+        assert!(
+            note.height() <= line && note.bottom() <= canvas.top() + 1.0 && note.right() <= canvas.right() + 1.0,
+            "{tool:?}: its hint is not one line in the bar: {note:?}, bar ends at {:.0}, line {line:.0}",
+            canvas.top()
+        );
+    });
+    let _ = std::fs::remove_dir_all(&painted);
+    let _ = std::fs::remove_dir_all(&pixels);
+}
+
+fn window_rects(h: &Harness<'static, Editor>) -> Vec<Rect> {
+    h.ctx.memory(|m| {
+        m.layer_ids()
+            .filter(|l| l.order == egui::Order::Middle && m.areas().is_visible(l))
+            .filter_map(|l| m.area_rect(l.id))
+            .collect()
+    })
+}
+
+#[test]
+fn windows_fit_above_the_status_line_open_at_their_size_and_a_second_opens_beside_the_first() {
+    let path = sample("windows-fit");
+    let mut h = harness(editor(&path), vec2(1280.0, 720.0));
+    let before = window_rects(&h).len();
+    h.state_mut().invoke(Cmd::BrushWindow).unwrap();
+    let shown: Vec<Rect> = (0..10)
+        .filter_map(|_| {
+            h.run_steps(1);
+            let rects = window_rects(&h);
+            (rects.len() > before).then(|| rects[rects.len() - 1])
+        })
+        .collect();
+    let first = *shown.last().expect("the brush window opens");
+    let screen = h.ctx.content_rect();
+    let above = screen.bottom() - layout::STATUS;
+    assert!(
+        first.top() >= screen.top() && first.bottom() <= above + 0.5,
+        "the brush window {first:?} is not inside the window above the status line ({above:.0})"
+    );
+    let grew: Vec<f32> = shown.iter().map(|r| r.height().round()).collect();
+    assert!(
+        grew.iter().all(|g| (g - first.height().round()).abs() <= 1.0),
+        "the brush window unfolds while it opens: heights {grew:?}"
+    );
+    let cross = theme::hint_parts(&h.ctx)
+        .into_iter()
+        .find(|(_, _, hint)| hint.starts_with("close") && hint.contains("Brush"))
+        .expect("the brush window has a cross");
+    assert!(
+        cross.1.height() >= cross.0.height() - 1.0 && screen.contains_rect(cross.0),
+        "the brush window's cross is out of sight: {cross:?}"
+    );
+    h.state_mut().invoke(Cmd::About).unwrap();
+    h.run_steps(10);
+    let both = window_rects(&h);
+    assert_eq!(both.len(), before + 2, "two windows are open");
+    let second = both
+        .iter()
+        .find(|r| (r.min - first.min).length() > 0.5 || (r.max - first.max).length() > 0.5)
+        .copied()
+        .unwrap();
+    assert!(
+        (second.center() - first.center()).length() >= 24.0,
+        "the second window opens over the first: {first:?} and {second:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_menu_longer_than_the_window_scrolls_to_its_last_item() {
+    let path = sample("menu-scrolls");
+    let mut h = harness(editor(&path), vec2(1280.0, 420.0));
+    h.ctx
+        .all_styles_mut(|s| s.scroll_animation = egui::style::ScrollAnimation::none());
+    ready(&mut h);
+    let labels = |h: &Harness<'static, Editor>| -> Vec<(String, Rect)> {
+        h.query_all(By::new().predicate(|n| matches!(n.role(), Role::Button | Role::CheckBox) && n.label().is_some()))
+            .map(|n| (n.accesskit_node().label().unwrap_or_default().to_string(), n.rect()))
+            .collect()
+    };
+    let before = labels(&h);
+    h.get_by_label("Layer").click();
+    h.run_steps(4);
+    let window = h.ctx.content_rect();
+    let items: Vec<(String, Rect)> = labels(&h)
+        .into_iter()
+        .filter(|(l, r)| !before.iter().any(|(b, br)| b == l && (br.min - r.min).length() < 0.5))
+        .collect();
+    let out: Vec<String> = items
+        .iter()
+        .filter(|(_, r)| !window.contains_rect(*r))
+        .map(|(l, _)| l.clone())
+        .collect();
+    assert!(
+        !out.is_empty(),
+        "the Layer menu fits a 420 point window: the test needs a shorter one"
+    );
+    let middle = items
+        .iter()
+        .map(|(_, r)| r.intersect(window))
+        .fold(Rect::NOTHING, Rect::union)
+        .center();
+    let mut reached: Vec<bool> = vec![false; out.len()];
+    (0..40).for_each(|_| {
+        h.event(egui::Event::PointerMoved(middle));
+        h.run_steps(1);
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -60.0),
+            modifiers: Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(2);
+        let now = labels(&h);
+        out.iter().zip(reached.iter_mut()).for_each(|(l, seen)| {
+            *seen |= now.iter().any(|(n, r)| n == l && window.contains_rect(*r));
+        });
+    });
+    let still: Vec<&String> = out.iter().zip(&reached).filter(|(_, s)| !**s).map(|(l, _)| l).collect();
+    assert!(
+        still.is_empty(),
+        "scrolling the menu does not bring these in: {still:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_editor_says_why_a_command_cannot_run_in_plain_words() {
+    let path = sample("plain-words");
+    Bundle::open(&path)
+        .unwrap()
+        .apply(
+            &parse_lines(
+                r#"{"op":"add","layer":{"kind":"vector","name":"photo","reference":true,"cels":[{"frame":0}]}}
+{"op":"add","mask":{"id":"m1"},"in":"l1"}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    activate(&mut h, "lines");
+    let no_ids = |text: &str| {
+        !text.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| {
+            w.len() > 1 && matches!(w.as_bytes()[0], b'c' | b'l' | b'n') && w[1..].chars().all(|c| c.is_ascii_digit())
+        }) && !text.contains(" ms")
+    };
+    let reasons: Vec<(Cmd, Option<String>)> = [Cmd::NewDrawing, Cmd::NextDrawing, Cmd::PrevDrawing]
+        .into_iter()
+        .map(|cmd| (cmd, h.state().can_run(cmd)))
+        .collect();
+    reasons.iter().for_each(|(cmd, why)| {
+        let why = why
+            .as_deref()
+            .unwrap_or_else(|| panic!("{cmd:?} on one drawing runs and does nothing"));
+        assert!(no_ids(why), "{cmd:?}: {why}");
+    });
+    h.state_mut().invoke(Cmd::NewPaintLayer).unwrap();
+    h.run_steps(2);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert_eq!(said, "added a paint layer");
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert!(said.starts_with("undid: ") && no_ids(&said), "{said}");
+    let mask = {
+        let doc = &h.state().scene.bundle.doc;
+        let Some(klad_core::doc::Loc::Layer(at)) = doc.locate("l1") else {
+            panic!("no l1");
+        };
+        [at, vec![klad_core::doc::MASK]].concat()
+    };
+    h.state_mut().activate(mask).unwrap();
+    h.run_steps(2);
+    [Cmd::ToggleClip, Cmd::ShowGaps, Cmd::Refill]
+        .into_iter()
+        .for_each(|cmd| {
+            let why = h.state().can_run(cmd);
+            assert!(why.as_deref().is_some_and(no_ids), "{cmd:?} on a mask: {why:?}");
+        });
+    activate(&mut h, "photo");
+    h.state_mut().invoke(Cmd::ShapeTool).unwrap();
+    h.run_steps(2);
+    let (a, b) = (canvas_at(&h, 100.0, 100.0), canvas_at(&h, 180.0, 160.0));
+    drag(&mut h, a, b);
+    h.run_steps(3);
+    let doc = &h.state().scene.bundle.doc;
+    let photo = doc.find_layer("photo").unwrap();
+    assert!(
+        photo.cels()[0].nodes.is_empty(),
+        "a reference picture takes no shapes: it is left out of exports"
+    );
+    let said = h.state().messages.latest().map(|m| m.text.clone()).unwrap_or_default();
+    assert!(said.contains("on a new vector layer above photo"), "{said}");
+    let _ = std::fs::remove_dir_all(&path);
+
+    let pixels = pixel_sample("plain-words-pixels");
+    let mut h = harness(editor(&pixels), vec2(1440.0, 900.0));
+    h.state_mut().picked = None;
+    [Cmd::ShowGaps].into_iter().for_each(|cmd| {
+        let why = h.state().can_run(cmd);
+        assert!(why.as_deref().is_some_and(no_ids), "{cmd:?} on pixels: {why:?}");
+    });
+    let _ = std::fs::remove_dir_all(&pixels);
+}
+
+#[test]
+fn text_typed_on_a_sprite_starts_small_and_stays_drawn_at_any_zoom() {
+    let path = pixel_sample("typing-big");
+    let mut h = harness(editor(&path), vec2(1440.0, 900.0));
+    assert_eq!(
+        h.state().text_tool.size,
+        6.0,
+        "a 24 pixel high sprite starts text at 6 px"
+    );
+    h.state_mut().text_tool.size = 48.0;
+    let at = canvas_at(&h, 2.0, 20.0);
+    open_text(&mut h, at);
+    h.event(egui::Event::Text("klad typed big".into()));
+    h.run_steps(3);
+    let limit = h.ctx.input(|i| i.max_texture_side) as f32;
+    let shown = h
+        .state()
+        .text_edit
+        .as_ref()
+        .and_then(|t| t.shown.as_ref())
+        .and_then(|(_, made)| made.as_ref())
+        .map(|(handle, at)| (handle.size(), *at));
+    let (size, at) = shown.expect("the text being typed is drawn");
+    assert!(
+        size.iter().all(|s| *s as f32 <= limit),
+        "its picture {size:?} fits the window's limit of {limit}"
+    );
+    assert!(
+        at.width() > limit / h.ctx.pixels_per_point(),
+        "it is drawn at its size on screen: {at:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn an_open_text_selects_takes_back_typing_and_lets_command_keys_through() {
+    let path = sample("text-keys");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let at = canvas_at(&h, 200.0, 150.0);
+    open_text(&mut h, at);
+    h.event(egui::Event::Text("hello world".into()));
+    h.run_steps(1);
+    let typed = |h: &Harness<'static, Editor>| h.state().text_edit.as_ref().map(|t| t.text.text.clone());
+    h.key_press_modifiers(Modifiers::SHIFT, Key::ArrowLeft);
+    h.key_press_modifiers(Modifiers::SHIFT, Key::ArrowLeft);
+    h.run_steps(1);
+    h.event(egui::Event::Text("LD".into()));
+    h.run_steps(1);
+    assert_eq!(
+        typed(&h).as_deref(),
+        Some("hello worLD"),
+        "shift and the arrows select, typing replaces"
+    );
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    h.event(egui::Event::Text("bye".into()));
+    h.run_steps(1);
+    assert_eq!(typed(&h).as_deref(), Some("bye"), "cmd A selects the whole text");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(1);
+    assert_eq!(typed(&h).as_deref(), Some("hello worLD"), "cmd Z takes back the typing");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::K);
+    h.run_steps(2);
+    assert!(
+        h.state().palette.is_some(),
+        "cmd K opens the finder while a text is open"
+    );
+    assert!(
+        h.state().text_edit.is_none(),
+        "the text is kept before the command runs"
+    );
+    assert!(texts(&h).iter().any(|(_, t)| t.text == "hello worLD"));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn grouping_a_clipped_layer_away_from_its_base_says_so() {
+    let path = sample("clip-group");
+    Bundle::open(&path)
+        .unwrap()
+        .apply(&parse_lines(r#"{"op":"set","id":"l2","clip":true}"#).unwrap())
+        .unwrap();
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    let name = h.state().scene.bundle.doc.layer("l2").unwrap().name.clone();
+    activate(&mut h, &name);
+    h.state_mut().invoke(Cmd::GroupLayer).unwrap();
+    h.run_steps(2);
+    let said: Vec<String> = h.state().messages.log().map(|m| m.text.clone()).collect();
+    assert!(
+        said.iter()
+            .any(|m| m.starts_with(&format!("{name} is clipped to the layer below"))),
+        "{said:?}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_drawing_the_agent_changed_last_opens_ready_to_pick_and_keys_a_laptop_has_reach_the_ends() {
+    let path = sample("opens-to-pick");
+    let mut bundle = Bundle::open(&path).unwrap();
+    bundle
+        .apply(&parse_lines(r#"{"op":"stroke","layer":"l6","path":"M40 300 L300 300","size":8}"#).unwrap())
+        .unwrap();
+    bundle.stamp("cli").unwrap();
+    let opened = Editor::open(egui::Context::default(), &path).unwrap();
+    assert_eq!(
+        opened.tool,
+        Tool::Select,
+        "the agent's drawing opens with select and move"
+    );
+    let mut h = harness(opened, vec2(1440.0, 1000.0));
+    h.state_mut().tool = Tool::Select;
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Select, "cmd A keeps select and move in hand");
+    h.state_mut().go_to(5).unwrap();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::ArrowLeft);
+    h.run_steps(2);
+    assert_eq!(h.state().scene.frame, 0, "cmd left goes to the first frame");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::ArrowRight);
+    h.run_steps(2);
+    assert_eq!(h.state().scene.frame, 23, "cmd right goes to the last frame");
+    let _ = std::fs::remove_dir_all(&path);
+
+    let shapes = std::env::temp_dir().join(format!("draw-ui-only-shapes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&shapes);
+    let mut doc = Document::new(256, 256);
+    doc.layers = vec![
+        Layer::vector("l1", "back", "c1", Vec::new()),
+        Layer::vector("l2", "front", "c2", Vec::new()),
+    ];
+    doc.next_id = 10;
+    Bundle::create(&shapes, doc).unwrap();
+    let ed = Editor::open(egui::Context::default(), &shapes).unwrap();
+    assert_eq!(
+        ed.scene.active_layer().map(|l| l.name.clone()).as_deref(),
+        Some("front"),
+        "a drawing of shapes opens with its top layer in hand"
+    );
+    let _ = std::fs::remove_dir_all(&shapes);
+}
+
+#[test]
+fn typing_is_one_step_to_take_back_and_undo_from_the_menu_takes_it_back_first() {
+    let path = sample("typing-undo");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    let at = canvas_at(&h, 200.0, 150.0);
+    open_text(&mut h, at);
+    let typed = |h: &Harness<'static, Editor>| h.state().text_edit.as_ref().map(|t| t.text.text.clone());
+    let type_out = |h: &mut Harness<'static, Editor>, words: &str| {
+        words.chars().for_each(|c| {
+            h.event(egui::Event::Text(c.to_string()));
+            h.run_steps(1);
+        });
+    };
+    type_out(&mut h, "hello world");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    type_out(&mut h, "bye");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(1);
+    assert_eq!(
+        typed(&h).as_deref(),
+        Some("hello world"),
+        "one cmd Z takes back the word typed over the selection, not one letter"
+    );
+    let rev = h.state().scene.bundle.doc.rev;
+    h.key_press(Key::End);
+    h.run_steps(1);
+    type_out(&mut h, " again");
+    h.state_mut().run_later(Cmd::Undo);
+    h.run_steps(2);
+    assert_eq!(
+        typed(&h).as_deref(),
+        Some("hello world"),
+        "Edit > Undo takes back the typing while the text is open"
+    );
+    assert_eq!(h.state().scene.bundle.doc.rev, rev, "and leaves the drawing as it is");
+    h.state_mut().run_later(Cmd::SelectAll);
+    h.run_steps(1);
+    type_out(&mut h, "x");
+    assert_eq!(typed(&h).as_deref(), Some("x"), "Edit > Select all selects the text");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_bars_colour_picker_stays_while_shift_is_held_and_takes_a_hex_without_its_hash() {
+    let path = sample("hex-shift");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let shapes = h.state().scene.active_id().unwrap();
+    let id = h.state().scene.bundle.doc.layer(&shapes).unwrap().cels()[0].nodes[0]
+        .id
+        .clone();
+    h.state_mut().tool = Tool::Select;
+    h.state_mut().select_shapes(vec![id.clone()]);
+    h.run_steps(3);
+    let fill = |h: &Harness<'static, Editor>| match h.state().scene.bundle.doc.item(&id) {
+        Some(klad_core::doc::Item::Node(_, _, node)) => format!("{:?}", node.fill),
+        _ => String::new(),
+    };
+    let fields = |h: &Harness<'static, Editor>| h.query_all_by_role_and_label(Role::TextInput, "hex").count();
+    let panel_only = fields(&h);
+    h.get_by_label("the shape's fill").click();
+    h.run_steps(3);
+    assert_eq!(fields(&h), panel_only + 1, "the picker opens with its hex field");
+    let field = h
+        .query_all_by_role_and_label(Role::TextInput, "hex")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.left().total_cmp(&b.left()))
+        .unwrap();
+    click(&mut h, field.center());
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    h.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+    h.run_steps(3);
+    assert_eq!(fields(&h), panel_only + 1, "holding shift keeps the bar and its picker");
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    "ffd9a0".chars().for_each(|c| {
+        h.event(egui::Event::Text(c.to_string()));
+        h.run_steps(1);
+    });
+    h.key_press(Key::ArrowLeft);
+    h.run_steps(2);
+    assert_eq!(fields(&h), panel_only + 1, "the left arrow keeps the picker");
+    h.key_press(Key::Enter);
+    h.run_steps(4);
+    assert_eq!(fill(&h), r##"Some(Solid("#ffd9a0"))"##, "a hex without its # is taken");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_turned_layer_and_a_turned_selection_keep_their_turned_box() {
+    let path = sample("turned-box");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "lines");
+    h.state_mut().invoke(Cmd::TransformLayer).unwrap();
+    h.run_steps(2);
+    let corners = |h: &Harness<'static, Editor>| h.state().handles().map(|(_, c)| c);
+    let before = corners(&h).unwrap();
+    assert!(super::upright(&before));
+    let (from, to) = (canvas_at(&h, 470.0, 10.0), canvas_at(&h, 500.0, 160.0));
+    drag(&mut h, from, to);
+    h.run_steps(2);
+    let after = corners(&h).expect("the transform goes on");
+    assert!(
+        !super::upright(&after),
+        "the box stays turned with the layer: {after:?}"
+    );
+    let middle = (after[0] + after[2]) / 2.0;
+    let inside =
+        h.state().view.unwrap().to_screen(middle, h.state().canvas_rect.size()) + h.state().canvas_rect.min.to_vec2();
+    let moved = h.state().scene.bundle.doc.rev;
+    drag(&mut h, inside.to_pos2(), inside.to_pos2() + vec2(30.0, 0.0));
+    h.run_steps(2);
+    assert_ne!(
+        h.state().scene.bundle.doc.rev,
+        moved,
+        "a drag inside the turned box moves the layer"
+    );
+    assert!(!super::upright(&corners(&h).unwrap()), "and the box stays turned");
+    let _ = std::fs::remove_dir_all(&path);
+    let path = sample("turned-strokes");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "lines");
+    h.key_press(Key::S);
+    h.run_steps(2);
+    let (from, to) = (canvas_at(&h, 5.0, 5.0), canvas_at(&h, 505.0, 379.0));
+    drag(&mut h, from, to);
+    let picked = corners(&h).expect("the box takes the strokes");
+    assert!(super::upright(&picked));
+    let knob = {
+        let top = (picked[0] + picked[1]) / 2.0;
+        let view = h.state().view.unwrap();
+        let rect = h.state().canvas_rect;
+        rect.min + view.to_screen(top, rect.size()) - vec2(0.0, super::KNOB)
+    };
+    drag(&mut h, knob, knob + vec2(60.0, 10.0));
+    h.run_steps(2);
+    assert!(
+        !super::upright(&corners(&h).unwrap()),
+        "turned strokes keep a turned box"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn the_pixel_eraser_keeps_its_own_size() {
+    let path = pixel_sample("pixel-eraser-size");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    h.run_steps(2);
+    h.state_mut().pixel_size = 1;
+    h.state_mut().invoke(Cmd::Eraser).unwrap();
+    h.state_mut().pixel_size = 4;
+    h.state_mut().invoke(Cmd::Brush).unwrap();
+    assert_eq!(h.state().pixel_size, 1, "the pencil keeps its size");
+    h.state_mut().invoke(Cmd::Eraser).unwrap();
+    assert_eq!(h.state().pixel_size, 4, "the eraser keeps its own");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn s_drags_a_box_around_strokes_and_draws_a_loop_when_loop_is_picked() {
+    let path = sample("box-select");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "lines");
+    h.key_press(Key::S);
+    h.run_steps(2);
+    assert!(h.state().select_box, "S starts as a box, as its icon shows");
+    let (from, to) = (canvas_at(&h, 20.0, 20.0), canvas_at(&h, 320.0, 220.0));
+    drag(&mut h, from, to);
+    h.run_steps(2);
+    let ids = |h: &Harness<'static, Editor>| h.state().picked.as_ref().map_or(Vec::new(), |p| p.ids.clone());
+    assert!(!ids(&h).is_empty(), "a straight drag takes the stroke inside its box");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("loop").click();
+    h.run_steps(2);
+    assert!(!h.state().select_box);
+    let (from, to) = (canvas_at(&h, 20.0, 20.0), canvas_at(&h, 320.0, 220.0));
+    drag(&mut h, from, to);
+    h.run_steps(2);
+    assert!(ids(&h).is_empty(), "a straight drag closes no loop");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_hex_typed_for_a_glow_is_kept_and_its_picker_shows_it_after_return() {
+    let path = sample("hex-glow");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    activate(&mut h, "shapes");
+    let shapes = h.state().scene.active_id().unwrap();
+    let id = h.state().scene.bundle.doc.layer(&shapes).unwrap().cels()[0].nodes[0]
+        .id
+        .clone();
+    h.state_mut()
+        .set(
+            &id,
+            vec![(
+                "fill".into(),
+                serde_json::json!({"radial": {"center": [80, 60], "radius": 60, "stops": [[0, "#3a86ffff"], [1, "#3a86ff00"]]}}),
+            )],
+        )
+        .unwrap();
+    h.state_mut().tool = Tool::Select;
+    h.state_mut().select_shapes(vec![id.clone()]);
+    h.run_steps(3);
+    let shown = |h: &Harness<'static, Editor>| h.state().dyed(super::Dye::Fill).map(crate::color::hex);
+    assert_eq!(
+        shown(&h).as_deref(),
+        Some("#3a86ff"),
+        "the picker starts from the glow's colour"
+    );
+    h.get_by_label("the shape's fill").click();
+    h.run_steps(3);
+    let field = h
+        .query_all_by_role_and_label(Role::TextInput, "hex")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.left().total_cmp(&b.left()))
+        .unwrap();
+    click(&mut h, field.center());
+    let key = |h: &mut Harness<'static, Editor>, key: Key, modifiers: Modifiers, pressed: bool| {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        });
+        h.run_steps(1);
+    };
+    key(&mut h, Key::A, Modifiers::COMMAND, true);
+    key(&mut h, Key::A, Modifiers::COMMAND, false);
+    h.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+    h.event(egui::Event::Text("#".into()));
+    key(&mut h, Key::Num3, Modifiers::SHIFT, true);
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    key(&mut h, Key::Num3, Modifiers::SHIFT, false);
+    [
+        (Key::F, "f"),
+        (Key::F, "f"),
+        (Key::D, "d"),
+        (Key::Num9, "9"),
+        (Key::A, "a"),
+        (Key::Num0, "0"),
+    ]
+    .into_iter()
+    .for_each(|(k, t)| {
+        h.event(egui::Event::Text(t.into()));
+        key(&mut h, k, Modifiers::NONE, true);
+        key(&mut h, k, Modifiers::NONE, false);
+    });
+    key(&mut h, Key::Enter, Modifiers::NONE, true);
+    key(&mut h, Key::Enter, Modifiers::NONE, false);
+    h.run_steps(3);
+    assert_eq!(
+        shown(&h).as_deref(),
+        Some("#ffd9a0"),
+        "after Return the picker shows what was typed"
+    );
+    let fill = match h.state().scene.bundle.doc.item(&id) {
+        Some(klad_core::doc::Item::Node(_, _, node)) => format!("{:?}", node.fill),
+        _ => String::new(),
+    };
+    assert!(
+        fill.contains("Radial") && fill.contains("#ffd9a0"),
+        "the glow stays a glow in the typed colour: {fill}"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn text_on_a_pixel_layer_becomes_hard_edged_pixels_and_says_so() {
+    let path = pixel_sample("pixel-text");
+    let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+    h.run_steps(2);
+    let layer = h.state().scene.active_id().unwrap();
+    let layers = h.state().scene.bundle.doc.all_layers().len();
+    let marks = h.state().scene.active_marks().len();
+    let said = |h: &Harness<'static, Editor>| h.state().messages.log().map(|m| m.text.clone()).collect::<Vec<_>>();
+    let at = canvas_at(&h, 10.0, 12.0);
+    open_text(&mut h, at);
+    assert!(
+        said(&h)
+            .iter()
+            .any(|m| m.contains("is a pixel layer: the text becomes pixels")),
+        "the editor says what will happen: {:?}",
+        said(&h)
+    );
+    h.state_mut().text_edit.as_mut().unwrap().text.size = 10.0;
+    h.event(egui::Event::Text("HI".into()));
+    h.run_steps(1);
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().scene.bundle.doc.all_layers().len(),
+        layers,
+        "no vector layer is made"
+    );
+    assert_eq!(h.state().scene.active_id().as_deref(), Some(layer.as_str()));
+    let now = h.state().scene.active_marks();
+    assert_eq!(now.len(), marks + 1, "the text is one pixel mark");
+    assert!(now.iter().all(|m| m.as_fill().is_some_and(|f| f.on_grid())));
+    assert!(
+        said(&h).iter().any(|m| m.starts_with("the text is pixels on")),
+        "{:?}",
+        said(&h)
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().scene.active_marks().len(), marks, "cmd Z takes it back");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn a_paste_on_a_held_frame_gives_the_frame_its_own_copy_of_the_drawing_first() {
+    let path = sample("paste-held");
+    let mut h = harness(editor(&path), vec2(1440.0, 1000.0));
+    activate(&mut h, "lines");
+    let layer = h.state().scene.active_id().unwrap();
+    let cels = |h: &Harness<'static, Editor>| {
+        h.state()
+            .scene
+            .bundle
+            .doc
+            .layer(&layer)
+            .unwrap()
+            .cels()
+            .iter()
+            .map(|c| (c.id.clone(), c.frame))
+            .collect::<Vec<_>>()
+    };
+    let first = cels(&h)[0].0.clone();
+    let before = h.state().scene.bundle.read_marks(&layer, &first).unwrap().len();
+    h.state_mut().tool = Tool::Strokes;
+    h.state_mut().invoke(Cmd::SelectAll).unwrap();
+    h.run_steps(2);
+    h.state_mut().invoke(Cmd::Copy).unwrap();
+    h.state_mut().go_to(5).unwrap();
+    h.state_mut().focus = super::Focus::Timeline;
+    h.run_steps(2);
+    assert!(
+        h.state().on_timeline(),
+        "a click on a frame puts the keys on the timeline"
+    );
+    h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+    h.run_steps(3);
+    let now = cels(&h);
+    assert_eq!(now.len(), 2, "frame 5 has a drawing of its own: {now:?}");
+    assert_eq!(now[1].1, 5);
+    assert_eq!(
+        h.state().scene.bundle.read_marks(&layer, &first).unwrap().len(),
+        before,
+        "the frames before keep their drawing as it was"
+    );
+    assert_eq!(
+        h.state().scene.bundle.read_marks(&layer, &now[1].0).unwrap().len(),
+        before * 2,
+        "frame 5 shows the drawing it showed and the paste"
+    );
+    let said: Vec<String> = h.state().messages.log().map(|m| m.text.clone()).collect();
+    assert!(
+        said.iter().any(|m| m.contains("got its own copy of it first")),
+        "{said:?}"
+    );
+    h.state_mut().invoke(Cmd::Undo).unwrap();
+    h.run_steps(2);
+    assert_eq!(cels(&h).len(), 1, "one cmd Z takes back the copy and the paste");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn v_s_and_a_say_when_the_layer_in_hand_is_locked_or_hidden_and_change_nothing() {
+    [Tool::Select, Tool::Strokes, Tool::Direct]
+        .into_iter()
+        .flat_map(|tool| {
+            [
+                (tool, Cmd::ToggleLocked, "is locked"),
+                (tool, Cmd::ToggleVisible, "is hidden"),
+            ]
+        })
+        .for_each(|(tool, cmd, words)| {
+            let path = sample(&format!("locked-hidden-{tool:?}-{cmd:?}"));
+            let mut h = harness_stepping(editor(&path), vec2(1440.0, 1000.0), 1.0 / 60.0);
+            activate(&mut h, "lines");
+            h.state_mut().invoke(cmd).unwrap();
+            h.state_mut().tool = tool;
+            h.run_steps(2);
+            let rev = h.state().scene.bundle.doc.rev;
+            let (from, to) = (canvas_at(&h, 170.0, 120.0), canvas_at(&h, 200.0, 150.0));
+            click(&mut h, from);
+            h.run_steps(2);
+            drag(&mut h, from, to);
+            h.run_steps(3);
+            let said: Vec<String> = h.state().messages.log().map(|m| m.text.clone()).collect();
+            assert_eq!(h.state().scene.bundle.doc.rev, rev, "{tool:?} {cmd:?}: nothing changes");
+            assert!(
+                said.iter().any(|m| m.starts_with(&format!("lines {words}"))),
+                "{tool:?} {cmd:?}: it says so: {said:?}"
+            );
+            let _ = std::fs::remove_dir_all(&path);
+        });
 }

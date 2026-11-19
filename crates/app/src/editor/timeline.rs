@@ -1,7 +1,7 @@
 use super::clips::{self, Hit, Strip};
 use super::layers::{self, LayerRow};
 use super::tweens::{self, Span};
-use super::{Editor, ms};
+use super::{Editor, cells, ms};
 use crate::commands::Cmd;
 use crate::composite::CanvasDone;
 use crate::frames::Player;
@@ -23,7 +23,8 @@ const RULER: f32 = 18.0;
 const NAMES: f32 = 236.0;
 const EDGE: f32 = 8.0;
 const PAST: f32 = 14.0;
-const GRIP: f32 = 7.0;
+const GRIP: f32 = 4.5;
+const EDGE_SHARE: f32 = 0.25;
 const SETTLE: Duration = Duration::from_millis(150);
 const FLIP_PX: f32 = 22.0;
 const AHEAD: u32 = 4;
@@ -107,6 +108,7 @@ pub(super) struct Timeline {
     cache_rev: u64,
     pub clip: Option<String>,
     pub clip_name: (String, String),
+    pub name_clip: bool,
     pub clip_fps: u32,
     pub godot: (String, String),
     pub span: Option<Span>,
@@ -140,6 +142,7 @@ impl Default for Timeline {
             cache_rev: u64::MAX,
             clip: None,
             clip_name: (String::new(), String::new()),
+            name_clip: false,
             clip_fps: 0,
             godot: (String::new(), String::new()),
             span: None,
@@ -229,10 +232,11 @@ fn press_at(g: &Geom, blocks: &[Vec<Block>], p: Pos2) -> Option<Press> {
         return Some(Press::Ruler(f));
     };
     let list = blocks.get(r)?;
-    if let Some(b) = list
-        .iter()
-        .find(|b| (p.x - g.x_of(b.end)).abs() <= EDGE && p.x > g.x_of(b.start) + g.cell / 2.0)
-    {
+    let edge = EDGE.min(g.cell * EDGE_SHARE);
+    if let Some(b) = list.iter().find(|b| {
+        let end = g.x_of(b.end);
+        p.x <= end + 1.0 && p.x >= end - edge && p.x > g.x_of(b.start) + g.cell / 2.0
+    }) {
         return Some(Press::End(r, b.clone()));
     }
     match list.iter().find(|b| b.start <= f && f < b.end) {
@@ -661,8 +665,17 @@ impl Editor {
             return;
         };
         let played = format!("played {}: {}", self.timeline.playing, player.summary());
-        self.measure("last play", played.clone());
-        self.say(Tone::Done, played);
+        self.measure("last play", played);
+        let dropped = player.dropped();
+        if dropped > 0 {
+            self.say(
+                Tone::Info,
+                format!(
+                    "{dropped} frame{} skipped while playing: prepare the frames (the bolt in the timeline's bar) to play them all",
+                    if dropped == 1 { " was" } else { "s were" }
+                ),
+            );
+        }
         if let Some(frame) = player.shown() {
             if frame != self.scene.frame {
                 self.scene.move_to(frame);
@@ -824,17 +837,23 @@ impl Editor {
             return Ok(None);
         }
         let start = Instant::now();
-        match self.scene.apply_with(&ops, &self.brushes) {
+        match self.write(&ops) {
             Ok((dirty, applied)) => {
                 self.dirty.extend(dirty);
                 self.forget_missing_selection();
                 let text = format!("{} in {:.0} ms", klad_core::bundle::summarize(&ops), ms(start));
-                self.measure("timeline edit", text.clone());
-                self.say(Tone::Info, text);
+                self.measure("timeline edit", text);
+                if let Some(words) = self.edit_words(&ops) {
+                    self.say(Tone::Info, words);
+                }
                 Ok(Some(applied))
             }
+            Err(e) if e.downcast_ref::<super::lock::Locked>().is_some() => {
+                self.failed(e);
+                Ok(None)
+            }
             Err(e) => {
-                self.say(Tone::Refused, format!("{e:#}"));
+                self.say(Tone::Refused, self.refusal_words(&format!("{e:#}")));
                 Ok(None)
             }
         }
@@ -861,7 +880,54 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn select_all_frames(&mut self) {
+        let rows = self.timeline_rows();
+        let last = self.scene.bundle.doc.timeline.frames - 1;
+        self.timeline.span = span_of(&rows, (0, last), (0, rows.len().saturating_sub(1)), (0, 0));
+        self.focus = super::Focus::Timeline;
+        if let Some(span) = &self.timeline.span {
+            self.say(
+                Tone::Done,
+                format!(
+                    "selected frames 0 to {last} of {}: cmd C copies them, cmd D repeats them after themselves",
+                    match span.rows.len() {
+                        1 => "one layer".to_string(),
+                        n => format!("{n} layers"),
+                    }
+                ),
+            );
+        }
+    }
+
+    fn duplicate_span(&mut self, span: tweens::Span) -> Result<()> {
+        let ops = cells::repeat_ops(&self.scene.bundle.doc, &span.rows, span.from, span.to);
+        let count = span.to + 1 - span.from;
+        if self.timeline_apply(ops)?.is_some() {
+            self.timeline.span = Some(tweens::Span {
+                from: span.to + 1,
+                to: span.to + count,
+                anchor: (span.to + 1, span.anchor.1),
+                ..span.clone()
+            });
+            self.go_to(span.to + 1)?;
+            self.say(
+                Tone::Done,
+                format!(
+                    "frames {} to {} are repeated after themselves as copies, on frames {} to {}: they are selected, so cmd D repeats them again",
+                    span.from,
+                    span.to,
+                    span.to + 1,
+                    span.to + count
+                ),
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn duplicate_next(&mut self) -> Result<()> {
+        if let Some(span) = self.timeline.span.clone() {
+            return self.duplicate_span(span);
+        }
         let Some((_, Some((cel, end)))) = self.here() else {
             self.say(Tone::Refused, "nothing to duplicate on this frame");
             return Ok(());
@@ -877,8 +943,44 @@ impl Editor {
         Ok(())
     }
 
+    fn drawing_starting_here(&self) -> Option<(Cel, bool)> {
+        let (_, here) = self.here()?;
+        let (cel, _) = here?;
+        if cel.frame != self.scene.frame {
+            return None;
+        }
+        let empty = cel.nodes.is_empty()
+            && (cel.link.is_some() || (self.scene.knows_marks(&cel.id) && self.scene.marks_of(&cel.id).is_empty()));
+        Some((cel, empty))
+    }
+
+    pub(super) fn link_blocked(&self) -> Option<String> {
+        self.drawing_starting_here().filter(|(_, empty)| !empty).map(|_| {
+            format!(
+                "frame {} has a drawing of its own: go to a frame where a drawing is held, or delete this one first (Frame > Delete drawing)",
+                self.scene.frame
+            )
+        })
+    }
+
     pub(super) fn link_here(&mut self, source: String) -> Result<()> {
-        self.cel_op(CelAction::Link { cel: source }, Some(self.scene.frame), false)?;
+        if let Some(why) = self.link_blocked() {
+            self.say(Tone::Refused, why);
+            return Ok(());
+        }
+        let mut ops: Vec<Op> = self
+            .drawing_starting_here()
+            .map(|(cel, _)| Op::Remove { ids: vec![cel.id] })
+            .into_iter()
+            .collect();
+        ops.push(Op::Cel(CelSpec {
+            action: CelAction::Link { cel: source },
+            id: None,
+            frame: Some(self.scene.frame),
+            hold: None,
+            insert: false,
+        }));
+        self.timeline_apply(ops)?;
         Ok(())
     }
 
@@ -893,8 +995,33 @@ impl Editor {
     }
 
     pub(super) fn delete_here(&mut self) -> Result<()> {
-        if let Some((_, Some((cel, _)))) = self.here() {
-            self.timeline_apply(vec![Op::Remove { ids: vec![cel.id] }])?;
+        let doc = &self.scene.bundle.doc;
+        let ids: Vec<String> = match &self.timeline.span {
+            Some(span) => span
+                .rows
+                .iter()
+                .filter_map(|id| doc.layer(id))
+                .flat_map(|l| l.cels().iter())
+                .filter(|c| c.frame >= span.from && c.frame <= span.to)
+                .map(|c| c.id.clone())
+                .collect(),
+            None => self
+                .here()
+                .and_then(|(_, cel)| cel)
+                .map(|(cel, _)| cel.id)
+                .into_iter()
+                .collect(),
+        };
+        let (count, spanned, frame) = (ids.len(), self.timeline.span.is_some(), self.scene.frame);
+        if !ids.is_empty() && self.timeline_apply(vec![Op::Remove { ids }])?.is_some() {
+            self.say(
+                Tone::Done,
+                match (spanned, count) {
+                    (false, _) => format!("deleted the drawing on frame {frame} (cmd Z brings it back)"),
+                    (true, 1) => "deleted the one drawing in the selected frames (cmd Z brings it back)".to_string(),
+                    (true, n) => format!("deleted the {n} drawings in the selected frames (cmd Z brings them back)"),
+                },
+            );
         }
         Ok(())
     }
@@ -961,15 +1088,57 @@ impl Editor {
             return Ok(());
         }
         let to = (end as i64 + delta as i64).max(cel.frame as i64 + 1) as u32;
-        self.resize(&layer, &cel.id, (cel.frame, end, open), to)
+        if delta >= 0 {
+            return self.resize(&layer, &cel.id, (cel.frame, end, open), to);
+        }
+        let doc = &self.scene.bundle.doc;
+        let shorter = |frames: u32| Op::Timeline {
+            fps: None,
+            frames: Some(frames - 1),
+            origin: None,
+        };
+        let reached_the_end = doc
+            .layer(&layer)
+            .and_then(|l| l.cels().last())
+            .is_some_and(|last| last.hold.is_none_or(|h| last.frame + h == frames));
+        let ops = match open {
+            true if cells::free_at_the_end(doc) => vec![shorter(frames)],
+            true => vec![Op::Set {
+                id: cel.id.clone(),
+                props: Map::from_iter([("hold".to_string(), json!(to - cel.frame))]),
+            }],
+            false => {
+                let remove = Op::Frames(FrameSpec {
+                    insert: false,
+                    at: to,
+                    count: end - to,
+                    layers: Some(vec![layer.clone()]),
+                });
+                let after = klad_core::ops::apply_all(doc, std::slice::from_ref(&remove))
+                    .ok()
+                    .map(|(doc, _)| doc);
+                match after.filter(|d| reached_the_end && cells::free_at_the_end(d)) {
+                    Some(after) => vec![remove, shorter(after.timeline.frames)],
+                    None => vec![remove],
+                }
+            }
+        };
+        let last = frames.saturating_sub(2);
+        if self.timeline_apply(ops)?.is_some() && self.scene.frame >= self.scene.bundle.doc.timeline.frames {
+            self.go_to(last)?;
+        }
+        Ok(())
     }
 
     pub(super) fn add_layer(&mut self, kind: &str) -> Result<()> {
-        let frame = self.scene.frame;
-        self.add_layer_value(json!({"kind": kind, "cels": [{"frame": frame}]}))
+        self.add_layer_value(json!({"kind": kind, "cels": [{"frame": 0}]}))
     }
 
     pub(super) fn add_layer_value(&mut self, layer: serde_json::Value) -> Result<()> {
+        self.add_layer_after(Vec::new(), layer)
+    }
+
+    pub(super) fn add_layer_after(&mut self, first: Vec<Op>, layer: serde_json::Value) -> Result<()> {
         let above = self.scene.active.clone();
         let owner = match above.last() {
             Some(&MASK) => above[..above.len() - 1].to_vec(),
@@ -982,7 +1151,11 @@ impl Editor {
             },
             None => Place::default(),
         };
-        let Some(applied) = self.timeline_apply(vec![Op::AddLayer { layer, place }])? else {
+        let ops = first
+            .into_iter()
+            .chain(std::iter::once(Op::AddLayer { layer, place }))
+            .collect();
+        let Some(applied) = self.timeline_apply(ops)? else {
             return Ok(());
         };
         if let Some(Loc::Layer(path)) = applied.added.first().and_then(|id| self.scene.bundle.doc.locate(id)) {
@@ -1012,7 +1185,10 @@ impl Editor {
                     egui::Button::new(RichText::new(caret).size(theme::ICON))
                         .min_size(vec2(theme::TARGET, theme::TARGET)),
                 )
-                .hint("fold the timeline to this row, or open it again")
+                .hint(match folded {
+                    true => "open the timeline: its layers and frames",
+                    false => "fold the timeline to this row",
+                })
                 .clicked()
             {
                 self.settings.layout.timeline_folded = !folded;
@@ -1407,15 +1583,36 @@ impl Editor {
             |p: Pos2| in_strip(p) && matches!(strip.hit(&clip_list, p), Some((_, Hit::First | Hit::Last)));
         let resizing = matches!(self.timeline.drag, Some(Drag::Hold { .. } | Drag::ClipEnd { .. }));
         let hover_end = response.hover_pos().is_some_and(|p| on_edge(p) || on_clip_end(p));
+        let alt = ui.input(|i| i.modifiers.alt);
+        let span_now = self.timeline.span.clone();
+        let movable = |r: usize, p: Pos2| {
+            alt || span_now
+                .as_ref()
+                .is_some_and(|s| s.rows.contains(&rows[r].id) && (s.from..=s.to).contains(&geom.frame_at(p.x)))
+        };
         let hover_dot = response
             .hover_pos()
-            .is_some_and(|p| matches!(press_at(&geom, &row_blocks, p), Some(Press::Start(..))));
+            .is_some_and(|p| match press_at(&geom, &row_blocks, p) {
+                Some(Press::Start(r, _)) => movable(r, p),
+                _ => false,
+            });
         if resizing || (self.timeline.drag.is_none() && hover_end) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         } else if matches!(self.timeline.drag, Some(Drag::Move { .. })) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if self.timeline.drag.is_none() && hover_dot {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if response.drag_started() || response.clicked() || response.secondary_clicked() {
+            self.focus = super::Focus::Timeline;
+        }
+        if self.focus == super::Focus::Timeline {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                0.0,
+                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
         }
         let mut pick: Option<(u32, Option<usize>)> = None;
         let shift = ui.input(|i| i.modifiers.shift);
@@ -1439,6 +1636,12 @@ impl Editor {
                     Some(_) => Some(Drag::Scrub),
                     None => Some(Drag::NewClip { from: f, to: f }),
                 },
+                Some(Press::Start(r, _) | Press::End(r, _)) if shift => {
+                    Some(drag_of(&Press::Cell(r, f), shift, |r| rows[r].id.clone()))
+                }
+                Some(Press::Start(r, _)) if !movable(r, p) => {
+                    Some(drag_of(&Press::Cell(r, f), shift, |r| rows[r].id.clone()))
+                }
                 Some(press) => Some(drag_of(&press, shift, |r| rows[r].id.clone())),
                 None => None,
             };
@@ -1624,15 +1827,27 @@ impl Editor {
         Ok(())
     }
 
+    pub(super) fn fold_for_stills(&mut self) {
+        let still = self.scene.bundle.doc.timeline.frames <= 1;
+        if self.timeline_still != Some(still) {
+            self.timeline_still = Some(still);
+            self.settings.layout.timeline_folded = still;
+        }
+    }
+
     pub(super) fn timeline_panel(&mut self, ui: &mut egui::Ui) -> Result<()> {
         self.tend_buffer();
+        let top = ui.max_rect().top();
+        let gap = ui.spacing().item_spacing.y;
         self.timeline_header(ui)?;
+        let used = ui.cursor().top() - top;
         if self.settings.layout.timeline_folded {
+            self.timeline_bar = (used - gap).max(0.0);
             return Ok(());
         }
         let rows = self.timeline_rows();
         let mut result = Ok(());
-        egui::ScrollArea::vertical()
+        let shown = egui::ScrollArea::vertical()
             .id_salt("timeline rows")
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1653,6 +1868,7 @@ impl Editor {
                         });
                 });
             });
+        self.timeline_rows = used + shown.content_size.y;
         result
     }
 }
@@ -1723,9 +1939,10 @@ mod tests {
         assert_eq!(press_at(&g, &rows, pos2(130.0, 30.0)), None);
         assert_eq!(press_at(&g, &rows, pos2(130.0, 45.0)), Some(Press::Ruler(1)));
         assert_eq!(
-            press_at(&g, &rows, pos2(105.0, row0)),
+            press_at(&g, &rows, pos2(110.0, row0)),
             Some(Press::Start(0, rows[0][0].clone()))
         );
+        assert_eq!(press_at(&g, &rows, pos2(104.0, row0)), Some(Press::Cell(0, 0)));
         assert_eq!(press_at(&g, &rows, pos2(150.0, row0)), Some(Press::Cell(0, 2)));
         assert_eq!(
             press_at(&g, &rows, pos2(102.0, row0 - ROW / 2.0 + 2.0)),
@@ -1733,25 +1950,24 @@ mod tests {
         );
         assert_eq!(press_at(&g, &rows, pos2(118.0, row0)), Some(Press::Cell(0, 0)));
         assert_eq!(
-            press_at(&g, &rows, pos2(180.0 - 7.0, row0)),
+            press_at(&g, &rows, pos2(180.0 - 4.0, row0)),
             Some(Press::End(0, rows[0][0].clone()))
         );
+        assert_eq!(press_at(&g, &rows, pos2(180.0 - 7.0, row0)), Some(Press::Cell(0, 3)));
+        assert_eq!(press_at(&g, &rows, pos2(180.0 + 3.0, row0)), Some(Press::Cell(0, 4)));
         assert_eq!(
-            press_at(&g, &rows, pos2(180.0 + 7.0, row0)),
-            Some(Press::End(0, rows[0][0].clone()))
-        );
-        assert_eq!(
-            press_at(&g, &rows, pos2(195.0, row0)),
+            press_at(&g, &rows, pos2(192.0, row0)),
             Some(Press::Start(0, rows[0][1].clone()))
         );
         assert_eq!(press_at(&g, &rows, pos2(400.0, row0)), Some(Press::Cell(0, 15)));
         assert_eq!(
-            press_at(&g, &rows, pos2(165.0, row1)),
+            press_at(&g, &rows, pos2(158.0, row1)),
             Some(Press::End(1, rows[1][0].clone()))
         );
+        assert_eq!(press_at(&g, &rows, pos2(165.0, row1)), Some(Press::Cell(1, 3)));
         assert_eq!(press_at(&g, &rows, pos2(130.0, row1 + ROW)), Some(Press::Ruler(1)));
         let origin = pos2(180.0 - 4.0, row0);
-        let moved = origin + vec2(6.0, 0.0);
+        let moved = origin + vec2(4.0, 0.0);
         assert!(matches!(press_at(&g, &rows, origin), Some(Press::End(..))));
         assert!(matches!(press_at(&g, &rows, moved), Some(Press::End(..))));
         let name = |r: usize| format!("l{r}");

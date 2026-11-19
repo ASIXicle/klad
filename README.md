@@ -58,7 +58,7 @@ Everything you can do in the editor has a `klad` command too, so a script or an 
 | Pixels | **B** on a pixel layer | `klad pixel sprite.klad l1 --grid sprite.txt` |
 | Point at something | **N** pins a note, **S** selects | `klad notes art.klad`, `klad selection art.klad` |
 | In-betweens | The in-between window | `klad inbetween art.klad --layers lines,colour --from 0 --to 6` |
-| Export | **cmd E**, or export to Godot from a clip | `klad export art.klad --godot ../game/art` |
+| Export | **File > Export** (**cmd E** for an image), with Godot in the same menu | `klad export art.klad --godot ../game/art` |
 | Undo | **cmd Z**, or the History pane | `klad undo art.klad` |
 
 The file format is documented down to the byte under the MIT licence (`docs/format.md`), so other apps and engines can read and write klad drawings with or without klad.

@@ -336,6 +336,13 @@ impl Editor {
         };
         let bundle = &self.scene.bundle;
         let rows = redo_rows(&bundle.doc, span, &layers, |l, c| bundle.read_marks(l, c))?;
+        if rows.is_empty() {
+            self.say(
+                Tone::Refused,
+                "no in-betweens in the selection to make again: select frames that hold in-betweens first",
+            );
+            return Ok(());
+        }
         self.between.choices.clear();
         self.between.redo = Some(rows);
         self.windows.between = true;
@@ -517,7 +524,7 @@ impl Editor {
                         !self.jobs.busy(Tag::Inbetween),
                         egui::Button::new("make the in-betweens"),
                     )
-                    .hint("runs klad inbetween with these settings; you can keep drawing meanwhile")
+                    .hint("makes the drawings between the two keys with these settings; you can keep drawing meanwhile")
                     .clicked()
                 {
                     self.make_inbetweens(r.clone());

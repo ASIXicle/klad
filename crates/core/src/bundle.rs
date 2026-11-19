@@ -34,6 +34,7 @@ pub struct Blank {
     pub frames: u32,
     pub sketch: bool,
     pub pixel: bool,
+    pub palette: bool,
 }
 
 impl Default for Blank {
@@ -47,6 +48,7 @@ impl Default for Blank {
             frames: 1,
             sketch: false,
             pixel: false,
+            palette: false,
         }
     }
 }
@@ -64,6 +66,66 @@ impl std::fmt::Display for Changed {
 }
 
 impl std::error::Error for Changed {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elsewhere(pub PathBuf);
+
+impl std::fmt::Display for Elsewhere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the drawing's folder is no longer at {}: it was moved, renamed or deleted, so nothing was written. Open the drawing from where it is now",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for Elsewhere {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Folder {
+    device: u64,
+    node: u64,
+}
+
+impl Folder {
+    pub fn at(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok().filter(fs::Metadata::is_dir)?;
+        #[cfg(unix)]
+        let (device, node) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(not(unix))]
+        let (device, node) = {
+            let _ = meta;
+            (0, 0)
+        };
+        Some(Self { device, node })
+    }
+
+    fn beside(self, root: &Path) -> Option<PathBuf> {
+        if !cfg!(unix) {
+            return None;
+        }
+        let beside = root.parent().filter(|p| !p.as_os_str().is_empty());
+        let mut found: Vec<PathBuf> = fs::read_dir(beside.unwrap_or(Path::new(".")))
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| Self::at(p) == Some(self))
+            .collect();
+        found.sort();
+        found.into_iter().next()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Whereabouts {
+    Here,
+    Renamed(PathBuf),
+    Replaced,
+    Gone,
+}
 
 fn highest_number(doc: &Document) -> u64 {
     doc.ids()
@@ -99,6 +161,7 @@ pub struct Bundle {
     pub root: PathBuf,
     pub doc: Document,
     pub seen: u64,
+    pub folder: Option<Folder>,
 }
 
 fn name_parts(doc: &mut Document, pending: &[PendingMarks]) {
@@ -163,7 +226,47 @@ impl Bundle {
         doc.rev = state.rev;
         doc.next_id = state.next;
         doc.here = state.here();
-        Ok(Self { root, doc, seen })
+        let folder = Folder::at(&root);
+        Ok(Self {
+            root,
+            doc,
+            seen,
+            folder,
+        })
+    }
+
+    pub fn whereabouts(&self) -> Whereabouts {
+        let Some(folder) = self.folder else {
+            return Whereabouts::Here;
+        };
+        if Folder::at(&self.root) == Some(folder) {
+            return Whereabouts::Here;
+        }
+        if let Some(to) = folder.beside(&self.root) {
+            return Whereabouts::Renamed(to);
+        }
+        let same = here::read(&self.root).is_some_and(|state| state.tag == self.doc.here.tag);
+        match same && self.root.join("doc.json").is_file() {
+            true => Whereabouts::Replaced,
+            false => Whereabouts::Gone,
+        }
+    }
+
+    pub fn adopt(&mut self) {
+        self.folder = Folder::at(&self.root);
+    }
+
+    pub fn ensure_here(&self) -> Result<()> {
+        match self.folder.is_none() || Folder::at(&self.root) == self.folder {
+            true => Ok(()),
+            false => Err(Elsewhere(self.root.clone()).into()),
+        }
+    }
+
+    pub fn follow(&mut self, to: PathBuf) {
+        remember(&to);
+        self.root = to;
+        self.settle();
     }
 
     pub fn repair(root: impl AsRef<Path>) -> Result<Repaired> {
@@ -312,7 +415,13 @@ impl Bundle {
         write_atomic(&root.join(".gitignore"), b".cache/\n")?;
         let mut doc = doc;
         doc.here = here::start().here();
-        let mut bundle = Self { root, doc, seen: 0 };
+        let folder = Folder::at(&root);
+        let mut bundle = Self {
+            root,
+            doc,
+            seen: 0,
+            folder,
+        };
         bundle.save()?;
         Ok(bundle)
     }
@@ -335,6 +444,9 @@ impl Bundle {
                 }
             })
             .collect();
+        if blank.palette {
+            doc.palette = crate::palettes::starter()?;
+        }
         if blank.sketch {
             let (layer, cel) = (doc.alloc_id('l'), doc.alloc_id('c'));
             doc.layers.push(Layer::vector(&layer, "sketch", &cel, Vec::new()));
@@ -345,6 +457,7 @@ impl Bundle {
     }
 
     pub fn save(&mut self) -> Result<()> {
+        self.ensure_here()?;
         let disk = here::read(&self.root).filter(|s| s.tag == self.doc.here.tag);
         self.doc.rev = disk.as_ref().map_or(0, |s| s.rev).max(self.doc.rev) + 1;
         let mut text = serde_json::to_string_pretty(&self.doc)?;
@@ -397,6 +510,7 @@ impl Bundle {
     }
 
     pub fn write_marks(&self, layer: &str, cel: &str, marks: &[Mark]) -> Result<u64> {
+        self.ensure_here()?;
         self.embed_brushes_of(marks)?;
         let bytes = encode_cel(marks)?;
         write_atomic(&self.strokes_path(layer, cel), &bytes)?;
@@ -597,6 +711,7 @@ impl Bundle {
     }
 
     pub fn apply_as(&mut self, ops: &[Op], author: &str) -> Result<Applied> {
+        self.ensure_here()?;
         let ops = &self.settle_pixels(ops)?[..];
         let (mut doc, mut applied) = apply_all(&self.doc, ops)?;
         self.embed_library(
@@ -684,6 +799,7 @@ impl Bundle {
             }
             MarkChange::Paste {
                 sources,
+                held,
                 transform,
                 cut,
                 made,
@@ -714,6 +830,7 @@ impl Bundle {
                     .collect::<Result<Vec<_>>>()?
                     .into_iter()
                     .flatten()
+                    .chain(held.iter().cloned())
                     .collect();
                 *made = markedit::paste(marks, copies, transform.as_ref(), cut.as_deref(), doc.mark_ids(cel))?;
                 Ok(())
@@ -818,6 +935,7 @@ impl Bundle {
     }
 
     pub fn stamp(&self, author: &str) -> Result<SyncStamp> {
+        self.ensure_here()?;
         let stamp = SyncStamp {
             rev: self.doc.rev,
             author: author.to_string(),
@@ -868,8 +986,8 @@ pub fn summarize(ops: &[Op]) -> String {
             Op::Path { id, .. } => format!("path {id}"),
             Op::Copy(spec) => format!(
                 "copy {} mark{} to {}",
-                spec.ids.len(),
-                if spec.ids.len() == 1 { "" } else { "s" },
+                spec.ids.len() + spec.held.len(),
+                if spec.ids.len() + spec.held.len() == 1 { "" } else { "s" },
                 match &spec.to {
                     crate::ops::CopyTarget::Cel(cel) => cel.clone(),
                     crate::ops::CopyTarget::Frame { frame, .. } => format!("frame {frame}"),
@@ -975,9 +1093,22 @@ pub fn opened() -> Vec<PathBuf> {
     OPENED.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+pub fn make_folder(dir: &Path) -> Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    if let Some(root) = opened()
+        .into_iter()
+        .find(|root| dir.starts_with(root) && !root.is_dir())
+    {
+        return Err(Elsewhere(root).into());
+    }
+    fs::create_dir_all(dir).with_context(|| format!("making the folder {}", dir.display()))
+}
+
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        make_folder(parent)?;
     }
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1027,6 +1158,192 @@ mod tests {
             first.ensure_unchanged().is_err(),
             "a stroke file replaced from outside, as git checkout does, with doc.json untouched"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_drawing_whose_folder_was_renamed_is_found_and_its_old_place_is_never_made_again() {
+        use crate::ops::parse_lines;
+        let dir = scratch("renamed");
+        fs::create_dir_all(&dir).unwrap();
+        let (old, new, away) = (dir.join("first.klad"), dir.join("second.klad"), dir.join("away"));
+        let mut bundle = Bundle::blank(
+            &old,
+            &Blank {
+                layers: 2,
+                ..Blank::default()
+            },
+            "cli",
+        )
+        .unwrap();
+        let stroke = |layer: &str| parse_lines(&format!(r#"{{"op":"stroke","layer":"{layer}","path":"M1 1 L60 60"}}"#));
+        let places: Vec<(String, String)> = bundle
+            .doc
+            .all_layers()
+            .iter()
+            .map(|l| (l.id.clone(), l.cels()[0].id.clone()))
+            .collect();
+        let [(l1, c1), (l2, c2)] = [places[0].clone(), places[1].clone()];
+        let (l1, c1, l2, c2) = (l1.as_str(), c1.as_str(), l2.as_str(), c2.as_str());
+        let marks =
+            |root: &Path, layer: &str, cel: &str| Bundle::open(root).unwrap().read_marks(layer, cel).unwrap().len();
+        bundle.apply(&stroke(l1).unwrap()).unwrap();
+        bundle.apply(&stroke(l2).unwrap()).unwrap();
+        assert_eq!(bundle.whereabouts(), Whereabouts::Here);
+        fs::rename(&old, &new).unwrap();
+        let refused = bundle.apply(&stroke(l1).unwrap()).unwrap_err();
+        assert_eq!(refused.downcast_ref::<Elsewhere>(), Some(&Elsewhere(old.clone())));
+        assert!(bundle.write_marks(l1, c1, &[]).is_err());
+        assert!(bundle.stamp("cli").is_err());
+        assert!(crate::history::step(&mut bundle, crate::history::Stack::Undo).is_err());
+        assert!(write_atomic(&old.join(".cache").join("picture"), b"x").is_err());
+        assert!(make_folder(&old.join("fonts")).is_err());
+        assert!(!old.exists(), "nothing makes the old folder again");
+        if cfg!(unix) {
+            assert_eq!(bundle.whereabouts(), Whereabouts::Renamed(new.clone()));
+            Bundle::blank(&old, &Blank::default(), "cli").unwrap();
+            assert_eq!(
+                bundle.whereabouts(),
+                Whereabouts::Renamed(new.clone()),
+                "another drawing under the old name is not this one"
+            );
+            assert!(bundle.apply(&stroke(l1).unwrap()).is_err());
+            assert!(Bundle::open(&old).unwrap().doc.all_layers().len() == 1);
+            fs::remove_dir_all(&old).unwrap();
+        }
+        bundle.follow(new.clone());
+        assert_eq!(bundle.whereabouts(), Whereabouts::Here);
+        bundle.apply(&stroke(l1).unwrap()).unwrap();
+        assert_eq!((marks(&new, l1, c1), marks(&new, l2, c2)), (2, 1));
+        crate::history::step(&mut bundle, crate::history::Stack::Undo)
+            .unwrap()
+            .unwrap();
+        assert_eq!((marks(&new, l1, c1), marks(&new, l2, c2)), (1, 1));
+        fs::create_dir_all(&away).unwrap();
+        fs::rename(&new, away.join("second.klad")).unwrap();
+        assert_eq!(bundle.whereabouts(), Whereabouts::Gone);
+        assert!(bundle.apply(&stroke(l2).unwrap()).is_err());
+        assert!(!new.exists() && !old.exists());
+        assert_eq!(marks(&away.join("second.klad"), l2, c2), 1);
+        let other = Bundle::blank(&new, &Blank::default(), "cli").unwrap();
+        let mut state = here::read(&new).unwrap();
+        state.tag = format!("{}x", bundle.doc.here.tag);
+        fs::write(here::path(&new), serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(
+            bundle.whereabouts(),
+            Whereabouts::Gone,
+            "another drawing at the old place is not this one: {:?}",
+            other.doc.here.tag
+        );
+        fs::remove_dir_all(&new).unwrap();
+        let copy = |from: &Path, to: &Path| {
+            fn walk(from: &Path, to: &Path) {
+                fs::create_dir_all(to).unwrap();
+                fs::read_dir(from)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .for_each(|e| match e.path().is_dir() {
+                        true => walk(&e.path(), &to.join(e.file_name())),
+                        false => fs::copy(e.path(), to.join(e.file_name())).map(|_| ()).unwrap(),
+                    });
+            }
+            walk(from, to)
+        };
+        copy(&away.join("second.klad"), &new);
+        assert_eq!(
+            bundle.whereabouts(),
+            Whereabouts::Replaced,
+            "the same drawing put back as a new folder, as a restore from a backup does"
+        );
+        assert!(
+            bundle.apply(&stroke(l2).unwrap()).is_err(),
+            "until it is taken as the drawing's folder"
+        );
+        bundle.adopt();
+        bundle.reload().unwrap();
+        bundle.apply(&stroke(l2).unwrap()).unwrap();
+        assert_eq!((marks(&new, l2, c2), marks(&away.join("second.klad"), l2, c2)), (2, 1));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn marks_held_by_a_copy_are_pasted_when_their_source_is_gone() {
+        use crate::ops::{CopySpec, CopyTarget, parse_lines};
+        let dir = scratch("held");
+        let mut bundle = Bundle::blank(
+            &dir,
+            &Blank {
+                layers: 2,
+                ..Blank::default()
+            },
+            "cli",
+        )
+        .unwrap();
+        let places: Vec<(String, String)> = bundle
+            .doc
+            .all_layers()
+            .iter()
+            .map(|l| (l.id.clone(), l.cels()[0].id.clone()))
+            .collect();
+        let [(from, source), (to, target)] = [places[0].clone(), places[1].clone()];
+        bundle
+            .apply(
+                &parse_lines(&format!(
+                    r#"{{"op":"stroke","layer":"{from}","path":"M10 10 L90 10"}}
+{{"op":"stroke","layer":"{from}","path":"M10 40 L90 40"}}"#
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        let held: Vec<(String, Mark)> = bundle
+            .read_marks(&from, &source)
+            .unwrap()
+            .into_iter()
+            .map(|m| (source.clone(), m))
+            .collect();
+        let starts = |marks: &[Mark]| -> Vec<(f32, f32)> { strokes_of(marks).map(|s| s.samples[0].pos()).collect() };
+        let copied = starts(&held.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>());
+        let gone: Vec<String> = held.iter().map(|(cel, m)| markedit::address(cel, m.id())).collect();
+        bundle.apply(&[Op::Remove { ids: gone }]).unwrap();
+        assert!(bundle.read_marks(&from, &source).unwrap().is_empty());
+        let paste = |cut: Option<Vec<[f32; 2]>>| {
+            Op::Copy(CopySpec {
+                ids: Vec::new(),
+                held: held.clone(),
+                to: CopyTarget::Frame {
+                    frame: 0,
+                    layer: Some(to.clone()),
+                },
+                transform: None,
+                cut,
+            })
+        };
+        bundle.apply(&[paste(None)]).unwrap();
+        let pasted = bundle.read_marks(&to, &target).unwrap();
+        assert_eq!(starts(&pasted), copied, "the marks are pasted as they were held");
+        assert!(pasted.iter().all(|m| m.cuts().is_empty()));
+        let half = vec![[0.0, 0.0], [50.0, 0.0], [50.0, 100.0], [0.0, 100.0]];
+        bundle.apply(&[paste(Some(half))]).unwrap();
+        let pasted = bundle.read_marks(&to, &target).unwrap();
+        assert_eq!(pasted.len(), 4);
+        assert!(
+            pasted[2..].iter().all(|m| m.cuts().len() == 1),
+            "with a loop, the part inside it"
+        );
+        let ids: BTreeSet<u32> = pasted.iter().map(Mark::id).collect();
+        assert_eq!(ids.len(), 4, "every pasted mark has an id of its own");
+        crate::history::step(&mut bundle, crate::history::Stack::Undo)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bundle.read_marks(&to, &target).unwrap().len(), 2);
+        let nothing = Op::Copy(CopySpec {
+            ids: Vec::new(),
+            held: Vec::new(),
+            to: CopyTarget::Cel(target.clone()),
+            transform: None,
+            cut: None,
+        });
+        assert!(bundle.apply(&[nothing]).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1431,6 +1748,36 @@ mod tests {
         assert!(!bundle.strokes_path("l1", &copy).exists());
         assert_eq!(bundle.read_marks("l1", "c1").unwrap(), marks);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_copy_onto_a_held_frame_gives_the_frame_its_own_drawing_first() {
+        use crate::ops::parse_lines;
+        let dir = scratch("copy-held");
+        let mut doc = Document::new(256, 256);
+        doc.timeline.frames = 8;
+        doc.layers.push(Layer::paint("l1", "ink", "c1"));
+        doc.next_id = 10;
+        let mut bundle = Bundle::create(&dir, doc).unwrap();
+        bundle
+            .apply(&parse_lines(r#"{"op":"stroke","layer":"l1","path":"M10 10 L90 10"}"#).unwrap())
+            .unwrap();
+        bundle
+            .apply(&parse_lines(r#"{"op":"copy","ids":["c1:s1"],"frame":5,"y":20}"#).unwrap())
+            .unwrap();
+        let cels = bundle.doc.layer("l1").unwrap().cels().to_vec();
+        assert_eq!(cels.iter().map(|c| c.frame).collect::<Vec<_>>(), [0, 5]);
+        assert_eq!(
+            bundle.read_marks("l1", "c1").unwrap().len(),
+            1,
+            "frames 0 to 4 keep their drawing"
+        );
+        assert_eq!(
+            bundle.read_marks("l1", &cels[1].id).unwrap().len(),
+            2,
+            "frame 5 holds a copy of the drawing it showed, and the copied stroke"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

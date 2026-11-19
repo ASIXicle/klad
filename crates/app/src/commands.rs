@@ -35,6 +35,8 @@ pub enum Cmd {
     Zoom,
     Fit,
     ActualSize,
+    ZoomIn,
+    ZoomOut,
     TurnRight,
     TurnLeft,
     Undo,
@@ -210,6 +212,14 @@ pub enum Cmd {
     FillShape,
     OutlineShape,
     SoloLayer,
+    Save,
+    MoveToNewLayer,
+    SelectAllFrames,
+    ExportFrames,
+    ExportSheet,
+    ExportGif,
+    ExportAseprite,
+    ExportGodotWindow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -533,7 +543,7 @@ use Repeat as R;
 use Trigger as T;
 
 impl Cmd {
-    pub const ALL: [Cmd; 206] = [
+    pub const ALL: [Cmd; 216] = [
         Cmd::Brush,
         Cmd::Eraser,
         Cmd::Fill,
@@ -565,6 +575,8 @@ impl Cmd {
         Cmd::Zoom,
         Cmd::Fit,
         Cmd::ActualSize,
+        Cmd::ZoomIn,
+        Cmd::ZoomOut,
         Cmd::TurnRight,
         Cmd::TurnLeft,
         Cmd::Undo,
@@ -740,6 +752,14 @@ impl Cmd {
         Cmd::ShowParts,
         Cmd::ShowArcs,
         Cmd::CompareReference,
+        Cmd::Save,
+        Cmd::MoveToNewLayer,
+        Cmd::SelectAllFrames,
+        Cmd::ExportFrames,
+        Cmd::ExportSheet,
+        Cmd::ExportGif,
+        Cmd::ExportAseprite,
+        Cmd::ExportGodotWindow,
     ];
 
     pub fn spec(self) -> Spec {
@@ -1010,9 +1030,27 @@ impl Cmd {
                 "fit the canvas in the window",
                 icon::FIT,
                 G::View,
-                T::Press(const { &[plain(Key::F)] }),
+                T::Press(const { &[plain(Key::F), cmd(Key::Num0)] }),
                 R::No,
                 "zoom and centre so the whole canvas shows",
+            ),
+            Cmd::ZoomIn => spec(
+                "view.zoom-in",
+                "zoom in",
+                icon::ZOOM,
+                G::View,
+                T::Press(const { &[cmd(Key::Plus), cmd(Key::Equals)] }),
+                R::Yes,
+                "zoom the view in a step about its middle; a pixel drawing by whole pixels",
+            ),
+            Cmd::ZoomOut => spec(
+                "view.zoom-out",
+                "zoom out",
+                icon::ZOOM,
+                G::View,
+                T::Press(const { &[cmd(Key::Minus)] }),
+                R::Yes,
+                "zoom the view out a step about its middle; a pixel drawing by whole pixels",
             ),
             Cmd::ActualSize => spec(
                 "view.100",
@@ -1030,7 +1068,7 @@ impl Cmd {
                 G::View,
                 T::Press(const { &[plain(Key::R)] }),
                 R::Yes,
-                "rotate the view 15 degrees clockwise",
+                "rotate the view clockwise to the next 15 degree step",
             ),
             Cmd::TurnLeft => spec(
                 "view.turn-left",
@@ -1039,7 +1077,7 @@ impl Cmd {
                 G::View,
                 T::Press(const { &[shift(Key::R)] }),
                 R::Yes,
-                "rotate the view 15 degrees anticlockwise",
+                "rotate the view anticlockwise to the next 15 degree step",
             ),
             Cmd::Undo => spec(
                 "edit.undo",
@@ -1055,7 +1093,7 @@ impl Cmd {
                 "redo",
                 icon::REDO,
                 G::Edit,
-                T::Press(const { &[keys(Key::Z, true, false, true)] }),
+                T::Press(const { &[keys(Key::Z, true, false, true), cmd(Key::Y)] }),
                 R::Yes,
                 "redo what was undone",
             ),
@@ -1066,7 +1104,7 @@ impl Cmd {
                 G::Edit,
                 T::Press(const { &[plain(Key::Delete), plain(Key::Backspace)] }),
                 R::No,
-                "remove the selected strokes, points or shape",
+                "remove the selected strokes, points or shape; while the timeline is in use, the selected drawings",
             ),
             Cmd::Deselect => spec(
                 "edit.deselect",
@@ -1079,21 +1117,21 @@ impl Cmd {
             ),
             Cmd::Copy => spec(
                 "edit.copy",
-                "copy the selected strokes",
+                "copy the selection",
                 icon::COPY,
                 G::Edit,
                 T::Press(const { &[cmd(Key::C)] }),
                 R::No,
-                "keep the strokes selected with S for cmd V",
+                "keep the selected strokes or shapes for cmd V; while the timeline is in use, the selected frames",
             ),
             Cmd::Paste => spec(
                 "edit.paste",
-                "paste strokes into this frame",
+                "paste into this frame",
                 icon::PASTE,
                 G::Edit,
                 T::Press(const { &[cmd(Key::V)] }),
                 R::No,
-                "copy the kept strokes into the active layer's drawing at this frame, in place",
+                "put the copied strokes or shapes on this frame, in place: strokes into the active layer's drawing, shapes on a vector layer; while the timeline is in use, the copied frames at the playhead",
             ),
             Cmd::TransformLayer => spec(
                 "edit.transform-layer",
@@ -1120,7 +1158,7 @@ impl Cmd {
                 G::Edit,
                 T::Press(const { &[cmd(Key::A)] }),
                 R::No,
-                "every stroke and fill of the active layer's drawing at this frame",
+                "every stroke and fill of the active layer's drawing at this frame; while the timeline is in use, every frame",
             ),
             Cmd::CutLasso => spec(
                 "edit.cut-lasso",
@@ -1129,7 +1167,7 @@ impl Cmd {
                 G::Edit,
                 T::None,
                 R::No,
-                "on: a lasso also takes the parts of strokes crossing it; off: only strokes wholly inside",
+                "on: a box or loop also takes the parts of strokes crossing it; off (the default for strokes): only strokes wholly inside; on a pixel layer it is on by default and takes the pixels inside",
             ),
             Cmd::Recolour => spec(
                 "edit.recolour",
@@ -1613,7 +1651,7 @@ impl Cmd {
                 "first frame",
                 icon::PREVIOUS,
                 G::Frames,
-                T::Press(const { &[plain(Key::Home)] }),
+                T::Press(const { &[cmd(Key::ArrowLeft), plain(Key::Home)] }),
                 R::No,
                 "go to frame 0",
             ),
@@ -1622,7 +1660,7 @@ impl Cmd {
                 "last frame",
                 icon::NEXT,
                 G::Frames,
-                T::Press(const { &[plain(Key::End)] }),
+                T::Press(const { &[cmd(Key::ArrowRight), plain(Key::End)] }),
                 R::No,
                 "go to the timeline's last frame",
             ),
@@ -1647,11 +1685,11 @@ impl Cmd {
             Cmd::Duplicate => spec(
                 "drawing.duplicate",
                 "duplicate to the next frame",
-                icon::COPY,
+                icon::CARDS,
                 G::Frames,
                 T::None,
                 R::No,
-                "a copy of this drawing right after its exposure, with the same stroke ids",
+                "a copy of this drawing right after its exposure, with the same stroke ids; with frames selected, all of them are repeated after themselves as copies",
             ),
             Cmd::Link => spec(
                 "drawing.link",
@@ -1678,7 +1716,7 @@ impl Cmd {
                 G::Frames,
                 T::None,
                 R::No,
-                "links to it are handed the drawing",
+                "links to it are handed the drawing; with frames selected, every drawing that starts in them goes",
             ),
             Cmd::HoldLonger => spec(
                 "drawing.longer",
@@ -1687,7 +1725,7 @@ impl Cmd {
                 G::Frames,
                 T::Press(const { &[plain(Key::Equals), symbol(Key::Plus)] }),
                 R::Yes,
-                "this drawing shows one frame more; later drawings move along",
+                "this drawing shows one frame more; later drawings move along (the key works while the timeline is in use)",
             ),
             Cmd::HoldShorter => spec(
                 "drawing.shorter",
@@ -1696,7 +1734,7 @@ impl Cmd {
                 G::Frames,
                 T::Press(const { &[plain(Key::Minus)] }),
                 R::Yes,
-                "this drawing shows one frame less",
+                "this drawing shows one frame less, taking back what hold longer did (the key works while the timeline is in use)",
             ),
             Cmd::InsertFrame => spec(
                 "frames.insert",
@@ -1705,7 +1743,7 @@ impl Cmd {
                 G::Frames,
                 T::Press(const { &[plain(Key::I)] }),
                 R::No,
-                "what shows here also shows one frame more",
+                "what shows here also shows one frame more (the key works while the timeline is in use)",
             ),
             Cmd::InsertFrameAll => spec(
                 "frames.insert-all",
@@ -1948,7 +1986,7 @@ impl Cmd {
                 G::Clips,
                 T::None,
                 R::No,
-                "write the sprite sheet, SpriteFrames and scene into the Godot folder",
+                "write the sprite sheet, SpriteFrames and scene into the Godot folder chosen before, without the export window",
             ),
             Cmd::Palette => spec(
                 "panel.palette",
@@ -1957,7 +1995,7 @@ impl Cmd {
                 G::Panels,
                 T::Press(const { &[cmd(Key::K)] }),
                 R::No,
-                "type a few letters of what you want to do",
+                "type a word for what you want to do",
             ),
             Cmd::Keys => spec(
                 "panel.keys",
@@ -2162,7 +2200,7 @@ impl Cmd {
                 "turn the view upright",
                 icon::TURN,
                 G::View,
-                T::None,
+                T::Press(const { &[alt(Key::R)] }),
                 R::No,
                 "rotation back to 0, about the middle of the window",
             ),
@@ -2209,7 +2247,7 @@ impl Cmd {
                 G::Edit,
                 T::Press(const { &[cmd(Key::D)] }),
                 R::No,
-                "a copy of the selected strokes or shape right on top, selected",
+                "a copy of the selected strokes or shape right on top, selected; while the timeline is in use, the selected frames are repeated after themselves",
             ),
             Cmd::NudgeLeft => spec(
                 "edit.nudge-left",
@@ -2373,6 +2411,78 @@ impl Cmd {
                 R::No,
                 "the selected shape's outline becomes the current colour (an outline is added at the pen's width when it has none)",
             ),
+            Cmd::Save => spec(
+                "file.save",
+                "save",
+                icon::SAVE,
+                G::File,
+                T::Press(const { &[cmd(Key::S)] }),
+                R::No,
+                "klad saves every change as you make it; this says so, and where the drawing is",
+            ),
+            Cmd::MoveToNewLayer => spec(
+                "edit.to-new-layer",
+                "move the selection to a new layer",
+                icon::STACK_PLUS,
+                G::Edit,
+                T::None,
+                R::No,
+                "the selected strokes or shapes go to a new layer right above this one, to split a drawing into parts",
+            ),
+            Cmd::SelectAllFrames => spec(
+                "span.all",
+                "select every frame",
+                icon::SELECT_ALL,
+                G::Selected,
+                T::None,
+                R::No,
+                "every frame of every layer in the timeline, to copy, duplicate or retime them (cmd A while the timeline is in use)",
+            ),
+            Cmd::ExportFrames => spec(
+                "file.export-frames",
+                "export numbered frames",
+                icon::EXPORT,
+                G::File,
+                T::None,
+                R::No,
+                "one PNG per frame, numbered, into a folder",
+            ),
+            Cmd::ExportSheet => spec(
+                "file.export-sheet",
+                "export a sprite sheet",
+                icon::EXPORT,
+                G::File,
+                T::None,
+                R::No,
+                "every distinct picture once on sheet pages, with a JSON file in Aseprite's layout",
+            ),
+            Cmd::ExportGif => spec(
+                "file.export-gif",
+                "export a GIF",
+                icon::EXPORT,
+                G::File,
+                T::None,
+                R::No,
+                "an animated GIF of a clip, a range of frames or the whole timeline",
+            ),
+            Cmd::ExportAseprite => spec(
+                "file.export-aseprite",
+                "export an Aseprite file",
+                icon::EXPORT,
+                G::File,
+                T::None,
+                R::No,
+                "the pixel layers, every frame's drawing, the palette and the clips as tags in an .aseprite file",
+            ),
+            Cmd::ExportGodotWindow => spec(
+                "file.export-godot",
+                "export for Godot",
+                icon::EXPORT,
+                G::File,
+                T::None,
+                R::No,
+                "choose the Godot folder and what to write there: a sprite, a parallax scene, a rig or a tile set, with shadows and sample shaders",
+            ),
             Cmd::SoloLayer => spec(
                 "layer.solo",
                 "show only this layer",
@@ -2438,12 +2548,12 @@ impl Cmd {
             ),
             Cmd::Export => spec(
                 "file.export",
-                "export",
+                "export an image",
                 icon::EXPORT,
                 G::File,
                 T::Press(const { &[cmd(Key::E)] }),
                 R::No,
-                "export this frame, a layer, numbered frames or a sprite sheet as PNGs, as klad export does",
+                "this frame, or one layer of it, as a PNG",
             ),
             Cmd::AddFont => spec(
                 "file.font",
@@ -2466,7 +2576,7 @@ impl Cmd {
             Cmd::FillLike => spec(
                 "colour.fill-like",
                 "fill like the first drawing",
-                icon::COPY,
+                icon::FILL,
                 G::Colour,
                 T::None,
                 R::No,
@@ -2625,6 +2735,8 @@ impl Cmd {
             Cmd::Bigger => "Bigger brush",
             Cmd::Fit => "Fit",
             Cmd::ActualSize => "100%",
+            Cmd::ZoomIn => "Zoom in",
+            Cmd::ZoomOut => "Zoom out",
             Cmd::TurnRight => "Rotate right",
             Cmd::TurnLeft => "Rotate left",
             Cmd::Undo => "Undo",
@@ -2721,7 +2833,7 @@ impl Cmd {
             Cmd::DeleteClip => "Delete clip",
             Cmd::ClipLoops => "Loops",
             Cmd::ClipOwnFps => "Own fps",
-            Cmd::ExportGodot => "Export to Godot",
+            Cmd::ExportGodot => "Godot sprite, same folder",
             Cmd::Palette => "Find a command…",
             Cmd::Keys => "Keyboard shortcuts",
             Cmd::HideAll => "Hide panels",
@@ -2786,7 +2898,7 @@ impl Cmd {
             Cmd::PaintOver => "Paint over…",
             Cmd::CompareReference => "Compare with reference",
             Cmd::About => "About klad and licences",
-            Cmd::Export => "Export…",
+            Cmd::Export => "Image…",
             Cmd::AddFont => "Add font…",
             Cmd::Refill => "Refill drawing",
             Cmd::FillLike => "Fill like first drawing",
@@ -2801,6 +2913,14 @@ impl Cmd {
             Cmd::FillShape => "Fill with colour",
             Cmd::OutlineShape => "Outline with colour",
             Cmd::SoloLayer => "Show only this",
+            Cmd::Save => "Save",
+            Cmd::MoveToNewLayer => "Move to new layer",
+            Cmd::SelectAllFrames => "Select all frames",
+            Cmd::ExportFrames => "Frames…",
+            Cmd::ExportSheet => "Sprite sheet…",
+            Cmd::ExportGif => "GIF…",
+            Cmd::ExportAseprite => "Aseprite file…",
+            Cmd::ExportGodotWindow => "Godot…",
             Cmd::Parallax
             | Cmd::LightPreview
             | Cmd::Eyedropper
@@ -2845,13 +2965,25 @@ pub const MENUS: [Menu; 9] = [
             Run(Cmd::OpenDocument),
             Item::Recent,
             Run(Cmd::CloseDocument),
+            Run(Cmd::Save),
             Line,
             Run(Cmd::ImportPicture),
             Run(Cmd::Pixelize),
             Run(Cmd::AddFont),
             Line,
-            Run(Cmd::Export),
-            Run(Cmd::ExportGodot),
+            Sub(
+                "Export",
+                &[
+                    Run(Cmd::Export),
+                    Run(Cmd::ExportFrames),
+                    Run(Cmd::ExportSheet),
+                    Run(Cmd::ExportGif),
+                    Run(Cmd::ExportAseprite),
+                    Line,
+                    Run(Cmd::ExportGodotWindow),
+                    Run(Cmd::ExportGodot),
+                ],
+            ),
             Line,
             Run(Cmd::CopyPath),
             Run(Cmd::InstallCommand),
@@ -2869,6 +3001,7 @@ pub const MENUS: [Menu; 9] = [
             Run(Cmd::Paste),
             Run(Cmd::DuplicateInPlace),
             Run(Cmd::Delete),
+            Run(Cmd::MoveToNewLayer),
             Line,
             Run(Cmd::SelectAll),
             Run(Cmd::SelectSameColour),
@@ -3065,6 +3198,8 @@ pub const MENUS: [Menu; 9] = [
             Sub(
                 "Selected frames",
                 &[
+                    Run(Cmd::SelectAllFrames),
+                    Line,
                     Run(Cmd::OnOnes),
                     Run(Cmd::OnTwos),
                     Run(Cmd::OnThrees),
@@ -3100,6 +3235,8 @@ pub const MENUS: [Menu; 9] = [
     Menu {
         title: "View",
         items: &[
+            Run(Cmd::ZoomIn),
+            Run(Cmd::ZoomOut),
             Run(Cmd::Fit),
             Run(Cmd::ActualSize),
             Line,
@@ -3184,9 +3321,46 @@ fn squash(text: &str) -> String {
     text.to_lowercase().chars().filter(|c| *c != '-').collect()
 }
 
-fn subsequence(needle: &str, hay: &str) -> bool {
-    let mut rest = hay.chars();
-    needle.chars().all(|n| rest.any(|h| h == n))
+fn words(text: &str) -> Vec<String> {
+    squash(text)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| match w {
+            "color" => "colour".to_string(),
+            "colors" => "colours".to_string(),
+            _ => w.to_string(),
+        })
+        .collect()
+}
+
+fn in_order(wanted: &[String], hay: &[String]) -> bool {
+    let mut rest = hay.iter();
+    wanted.iter().all(|w| rest.any(|h| h.starts_with(w.as_str())))
+}
+
+pub fn other_names(cmd: Cmd) -> &'static [&'static str] {
+    match cmd {
+        Cmd::Deselect => &["deselect", "select none", "unselect"],
+        Cmd::Settings => &["preferences", "options"],
+        Cmd::Keys => &["shortcuts", "keyboard shortcuts", "hotkeys", "key bindings"],
+        Cmd::TurnLeft90 | Cmd::TurnRight90 => &["rotate the selection"],
+        Cmd::TurnLeft | Cmd::TurnRight => &["rotate the view", "rotate the canvas"],
+        Cmd::FlipH | Cmd::FlipV => &["mirror the selection"],
+        Cmd::TransformLayer => &["free transform", "scale the layer", "rotate the layer"],
+        Cmd::FirstSteps => &["help", "tutorial", "getting started"],
+        Cmd::Guides => &["help", "manual", "documentation"],
+        Cmd::InspectorPane => &["opacity", "transparency", "blend mode", "layer properties"],
+        Cmd::Eyedropper => &["eyedropper", "colour picker", "sample colour"],
+        Cmd::Fill => &["bucket", "paint bucket", "flood fill"],
+        Cmd::Strokes => &["lasso"],
+        Cmd::TextTool => &["type"],
+        Cmd::Pan => &["hand"],
+        Cmd::Zoom => &["zoom in", "zoom out", "magnify"],
+        Cmd::AddMask => &["layer mask"],
+        Cmd::Duplicate => &["copy the frame"],
+        Cmd::Save => &["save as"],
+        _ => &[],
+    }
 }
 
 pub fn score(query: &str, cmd: Cmd) -> Option<u32> {
@@ -3194,9 +3368,12 @@ pub fn score(query: &str, cmd: Cmd) -> Option<u32> {
     if q.is_empty() {
         return Some(5);
     }
+    let wanted = words(&q);
+    if wanted.is_empty() {
+        return None;
+    }
     let s = cmd.spec();
     let name = squash(s.name);
-    let words: Vec<&str> = name.split_whitespace().collect();
     let key = s.key_label().to_lowercase();
     if name.starts_with(&q) {
         return Some(0);
@@ -3204,16 +3381,13 @@ pub fn score(query: &str, cmd: Cmd) -> Option<u32> {
     if key == q || key.split(" or ").any(|k| k == q) {
         return Some(1);
     }
-    if words.iter().any(|w| w.starts_with(&q)) {
+    if in_order(&wanted, &words(s.name)) || other_names(cmd).iter().any(|o| in_order(&wanted, &words(o))) {
         return Some(2);
     }
-    if name.contains(&q) {
-        return Some(3);
-    }
-    if subsequence(&q, &name) {
+    if in_order(&wanted, &words(s.about)) {
         return Some(4);
     }
-    squash(s.group.name()).contains(&q).then_some(6)
+    in_order(&wanted, &words(s.group.name())).then_some(6)
 }
 
 pub fn rank(query: &str, recent: &[Cmd]) -> Vec<Cmd> {
@@ -3549,8 +3723,27 @@ mod tests {
     }
 
     #[test]
+    fn the_finder_matches_whole_words_and_the_names_other_apps_use() {
+        let first = |q: &str| rank(q, &[]).first().copied();
+        assert_eq!(first("deselect"), Some(Cmd::Deselect));
+        assert_eq!(first("preferences"), Some(Cmd::Settings));
+        assert_eq!(first("shortcuts"), Some(Cmd::Keys));
+        assert_eq!(first("eyedropper"), Some(Cmd::Eyedropper));
+        assert_eq!(first("color picker"), Some(Cmd::Eyedropper));
+        assert_eq!(first("new layer"), Some(Cmd::NewPaintLayer));
+        assert_eq!(first("hide layer"), Some(Cmd::ToggleVisible));
+        assert_eq!(first("save as"), Some(Cmd::Save));
+        assert!(rank("rotate", &[]).contains(&Cmd::TurnLeft90));
+        assert!(rank("help", &[])[..2].contains(&Cmd::FirstSteps));
+        assert!(rank("png", &[]).contains(&Cmd::Export));
+        ["crop", "merge", "canvas size", "lete", "elect", "dslct"]
+            .into_iter()
+            .for_each(|q| assert_eq!(rank(q, &[]), Vec::<Cmd>::new(), "{q} finds nothing"));
+    }
+
+    #[test]
     fn keys_read_the_way_the_docs_write_them() {
-        assert_eq!(Cmd::Redo.spec().key_label(), "shift cmd Z");
+        assert_eq!(Cmd::Redo.spec().key_label(), "shift cmd Z or cmd Y");
         assert_eq!(Cmd::NextDrawing.spec().key_label(), "alt .");
         assert_eq!(Cmd::Delete.spec().key_label(), "Delete or Backspace");
         assert_eq!(Cmd::Play.spec().key_label(), "Return");
@@ -3566,5 +3759,47 @@ mod tests {
             Cmd::NewDrawing.spec().hint(),
             "new drawing here (K)\na blank drawing at this frame on the active layer"
         );
+    }
+
+    fn menu_paths(prefix: &str, items: &[Item], out: &mut Vec<(Cmd, String)>) {
+        items.iter().for_each(|item| match item {
+            Item::Run(cmd) => out.push((*cmd, format!("{prefix} > {}", cmd.menu()))),
+            Item::Sub(name, inner) => menu_paths(&format!("{prefix} > {name}"), inner, out),
+            Item::Recent => out.push((Cmd::OpenRecent, format!("{prefix} > {}", Cmd::OpenRecent.menu()))),
+            Item::Line => {}
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn command_inventory() {
+        let out = std::env::var("KLAD_INVENTORY_OUT").expect("set KLAD_INVENTORY_OUT to the file to write");
+        let mut paths = Vec::new();
+        MENUS.iter().for_each(|m| menu_paths(m.title, m.items, &mut paths));
+        let cell = |text: &str| text.replace('|', "/").replace('\n', " ");
+        let rows: Vec<String> = Cmd::ALL
+            .iter()
+            .map(|cmd| {
+                let spec = cmd.spec();
+                let menu = paths
+                    .iter()
+                    .find(|(c, _)| c == cmd)
+                    .map_or_else(|| "(no menu)".to_string(), |(_, path)| path.clone());
+                format!(
+                    "| {} | {} | {} | {} | `{}` | `{cmd:?}` | {} |",
+                    spec.group.name(),
+                    cell(&menu),
+                    cell(spec.name),
+                    cell(&spec.key_label()),
+                    spec.id,
+                    cell(spec.about)
+                )
+            })
+            .collect();
+        let text = format!(
+            "| group | menu | name | key or gesture | id | in the code | what it does |\n|---|---|---|---|---|---|---|\n{}\n",
+            rows.join("\n")
+        );
+        std::fs::write(out, text).unwrap();
     }
 }

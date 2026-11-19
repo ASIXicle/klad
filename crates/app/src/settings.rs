@@ -97,6 +97,8 @@ pub struct Settings {
     pub real_size_shown: bool,
     #[serde(default = "one_u32", rename = "realSizeScale")]
     pub real_size_scale: u32,
+    #[serde(default, rename = "colourModel")]
+    pub colour_model: crate::color::Model,
 }
 
 fn one_u32() -> u32 {
@@ -129,6 +131,7 @@ impl Default for Settings {
             pixel_grid: true,
             real_size_shown: false,
             real_size_scale: 1,
+            colour_model: crate::color::Model::default(),
         }
     }
 }
@@ -238,6 +241,18 @@ impl Settings {
         self.documents.insert(0, text);
         self.documents.truncate(DOCUMENTS);
         self.welcomed = true;
+    }
+
+    pub fn moved(&mut self, from: &Path, to: &Path) {
+        let from = from
+            .parent()
+            .and_then(|dir| fs::canonicalize(dir).ok())
+            .zip(from.file_name())
+            .map_or_else(|| from.to_path_buf(), |(dir, name)| dir.join(name))
+            .display()
+            .to_string();
+        self.documents.retain(|p| *p != from);
+        self.opened(to);
     }
 
     pub fn forget(&mut self, path: &str) {

@@ -14,6 +14,7 @@ mod first;
 mod history;
 mod keys;
 mod layers;
+mod lock;
 mod look;
 mod make;
 mod maps;
@@ -25,13 +26,28 @@ mod pixels;
 mod prefs;
 mod selection;
 mod shift;
+mod target;
 mod text;
 mod timeline;
 mod tweens;
+mod words;
+
 #[cfg(test)]
 pub(crate) use commands::install_job;
 #[cfg(test)]
 mod drag_time;
+#[cfg(test)]
+mod inventory;
+#[cfg(test)]
+mod journeys;
+#[cfg(test)]
+mod monkey;
+#[cfg(test)]
+mod sizes;
+#[cfg(test)]
+mod sweep;
+#[cfg(test)]
+mod testkit;
 #[cfg(test)]
 mod ui_tests;
 
@@ -57,7 +73,7 @@ use klad_brush::{
     stroke_blend,
 };
 use klad_core::brushes::{BrushDef, Curve, TipDef, pick_id};
-use klad_core::bundle::now_ms;
+use klad_core::bundle::{Whereabouts, now_ms};
 use klad_core::doc::{Item, Kind, Linear, Loc, MASK, Node, Paint, Radial, Shape, Stop};
 use klad_core::fill::{self, Fill, FillRef, FillSource, Seed};
 use klad_core::history::Stack;
@@ -76,14 +92,22 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use target::Target;
 
+const OWN_JOB: Duration = Duration::from_secs(3);
+const TEXT_SHARE: f32 = 0.25;
 const HANDLE: f32 = 12.0;
+const DROPPER: f32 = 22.0;
+const TWIST_PAUSE: f64 = 0.3;
+const CHANNEL_TRACK: f32 = 150.0;
 const REFILL_MS: f64 = 8.0;
 const FINISH_WAIT: Duration = Duration::from_secs(2);
 const DRAG_SLOP: f32 = 3.0;
 const KNOB: f32 = 30.0;
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 const GRID_FROM: f32 = 8.0;
+const SETTLING_FRAMES: u32 = 10;
+const REFIT_CHANGE: f32 = 0.15;
 pub(crate) const REAL_MAX: u32 = 512;
 
 type RealKey = (u64, u32, u64);
@@ -113,6 +137,63 @@ fn to_local(m: [f32; 6], c: Vec2) -> [f32; 2] {
 fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Focus {
+    Canvas,
+    Timeline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Mixing {
+    model: color::Model,
+    values: [f32; 3],
+    of: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dye {
+    Strokes,
+    Fill,
+    Outline,
+}
+
+impl Dye {
+    fn of(cmd: Cmd) -> Option<Dye> {
+        match cmd {
+            Cmd::Recolour => Some(Dye::Strokes),
+            Cmd::FillShape => Some(Dye::Fill),
+            Cmd::OutlineShape => Some(Dye::Outline),
+            _ => None,
+        }
+    }
+
+    fn what(self) -> &'static str {
+        match self {
+            Dye::Strokes => "the colour of the selected strokes",
+            Dye::Fill => "the shape's fill",
+            Dye::Outline => "the shape's outline",
+        }
+    }
+}
+
+fn paint_colour(paint: &klad_core::doc::Paint) -> Option<String> {
+    use klad_core::doc::Paint;
+    let stops = match paint {
+        Paint::Solid(hex) => return Some(hex.clone()),
+        Paint::Linear { linear } => &linear.stops,
+        Paint::Radial { radial } => &radial.stops,
+    };
+    let colours: Vec<[f32; 4]> = stops.iter().filter_map(|s| color::rgba_of(&s.1)).collect();
+    klad_core::color::mean(&colours).map(klad_core::color::to_hex)
+}
+
+const ALPHA: color::Channel = color::Channel {
+    name: "A",
+    lo: 0.0,
+    hi: 100.0,
+    about: "alpha: how see-through the colour is, 0 to 100",
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tool {
@@ -253,7 +334,7 @@ struct FillTool {
 impl Default for FillTool {
     fn default() -> Self {
         Self {
-            reference: FillRef::This,
+            reference: FillRef::All,
             tolerance: fill::TOLERANCE,
             gap: 4.0,
             expand: fill::EXPAND,
@@ -308,10 +389,19 @@ fn grab(screen: [Pos2; 4], pos: Pos2, edges: bool) -> Option<Grab> {
     if let Some(side) = (0..4).find(|&side| edges && pos.distance(edge(&flat, side).to_pos2()) <= reach) {
         return Some(Grab::Stretch(side));
     }
-    let (min, max) = screen
-        .iter()
-        .fold((screen[0], screen[0]), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
-    Rect::from_min_max(min, max).contains(pos).then_some(Grab::Move)
+    let turns: Vec<f32> = (0..4)
+        .map(|i| {
+            let (side, to) = (screen[(i + 1) % 4] - screen[i], pos - screen[i]);
+            side.x * to.y - side.y * to.x
+        })
+        .collect();
+    let inside = turns.iter().all(|t| *t >= 0.0) || turns.iter().all(|t| *t <= 0.0);
+    inside.then_some(Grab::Move)
+}
+
+fn upright(corners: &[Vec2; 4]) -> bool {
+    let level = |a: f32, b: f32| (a - b).abs() < 1e-3 * (1.0 + a.abs());
+    level(corners[0].y, corners[1].y) && level(corners[1].x, corners[2].x)
 }
 
 fn edge(corners: &[Vec2; 4], side: usize) -> Vec2 {
@@ -344,6 +434,7 @@ struct Drag {
     corners: [Vec2; 4],
     slop: f32,
     crossed: bool,
+    outside: bool,
 }
 
 impl Drag {
@@ -584,6 +675,13 @@ impl Tuning {
     }
 }
 
+fn hand_taper(id: &str, def: &BrushDef) -> [f32; 2] {
+    match klad_core::brushes::library(klad_core::brushes::base_of(id)) {
+        Some(stock) if stock.taper == def.taper => [0.0, 0.0],
+        _ => def.taper,
+    }
+}
+
 #[derive(Default)]
 struct Readout {
     pressure: f32,
@@ -628,6 +726,7 @@ pub(crate) enum Want {
     Open,
     Recent,
     Close,
+    Gone,
     Path(std::path::PathBuf),
 }
 
@@ -638,13 +737,31 @@ pub(crate) struct Editor {
     buffer: StrokeBuffer,
     live: Option<Live>,
     dock_room: f32,
+    dock_fit: crate::layout::Fit,
+    dock_kept: Option<crate::layout::Pane>,
+    folded_for_room: Vec<crate::layout::Pane>,
+    fitted_to: Option<Vec2>,
+    canvas_frames: u32,
+    layer_in_sight: Option<String>,
+    timeline_still: Option<bool>,
+    timeline_rows: f32,
+    timeline_bar: f32,
+    timeline_shown: f32,
+    timeline_dragged: bool,
     tool: Tool,
     brush: String,
     previous_brush: String,
+    other_size: Option<(f32, u32)>,
+    heard_seq: Option<u64>,
+    bar_above: bool,
+    text_click: Option<(Instant, usize)>,
+    text_pressing: bool,
+    job_ended: Option<Instant>,
     tuning: Tuning,
     size: f32,
     color: [f32; 4],
     hsva: Hsva,
+    mixing: Option<Mixing>,
     swatch_name: String,
     fill: FillTool,
     lasso: Option<Lasso>,
@@ -661,6 +778,7 @@ pub(crate) struct Editor {
     pub(crate) wants: Option<Want>,
     view: Option<View>,
     canvas_rect: Rect,
+    held_messages: Vec<Rect>,
     navigating: bool,
     focused: bool,
     pen: Option<Pen>,
@@ -736,6 +854,12 @@ pub(crate) struct Editor {
     bindings: crate::commands::Bindings,
     capturing: Option<Cmd>,
     keys_busy: bool,
+    field_had_focus: bool,
+    turned_box: Option<(String, u64, [Vec2; 4])>,
+    cells_last: bool,
+    focus: Focus,
+    shape_clip: Option<Vec<serde_json::Value>>,
+    twist: Option<(f32, f64)>,
     key_filter: String,
     selection: Option<String>,
     group: Vec<String>,
@@ -762,7 +886,7 @@ pub(crate) struct Editor {
     pub(crate) pixel_filled: bool,
     pub(crate) pixel_diagonal: bool,
     pub(crate) pixel_fill_all: bool,
-    pub(crate) pixel_box: bool,
+    pub(crate) select_box: bool,
     pub(crate) pixel_mode: PixelMode,
     pub(crate) pixel_dither: u32,
     pub(crate) pixel_two: bool,
@@ -782,6 +906,7 @@ pub(crate) struct Editor {
     simplify_px: f32,
     under: Vec<String>,
     cut_lasso: bool,
+    cut_pixels: bool,
     cut_view: Option<CutView>,
     timeline: timeline::Timeline,
     frames: FrameCache,
@@ -794,11 +919,13 @@ impl Editor {
         let scene = Scene::open_lazy(path)?;
         let brushes = BrushSet::for_bundle(&scene.bundle)?;
         let embedded = scene.bundle.brushes()?;
-        let tuning = Tuning::of(
-            brushes
-                .def("ink")
-                .ok_or_else(|| crate::report::bug("the ink brush is missing from the library"))?,
-        );
+        let ink = brushes
+            .def("ink")
+            .ok_or_else(|| crate::report::bug("the ink brush is missing from the library"))?;
+        let tuning = Tuning {
+            taper: hand_taper("ink", ink),
+            ..Tuning::of(ink)
+        };
         let settings_path = settings::default_path();
         let mut settings = settings_path.as_deref().map(Settings::load).unwrap_or_default();
         let offered = settings.offer_real_size(scene.bundle.doc.pixel_art());
@@ -830,13 +957,31 @@ impl Editor {
             embedded,
             live: None,
             dock_room: 0.0,
+            dock_fit: crate::layout::Fit::default(),
+            dock_kept: None,
+            folded_for_room: Vec::new(),
+            fitted_to: None,
+            canvas_frames: 0,
+            layer_in_sight: None,
+            timeline_still: None,
+            timeline_rows: f32::INFINITY,
+            timeline_bar: crate::layout::TIMELINE_FOLDED,
+            timeline_shown: 0.0,
+            timeline_dragged: false,
             tool: Tool::Brush,
             brush: "ink".into(),
             previous_brush: "ink".into(),
+            other_size: None,
+            heard_seq: None,
+            bar_above: false,
+            text_click: None,
+            text_pressing: false,
+            job_ended: None,
             tuning,
             size: 12.0,
             color: [0.08, 0.08, 0.1, 1.0],
             hsva: Hsva::from_rgba([0.08, 0.08, 0.1, 1.0], 0.0),
+            mixing: None,
             swatch_name: String::new(),
             fill: FillTool::default(),
             lasso: None,
@@ -853,6 +998,7 @@ impl Editor {
             wants: None,
             view: None,
             canvas_rect: Rect::NOTHING,
+            held_messages: Vec::new(),
             navigating: false,
             focused: false,
             pen: if cfg!(test) { None } else { Pen::install() },
@@ -927,6 +1073,12 @@ impl Editor {
             bindings: crate::commands::Bindings::default(),
             capturing: None,
             keys_busy: false,
+            field_had_focus: false,
+            turned_box: None,
+            cells_last: false,
+            focus: Focus::Canvas,
+            shape_clip: None,
+            twist: None,
             key_filter: String::new(),
             selection: None,
             group: Vec::new(),
@@ -953,7 +1105,7 @@ impl Editor {
             pixel_filled: false,
             pixel_diagonal: false,
             pixel_fill_all: false,
-            pixel_box: true,
+            select_box: true,
             pixel_mode: PixelMode::Draw,
             pixel_dither: 100,
             pixel_two: false,
@@ -972,13 +1124,25 @@ impl Editor {
             path_commit: None,
             simplify_px: 1.5,
             under: Vec::new(),
-            cut_lasso: true,
+            cut_lasso: false,
+            cut_pixels: true,
             cut_view: None,
             clipboard: None,
             timeline: timeline::Timeline::default(),
             frames,
         };
         editor.use_defaults();
+        let newest = klad_core::history::peek(&editor.scene.bundle, Stack::Undo)
+            .ok()
+            .flatten();
+        editor.heard_seq = Some(newest.as_ref().map_or(0, |(entry, _)| entry.seq));
+        if newest.is_some_and(|(entry, _)| entry.author != "editor") {
+            editor.tool = Tool::Select;
+        }
+        if editor.scene.active_layer().is_none() && !editor.scene.bundle.doc.layers.is_empty() {
+            let top = editor.scene.bundle.doc.layers.len() - 1;
+            editor.scene.set_active_later(vec![top]);
+        }
         editor.request_canvas();
         editor.tend_canvas(timeline::OPEN_WAIT)?;
         Ok(editor)
@@ -992,7 +1156,12 @@ impl Editor {
         if let Some(size) = d.size {
             self.size = size.clamp(0.5, 500.0);
         }
-        self.timeline.on = d.exposure.clamp(1, 8);
+        let tall = self.scene.bundle.doc.canvas.height as f32;
+        self.text_tool.size = (tall * TEXT_SHARE).round().clamp(1.0, text::TEXT_SIZE);
+        self.timeline.on = match self.scene.bundle.doc.pixel_art() {
+            true => 1,
+            false => d.exposure.clamp(1, 8),
+        };
         self.scene.onion.before = d.onion_before;
         self.scene.onion.after = d.onion_after;
         self.scene.onion.opacity = d.onion_opacity.clamp(0.05, 1.0);
@@ -1053,6 +1222,22 @@ impl Editor {
     }
 
     pub(crate) fn failed(&mut self, e: anyhow::Error) {
+        if let Some(locked) = e.downcast_ref::<lock::Locked>() {
+            self.say(Tone::Refused, locked.to_string());
+            return;
+        }
+        if e.downcast_ref::<klad_core::bundle::Changed>().is_some() {
+            self.say(
+                Tone::Refused,
+                "the drawing was changed from outside at that very moment, so nothing was done: do it again",
+            );
+            return;
+        }
+        let text = format!("{e:#}");
+        if text.contains(words::RAMP_CLI) {
+            self.say(Tone::Refused, self.refusal_words(&text));
+            return;
+        }
         match crate::report::is_bug(&e) {
             true => self.say(Tone::Error, crate::report::bug_message(&e)),
             false => self.error(e),
@@ -1081,18 +1266,60 @@ impl Editor {
         }
     }
 
+    pub(super) fn folder_is_there(&mut self) -> bool {
+        match self.scene.bundle.whereabouts() {
+            Whereabouts::Here => true,
+            Whereabouts::Renamed(to) => {
+                self.follow(to);
+                true
+            }
+            Whereabouts::Replaced => {
+                self.scene.bundle.adopt();
+                self.watch = watch(&self.scene.bundle.root, self.ctx.clone()).ok();
+                self.external.get_or_insert(now_ms());
+                true
+            }
+            Whereabouts::Gone => {
+                self.wants = Some(Want::Gone);
+                false
+            }
+        }
+    }
+
+    fn follow(&mut self, to: PathBuf) {
+        let from = self.scene.bundle.root.clone();
+        self.scene.bundle.follow(to.clone());
+        self.frames.disk = Some(self.scene.pictures());
+        self.watch = match watch(&to, self.ctx.clone()) {
+            Ok(watch) => Some(watch),
+            Err(e) => {
+                self.say(
+                    Tone::Error,
+                    format!("not watching the drawing's folder, so agent edits will not show: {e}"),
+                );
+                None
+            }
+        };
+        self.external.get_or_insert(now_ms());
+        self.settings.moved(&from, &to);
+        self.settings_dirty = true;
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Title(crate::start::title(Some(&to))));
+        let name = to
+            .file_stem()
+            .map_or_else(|| to.display().to_string(), |s| s.to_string_lossy().to_string());
+        self.say(
+            Tone::Info,
+            format!("this drawing's folder was renamed: it is called {name} now, and klad goes on in it"),
+        );
+    }
+
     fn sync(&mut self) -> Result<()> {
         if let Some(first) = self.watch.as_ref().and_then(|w| w.events.try_iter().min()) {
             self.external.get_or_insert(first);
             self.pins = notes::read(&self.scene.bundle);
         }
-        let committing = self.path_commit.is_some();
-        if self.live.is_some()
-            || self.drag.is_some()
-            || self.point_drag.is_some()
-            || committing
-            || self.external.is_none()
-        {
+        if self.in_the_middle() || self.external.is_none() {
             return Ok(());
         }
         if !self.scene.bundle.changed_on_disk() {
@@ -1102,9 +1329,40 @@ impl Editor {
         self.reload()
     }
 
+    fn in_the_middle(&self) -> bool {
+        self.live.is_some() || self.drag.is_some() || self.point_drag.is_some() || self.path_commit.is_some()
+    }
+
+    pub(super) fn follow_the_folder_between_acts(&mut self) -> Result<()> {
+        match self.in_the_middle() {
+            true => Ok(()),
+            false => self.follow_the_folder(),
+        }
+    }
+
+    pub(super) fn follow_the_folder(&mut self) -> Result<()> {
+        match self.scene.bundle.changed_on_disk() {
+            true => self.reload(),
+            false => Ok(()),
+        }
+    }
+
+    pub(super) fn write(&mut self, ops: &[Op]) -> Result<(Vec<usize>, klad_core::ops::Applied)> {
+        self.follow_the_folder()?;
+        lock::refuse(&self.scene.bundle.doc, ops)?;
+        let layered = ops
+            .iter()
+            .any(|op| matches!(op, Op::Move { .. } | Op::AddLayer { .. } | Op::Remove { .. }));
+        let bases = layered.then(|| words::clip_bases(&self.scene.bundle.doc));
+        let done = self.scene.apply_with(ops, &self.brushes)?;
+        if let Some(words) = bases.and_then(|b| self.clips_moved(&b)) {
+            self.say(Tone::Refused, words);
+        }
+        Ok(done)
+    }
+
     fn reload(&mut self) -> Result<()> {
         let seen = self.external.take();
-        self.forget_typing_preview();
         self.checks.gaps = None;
         self.checks.arcs = None;
         let start = Instant::now();
@@ -1132,7 +1390,28 @@ impl Editor {
             None => format!("{tiles} tiles refreshed in {took:.0} ms"),
         };
         self.measure("sync", text);
+        self.hear_the_agent();
         Ok(())
+    }
+
+    fn hear_the_agent(&mut self) {
+        let Some((entry, _)) = klad_core::history::peek(&self.scene.bundle, Stack::Undo).ok().flatten() else {
+            return;
+        };
+        let known = self.heard_seq.replace(entry.seq);
+        let own = self.jobs.busy(crate::jobs::Tag::Edit)
+            || self.jobs.busy(crate::jobs::Tag::Inbetween)
+            || self.job_ended.is_some_and(|t| t.elapsed() < OWN_JOB);
+        if known.is_some_and(|seq| entry.seq > seq) && entry.author != "editor" && !own {
+            let who = match entry.author.as_str() {
+                "cli" => "the agent".to_string(),
+                other => history::who(other),
+            };
+            self.say(
+                Tone::Done,
+                format!("{who} changed the drawing: {}", self.step_words(&entry.summary)),
+            );
+        }
     }
 
     pub(super) fn shapes(&self) -> Vec<String> {
@@ -1144,6 +1423,17 @@ impl Editor {
     }
 
     pub(super) fn select_shapes(&mut self, ids: Vec<String>) {
+        let doc = &self.scene.bundle.doc;
+        let home = ids.last().and_then(|id| match doc.item(id) {
+            Some(Item::Node(layer, _, _)) => match doc.locate(&layer.id) {
+                Some(Loc::Layer(path)) => Some(path),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some(path) = home.filter(|p| *p != self.scene.active && self.shifting.is_none()) {
+            let _ = self.activate(path);
+        }
         self.selection = ids.last().cloned();
         self.group = if ids.len() > 1 { ids } else { Vec::new() };
         self.refresh_box();
@@ -1216,9 +1506,8 @@ impl Editor {
             return Ok(Vec::new());
         }
         self.end_look_preview()?;
-        self.end_typing_preview()?;
         let start = Instant::now();
-        let dirty = self.scene.apply(&ops, &self.brushes)?;
+        let (dirty, _) = self.write(&ops)?;
         self.measure(
             "edit",
             format!("edit applied, {} tiles refreshed in {:.0} ms", dirty.len(), ms(start)),
@@ -1241,12 +1530,23 @@ impl Editor {
         if self.live.is_some() || self.drag.is_some() || self.point_drag.is_some() || self.path_commit.is_some() {
             return Ok(());
         }
+        self.follow_the_folder()?;
         let start = Instant::now();
         let word = if stack == Stack::Undo { "undid" } else { "redid" };
+        let author = klad_core::history::peek(&self.scene.bundle, stack)
+            .ok()
+            .flatten()
+            .map(|(entry, _)| entry.author);
         match self.scene.step(stack, &self.brushes)? {
             Some((summary, dirty)) => {
                 self.measure("undo", format!("{word} {summary} in {:.0} ms", ms(start)));
-                self.say(Tone::Info, format!("{word} {}", self.plain(&summary)));
+                let whose = match author.as_deref() {
+                    Some("editor") | None => String::new(),
+                    Some("cli") => " the agent's step".to_string(),
+                    Some(other) => format!(" {}'s step", history::who(other)),
+                };
+                let tone = if whose.is_empty() { Tone::Info } else { Tone::Done };
+                self.say(tone, format!("{word}{whose}: {}", self.step_words(&summary)));
                 self.dirty.extend(dirty);
                 self.forget_missing_selection();
             }
@@ -1269,8 +1569,8 @@ impl Editor {
             _ => None,
         };
         let word = |w: &str| -> Option<String> {
-            if let Some((cel, id)) = klad_core::markedit::parse_address(w) {
-                return Some(drawing(cel).map_or(format!("mark {id}"), |d| format!("mark {id} of {d}")));
+            if let Some((cel, _)) = klad_core::markedit::parse_address(w) {
+                return Some(drawing(cel).map_or("a mark".to_string(), |d| format!("a mark of {d}")));
             }
             let digits = w.len() > 1 && w[1..].chars().all(|c| c.is_ascii_digit());
             match w.chars().next() {
@@ -1416,6 +1716,13 @@ impl Editor {
 
     fn picked_corners(&self) -> Option<(String, [Vec2; 4])> {
         let picked = self.picked.as_ref()?;
+        if let Some((_, _, corners)) = self
+            .turned_box
+            .as_ref()
+            .filter(|(key, rev, _)| *key == picked.key() && *rev == self.scene.bundle.doc.rev)
+        {
+            return Some((picked.key(), *corners));
+        }
         let area = picked.cut.as_ref().filter(|_| self.scene.on_grid()).map(|polygon| {
             polygon.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| {
                 [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]
@@ -1849,6 +2156,7 @@ impl Editor {
             corners,
             slop: DRAG_SLOP / self.view.map_or(1.0, |v| v.zoom),
             crossed: false,
+            outside: false,
         });
     }
 
@@ -1901,9 +2209,9 @@ impl Editor {
             (Some(i), true) => hits.get((i + 1) % hits.len().max(1)),
             _ => hits.first(),
         };
-        self.selection = next.map(|(n, _)| n.clone());
+        let picked: Vec<String> = next.map(|(n, _)| n.clone()).into_iter().collect();
         self.group.clear();
-        self.refresh_box();
+        self.select_shapes(picked);
         Ok(())
     }
 
@@ -1942,6 +2250,9 @@ impl Editor {
             .collect();
         self.lasso = None;
         self.picked = None;
+        if found.is_empty() && self.refuse_locked_in_hand() {
+            return Ok(true);
+        }
         self.select_shapes(found);
         Ok(true)
     }
@@ -1986,6 +2297,12 @@ impl Editor {
             return Ok(());
         }
         let stroke = self.mark_at(c, slack);
+        if stroke.as_ref().is_some_and(|(path, _)| *path == self.scene.active)
+            && let Some(why) = self.take_target()
+        {
+            self.say(Tone::Refused, why);
+            return Ok(());
+        }
         let shape = self
             .shape_hits(c)?
             .first()
@@ -2025,6 +2342,7 @@ impl Editor {
             self.activate(path)?;
             let name = self.scene.active_layer().map(|l| l.name.clone()).unwrap_or_default();
             self.say(Tone::Info, format!("on layer {name}"));
+            self.scene.rebuild_caches(None)?;
             if !self.ensure_canvas()? {
                 self.say(Tone::Info, format!("{name} is still loading; press again in a moment"));
                 return Ok(());
@@ -2088,6 +2406,11 @@ impl Editor {
                 self.picked = after;
                 self.forget_missing_selection();
                 self.finish_preview(ops, dirty, before);
+                self.turned_box = self
+                    .picked
+                    .as_ref()
+                    .map(|p| (p.key(), self.scene.bundle.doc.rev, drag.preview()))
+                    .filter(|(_, _, corners)| !upright(corners));
             }
             None => self.drop_preview(),
         }
@@ -2121,12 +2444,16 @@ impl Editor {
     }
 
     fn lasso_outline(&self, lasso: &Lasso) -> Vec<Vec2> {
-        let boxed = self.pixel_box && self.scene.on_grid() && matches!(self.tool, Tool::Strokes | Tool::Select);
+        let grid = self.scene.on_grid();
+        let boxed = self.select_box && (self.tool == Tool::Strokes || (grid && self.tool == Tool::Select));
         match (boxed, lasso.points.first(), lasso.points.last()) {
             (true, Some(a), Some(b)) => {
-                let (x0, y0) = (a.x.min(b.x).floor(), a.y.min(b.y).floor());
-                let (x1, y1) = (a.x.max(b.x).ceil(), a.y.max(b.y).ceil());
-                vec![vec2(x0, y0), vec2(x1, y0), vec2(x1, y1), vec2(x0, y1)]
+                let (lo, hi) = (a.min(*b), a.max(*b));
+                let (lo, hi) = match grid {
+                    true => (lo.floor(), hi.ceil()),
+                    false => (lo, hi),
+                };
+                vec![lo, vec2(hi.x, lo.y), hi, vec2(lo.x, hi.y)]
             }
             _ => lasso.points.clone(),
         }
@@ -2151,16 +2478,29 @@ impl Editor {
             && let Some((layer, _)) = self.pick_cels(true).into_iter().next()
             && let Some(klad_core::doc::Loc::Layer(path)) = self.scene.bundle.doc.locate(&layer)
         {
+            let from = self.scene.active_layer().map(|l| l.name.clone());
             self.activate(path)?;
+            if let (Some(from), Some(to)) = (from, self.scene.active_layer().map(|l| l.name.clone())) {
+                self.say(
+                    Tone::Info,
+                    format!("{from} has no strokes on this frame, so the loop picks on {to}"),
+                );
+            }
         }
         let Some(cel) = self.scene.active_cel() else {
-            self.say(Tone::Refused, "make a paint layer active to select its strokes");
+            let why = match self.scene.active_layer() {
+                Some(l) if l.kind() == Kind::Paint => format!("{} has no drawing on this frame: K makes one", l.name),
+                Some(l) if l.kind() == Kind::Bones => "bones are picked with the bone tool (J)".to_string(),
+                _ => "a loop selects strokes of the active layer: pick a paint layer in the layers panel".to_string(),
+            };
+            self.say(Tone::Refused, why);
             return Ok(());
         };
         let at = lasso.points[0];
         let erased = self.erased();
-        let polygon: Option<Vec<[f32; 2]>> = (lasso.far && lasso.points.len() >= 3)
-            .then(|| self.lasso_outline(&lasso).iter().map(|p| [p.x, p.y]).collect());
+        let outline = self.lasso_outline(&lasso);
+        let polygon: Option<Vec<[f32; 2]>> =
+            (lasso.far && outline.len() >= 3).then(|| outline.iter().map(|p| [p.x, p.y]).collect());
         let pick = |marks: &[Mark]| -> (Vec<u32>, bool) {
             match &polygon {
                 Some(polygon) => {
@@ -2183,7 +2523,10 @@ impl Editor {
                 ),
             }
         };
-        let (found, crossing) = pick(self.scene.active_marks());
+        let (found, crossing) = match self.take_target() {
+            Some(_) => (Vec::new(), false),
+            None => pick(self.scene.active_marks()),
+        };
         let others: Vec<(String, String, Vec<u32>, bool)> = self
             .pick_cels(every)
             .into_iter()
@@ -2197,7 +2540,7 @@ impl Editor {
         let crossed = crossing || others.iter().any(|o| o.3);
         let cut = polygon
             .clone()
-            .filter(|_| self.cut_lasso && crossed)
+            .filter(|_| self.cuts() && crossed)
             .or_else(|| previous.as_ref().and_then(|p| p.cut.clone()));
         let merge = |held: Vec<u32>, found: &[u32]| {
             found.iter().fold(held, |mut ids, id| {
@@ -2222,6 +2565,25 @@ impl Editor {
             })
             .collect();
         self.picked = (!ids.is_empty() || cut.is_some() || !more.is_empty()).then_some(Picked { cel, ids, cut, more });
+        if self.picked.is_none() {
+            if let Some(why) = self.take_target() {
+                self.say(Tone::Refused, why);
+                return Ok(());
+            }
+            if self.refuse_locked_in_hand() {
+                return Ok(());
+            }
+        }
+        if self.picked.is_none() && polygon.is_some() && crossed {
+            let shape = match self.select_box && self.tool == Tool::Strokes {
+                true => "box",
+                false => "loop",
+            };
+            self.say(
+                Tone::Info,
+                format!("the {shape} holds no whole stroke: tick \"a box or loop cuts strokes at its edge\" in the bar to take the parts inside"),
+            );
+        }
         Ok(())
     }
 
@@ -2495,9 +2857,20 @@ impl Editor {
         }))
     }
 
+    fn refuse_locked_in_hand(&mut self) -> bool {
+        let Some(name) = self.scene.active_layer().filter(|l| l.locked).map(|l| l.name.clone()) else {
+            return false;
+        };
+        self.say(Tone::Refused, lock::Locked(vec![name]).to_string());
+        true
+    }
+
     fn pick_elsewhere(&mut self, c: Vec2) -> Result<Option<bool>> {
         self.under = overlay::leaf_hits(&self.scene.bundle.doc, self.scene.frame, (c.x, c.y))?;
         let zoom = self.view.map_or(1.0, |v| v.zoom);
+        if self.under.is_empty() && self.mark_at(c, 5.0 / zoom).is_none() && self.refuse_locked_in_hand() {
+            return Ok(None);
+        }
         let mut on_stroke = false;
         if self.under.is_empty()
             && let Some((path, mark)) = self.mark_at(c, 5.0 / zoom)
@@ -2520,6 +2893,10 @@ impl Editor {
                     }
                     on_stroke = true;
                 }
+                (Some(false), _) if self.scene.on_grid() => self.say(
+                    Tone::Info,
+                    "pixels have no points to reshape: S selects them to move; A reshapes strokes and vector shapes",
+                ),
                 (Some(false), _) => self.say(Tone::Info, "that is a fill: A reshapes strokes and vector shapes"),
                 _ => {}
             }
@@ -2539,17 +2916,6 @@ impl Editor {
     }
 
     fn pen_down(&mut self, view: View, rect: Rect, pos: Pos2, c: Vec2) -> Result<()> {
-        let vector = self
-            .scene
-            .active_layer()
-            .is_some_and(|l| l.kind() == Kind::Vector && !l.locked);
-        if !vector {
-            self.say(
-                Tone::Refused,
-                "the pen draws vector paths: pick a vector layer, or add one with \"vector\" in Layers",
-            );
-            return Ok(());
-        }
         let first = self
             .pen_path
             .as_ref()
@@ -2621,13 +2987,13 @@ impl Editor {
             self.say(Tone::Info, "a path needs two points: click again before Return");
             return Ok(());
         }
-        let Some((layer, name)) = self
-            .scene
-            .active_layer()
-            .filter(|l| l.kind() == Kind::Vector)
-            .map(|l| (l.id.clone(), l.name.clone()))
-        else {
-            return Ok(());
+        let home = self.vector_home("paths");
+        let name = match &home.made {
+            Some(_) => home.said(),
+            None => self
+                .scene
+                .active_layer()
+                .map_or_else(String::new, |l| format!(" to {}", l.name)),
         };
         let d = pathedit::to_d(&[Subpath {
             anchors: path.anchors,
@@ -2642,20 +3008,15 @@ impl Editor {
         if self.pen_stroke || fill.is_none() {
             node["stroke"] = json!({ "paint": outline, "width": self.pen_width, "cap": "round", "join": "round" });
         }
-        let op = Op::AddNode {
-            node,
-            place: klad_core::ops::Place {
-                into: Some(layer),
-                frame: Some(self.scene.frame),
-                ..Default::default()
-            },
-        };
-        self.apply(vec![op])?;
+        let place = home.place(self.scene.frame);
+        let ops = home.ops.iter().cloned().chain([Op::AddNode { node, place }]).collect();
+        self.apply(ops)?;
+        self.move_in(&home)?;
         self.used_colour();
         self.say(
             Tone::Done,
             format!(
-                "{} path added to {name}: V moves it, A edits its points",
+                "{} path added{name}: V moves it, A edits its points",
                 if closed { "closed" } else { "open" }
             ),
         );
@@ -2957,10 +3318,14 @@ impl Editor {
             return Ok(());
         };
         let start = Instant::now();
+        let stale = self.scene.bundle.changed_on_disk();
+        self.follow_the_folder()?;
         let dirty = match result {
-            Ok((hash, raster)) => self
-                .scene
-                .apply_rendered(&commit.ops, (commit.cel, hash, raster), &self.brushes)?,
+            Ok((hash, raster)) if !stale => {
+                self.scene
+                    .apply_rendered(&commit.ops, (commit.cel, hash, raster), &self.brushes)?
+            }
+            Ok(_) => self.scene.apply(&commit.ops, &self.brushes)?,
             Err(e) => {
                 self.failed(e.context("the edited path could not be drawn"));
                 self.scene.apply(&commit.ops, &self.brushes)?
@@ -3002,6 +3367,7 @@ impl Editor {
         };
         let c = view.to_canvas(e.pos - rect.min, rect.size());
         let on_canvas = rect.contains(e.pos)
+            && !self.held_messages.iter().any(|m| m.contains(e.pos))
             && ctx
                 .layer_id_at(e.pos)
                 .is_none_or(|l| l.order == egui::Order::Background);
@@ -3023,7 +3389,52 @@ impl Editor {
             _ => {}
         }
         let pressing = e.phase == Phase::Down && was_focused && on_canvas && !self.navigating;
+        if pressing {
+            self.focus = Focus::Canvas;
+        }
         if pressing && self.holding_frame_keys() {
+            return Ok(());
+        }
+        if pressing && !picking && matches!(self.tool, Tool::Brush | Tool::Fill) {
+            let erasing = self.tool == Tool::Brush && (e.eraser || self.is_on(Cmd::Eraser) == Some(true));
+            match self.paint_target(erasing) {
+                Target::Here => {}
+                Target::NewLayer => {
+                    let under = self.scene.active_layer().map(|l| l.name.clone());
+                    self.add_layer("paint")?;
+                    self.scene.rebuild_caches(None)?;
+                    self.say(
+                        Tone::Done,
+                        match under {
+                            Some(name) => format!("on a new paint layer above {name}"),
+                            None => "on a new paint layer".to_string(),
+                        },
+                    );
+                }
+                Target::Refused(why) => {
+                    self.say(Tone::Refused, why);
+                    return Ok(());
+                }
+            }
+        }
+        let this_layer = match self.tool {
+            Tool::Strokes | Tool::Direct => true,
+            Tool::Select => !self.settings.pick_all_layers,
+            _ => false,
+        };
+        if pressing
+            && this_layer
+            && matches!(self.tool, Tool::Select | Tool::Direct)
+            && self.scene.active_layer().is_some_and(|l| l.kind() == Kind::Bones)
+        {
+            self.say(Tone::Refused, "bones are picked and moved with the bone tool (J)");
+            return Ok(());
+        }
+        if pressing
+            && this_layer
+            && let Some(why) = self.take_target()
+        {
+            self.say(Tone::Refused, why);
             return Ok(());
         }
         let needs_canvas = matches!(self.tool, Tool::Brush | Tool::Fill | Tool::Strokes | Tool::Select);
@@ -3137,10 +3548,15 @@ impl Editor {
                         && !self.on_marks()
                         && self.toggle_shape(c)? => {}
                 Some((id, grab, corners)) => self.start_drag(id, grab, corners, c, false),
-                None => {
-                    self.end_shift();
-                    self.grab_under(c, e.pos)?
+                None if self.shifting.is_some() => {
+                    if let Some((id, corners)) = self.handles() {
+                        self.start_drag(id, Grab::Rotate, corners, c, false);
+                        if let Some(drag) = self.drag.as_mut() {
+                            drag.outside = true;
+                        }
+                    }
                 }
+                None => self.grab_under(c, e.pos)?,
             },
             (Tool::Select, Phase::Move) => {
                 if let Some(drag) = self.drag.as_mut() {
@@ -3152,8 +3568,16 @@ impl Editor {
             (Tool::Select, Phase::Up) if self.lasso.is_some() => match self.scene.active_cel() {
                 Some(_) => self.finish_pick()?,
                 None => {
-                    self.lasso = None;
+                    let far = self.lasso.take().is_some_and(|l| l.far);
                     self.picked = None;
+                    if self.scene.active_layer().is_some_and(|l| l.kind() == Kind::Bones) {
+                        self.say(Tone::Refused, "bones are picked and moved with the bone tool (J)");
+                    } else if !self.refuse_locked_in_hand() && far {
+                        self.say(
+                            Tone::Info,
+                            "a loop takes strokes of the active layer: pick a paint layer, or click a shape to take it",
+                        );
+                    }
                 }
             },
             (Tool::Select, Phase::Up) => self.finish_drag()?,
@@ -3162,6 +3586,8 @@ impl Editor {
             (Tool::Shape, Phase::Move) => self.shape_move(c),
             (Tool::Shape, Phase::Up) => self.shape_up()?,
             (Tool::Text, Phase::Down) => self.text_down(c)?,
+            (Tool::Text, Phase::Move) if self.text_pressing => self.text_drag(c),
+            (Tool::Text, Phase::Up) => self.text_pressing = false,
             (Tool::Bone, Phase::Down) => self.bone_down(c),
             (Tool::Bone, Phase::Move) => self.bone_move(c),
             (Tool::Bone, Phase::Up) => self.bone_up()?,
@@ -3204,7 +3630,10 @@ impl Editor {
     }
 
     fn tuned(&self, id: &str, def: &BrushDef) -> Tuning {
-        let tuning = Tuning::of(def);
+        let tuning = Tuning {
+            taper: hand_taper(id, def),
+            ..Tuning::of(def)
+        };
         match (id, self.settings.eraser_feather, tuning.hardness) {
             ("eraser", Some(feather), Some(_)) => Tuning { feather, ..tuning },
             _ => tuning,
@@ -3332,9 +3761,18 @@ impl Editor {
             }
         }
         let ended = ms(start);
-        if self.external.is_some() {
-            self.reload()?;
+        if live.brush.blend == klad_brush::brush::StrokeBlend::Erase
+            && !erases_any(&self.buffer, self.scene.active_raster())
+            && !erases_any(&self.mirror_buffer, self.scene.active_raster())
+        {
+            self.dirty.extend(self.buffer.touched().iter().copied());
+            self.dirty.extend(self.mirror_buffer.touched().iter().copied());
+            self.buffer.reset();
+            self.mirror_buffer.reset();
+            self.say(Tone::Info, "nothing there to erase");
+            return Ok(());
         }
+        self.follow_the_folder()?;
         if self.scene.bundle.embed_brush(&live.stroke.brush, &live.brush.def)? {
             self.embedded.insert(live.stroke.brush.clone(), live.brush.def.clone());
         }
@@ -3476,7 +3914,7 @@ impl Editor {
             }
             Err(e) => {
                 let why = e.chain().last().map_or_else(|| format!("{e:#}"), ToString::to_string);
-                self.say(Tone::Refused, why);
+                self.say(Tone::Refused, self.refusal_words(&why));
             }
         }
         Ok(())
@@ -3610,9 +4048,7 @@ impl Editor {
             );
             return Ok(());
         }
-        if self.external.is_some() {
-            self.reload()?;
-        }
+        self.follow_the_folder()?;
         let pixels = coverage.pixels();
         let lassoed = matches!(source, FillSource::Polygon(_));
         let mut fill = Fill::new(self.scene.next_mark_id(), self.color, source, coverage);
@@ -3635,7 +4071,7 @@ impl Editor {
 
     fn navigate(&mut self, ui: &egui::Ui, response: &egui::Response, rect: Rect) {
         let area = rect.size();
-        let (zoom, scroll, rotation, hover, space, middle, primary, delta, time) = ui.input(|i| {
+        let (zoom, scroll, rotation, hover, space, middle, primary, delta, time, snap) = ui.input(|i| {
             (
                 i.zoom_delta(),
                 i.smooth_scroll_delta,
@@ -3646,6 +4082,7 @@ impl Editor {
                 i.pointer.primary_down(),
                 i.pointer.delta(),
                 i.time,
+                i.modifiers.shift,
             )
         });
         self.navigating = (space && !ui.ctx().egui_wants_keyboard_input()) || middle;
@@ -3668,7 +4105,12 @@ impl Editor {
                 view.pan(scroll);
             }
             if rotation != 0.0 {
-                view.rotate_at(rotation, at, area);
+                let raw = match self.twist {
+                    Some((raw, last)) if time - last < TWIST_PAUSE => raw,
+                    _ => view.angle,
+                } + rotation;
+                self.twist = Some((raw, time));
+                view.rotate_at(crate::view::twisted(raw, snap) - view.angle, at, area);
             }
         }
         if self.navigating && (middle || primary) && self.live.is_none() {
@@ -3687,10 +4129,23 @@ impl Editor {
         self.canvas_rect = rect;
         let area = rect.size();
         let canvas = self.canvas_size();
-        if self.view.is_none() {
+        self.canvas_frames = self.canvas_frames.saturating_add(1);
+        let settling = self.canvas_frames <= SETTLING_FRAMES;
+        let refit = match (self.view, self.fitted_to) {
+            (None, _) => true,
+            (Some(view), Some(was)) => {
+                let moved =
+                    (area.x - was.x).abs() > REFIT_CHANGE * was.x || (area.y - was.y).abs() > REFIT_CHANGE * was.y;
+                was != area && view == self.fitted(was) && (settling || moved)
+            }
+            (Some(_), None) => false,
+        };
+        if refit {
             self.view = Some(self.fitted(area));
+            self.fitted_to = Some(area);
         }
         self.navigate(ui, &response, rect);
+        self.keep_typing_preview()?;
         self.keep_typing_focus(ui, &response)?;
         self.typing_keys(ui)?;
         self.pen_keys(ui)?;
@@ -3713,6 +4168,12 @@ impl Editor {
             .try_for_each(|e| self.on_pen(&ctx, e, rect, was_focused))?;
         if self.tool == Tool::Bone && response.secondary_clicked() {
             self.end_chain();
+        }
+        if response.secondary_clicked() {
+            self.focus = Focus::Canvas;
+        }
+        if !matches!(self.tool, Tool::Bone | Tool::Note) {
+            response.context_menu(|ui| self.canvas_menu(ui));
         }
         if self.tool == Tool::Note
             && response.secondary_clicked()
@@ -3940,6 +4401,10 @@ impl Editor {
         }
     }
 
+    fn ring(&self) -> Option<f32> {
+        (self.tool == Tool::Brush && !self.scene.on_grid()).then_some(self.size)
+    }
+
     fn decorate(&self, ui: &egui::Ui, view: View, rect: Rect) {
         let painter = ui.painter().with_clip_rect(rect);
         let accent = Color32::from_rgb(64, 196, 255);
@@ -4062,10 +4527,29 @@ impl Editor {
             painter.add(egui::Shape::closed_line(line, egui::Stroke::new(1.5, tint)));
         }
         let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
-        if let Some(hover) = hover.filter(|_| self.modifiers.alt && matches!(self.tool, Tool::Brush | Tool::Fill)) {
-            painter.circle_stroke(hover, 9.0, egui::Stroke::new(3.0, Color32::from_black_alpha(160)));
-            painter.circle_stroke(hover, 9.0, egui::Stroke::new(1.5, Color32::WHITE));
-            painter.circle_filled(hover, 5.0, color::color32(self.color));
+        let dropper = self.modifiers.alt && !self.modifiers.command && matches!(self.tool, Tool::Brush | Tool::Fill);
+        if let Some(hover) = hover.filter(|_| dropper) {
+            let font = egui::FontId::proportional(DROPPER);
+            let tip = hover + vec2(-DROPPER * 0.12, DROPPER * 0.2);
+            [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0)]
+                .iter()
+                .for_each(|d| {
+                    painter.text(
+                        tip + *d,
+                        egui::Align2::LEFT_BOTTOM,
+                        crate::theme::icon::EYEDROPPER,
+                        font.clone(),
+                        Color32::from_black_alpha(220),
+                    );
+                });
+            painter.text(
+                tip,
+                egui::Align2::LEFT_BOTTOM,
+                crate::theme::icon::EYEDROPPER,
+                font,
+                Color32::WHITE,
+            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             return;
         }
         if self.tool == Tool::Fill
@@ -4092,10 +4576,8 @@ impl Editor {
             );
             return;
         }
-        if self.tool == Tool::Brush
-            && let Some(hover) = hover
-        {
-            let radius = (self.size * 0.5 * view.zoom).max(1.5);
+        if let (Some(size), Some(hover)) = (self.ring(), hover) {
+            let radius = (size * 0.5 * view.zoom).max(1.5);
             painter.circle_stroke(hover, radius, egui::Stroke::new(1.0, Color32::from_gray(30)));
             painter.circle_stroke(hover, radius + 1.0, egui::Stroke::new(1.0, Color32::from_gray(235)));
         }
@@ -4298,17 +4780,30 @@ impl Editor {
     }
 
     fn recolour_shape(&mut self, outline: bool) -> Result<()> {
+        self.recolour_shape_to(outline, self.color)
+    }
+
+    fn recolour_shape_to(&mut self, outline: bool, rgba: [f32; 4]) -> Result<()> {
         let Some(id) = self.recolourable() else {
             return Ok(());
         };
-        let hex = color::hex(self.color);
-        let has_outline = matches!(
-            self.scene.bundle.doc.item(&id),
-            Some(Item::Node(_, _, node)) if node.stroke.is_some()
-        );
+        let hex = color::hex(rgba);
+        let node = match self.scene.bundle.doc.item(&id) {
+            Some(Item::Node(_, _, node)) => Some(node.clone()),
+            _ => None,
+        };
+        let has_outline = node.as_ref().is_some_and(|n| n.stroke.is_some());
+        let now = node.as_ref().and_then(|n| match outline {
+            true => n.stroke.as_ref().map(|s| s.paint.clone()),
+            false => n.fill.clone(),
+        });
+        let paint = match now.and_then(|p| regraded(p, rgba)) {
+            Some(graded) => serde_json::to_value(graded)?,
+            None => json!(hex),
+        };
         let props = match (outline, has_outline) {
-            (false, _) => json!({"fill": hex}),
-            (true, true) => json!({"stroke.paint": hex}),
+            (false, _) => json!({"fill": paint}),
+            (true, true) => json!({"stroke.paint": paint}),
             (true, false) => json!({"stroke": {"paint": hex, "width": self.pen_width}}),
         };
         let props = props.as_object().cloned().unwrap_or_default();
@@ -4352,7 +4847,100 @@ impl Editor {
     }
 
     fn recolour_picked(&mut self) -> Result<()> {
-        let target = self.color;
+        self.recolour_picked_to(self.color)
+    }
+
+    fn dyed(&self, dye: Dye) -> Option<[f32; 4]> {
+        let of_node = |pick: &dyn Fn(&klad_core::doc::Node) -> Option<String>| {
+            let id = self.recolourable()?;
+            match self.scene.bundle.doc.item(&id) {
+                Some(Item::Node(_, _, node)) => pick(node).and_then(|hex| color::rgba_of(&hex)),
+                _ => None,
+            }
+        };
+        match dye {
+            Dye::Strokes => self
+                .chosen_marks()
+                .and_then(|(_, chosen)| chosen.first().map(|(_, m)| m.color())),
+            Dye::Fill => of_node(&|node| node.fill.as_ref().and_then(paint_colour)),
+            Dye::Outline => of_node(&|node| node.stroke.as_ref().and_then(|s| paint_colour(&s.paint))),
+        }
+    }
+
+    fn dye(&mut self, dye: Dye, rgba: [f32; 4]) -> Result<()> {
+        if self.dyed(dye).is_some_and(|now| color::hex(now) == color::hex(rgba)) {
+            return Ok(());
+        }
+        match dye {
+            Dye::Strokes => self.recolour_picked_to(rgba)?,
+            Dye::Fill => self.recolour_shape_to(false, rgba)?,
+            Dye::Outline => self.recolour_shape_to(true, rgba)?,
+        }
+        if self.settings.used(&color::hex(rgba)) {
+            self.settings_dirty = true;
+        }
+        Ok(())
+    }
+
+    fn dye_button(&mut self, ui: &mut egui::Ui, cmd: Cmd, dye: Dye) {
+        let spec = cmd.spec();
+        let refused = self.can_run(cmd);
+        let now = self.dyed(dye);
+        let hint = match (&refused, now) {
+            (Some(why), _) => format!("{}\n\nnot now: {why}", dye.what()),
+            (None, Some(rgba)) => format!(
+                "{}, {}: click to choose another, from the wheel, the palette or the colour you paint with",
+                dye.what(),
+                color::hex(rgba)
+            ),
+            (None, None) => format!(
+                "{}: click to choose one, from the wheel, the palette or the colour you paint with",
+                dye.what()
+            ),
+        };
+        let button = egui::Button::new(egui::RichText::new(spec.icon).size(crate::theme::ICON))
+            .min_size(vec2(crate::theme::TARGET, crate::theme::TARGET));
+        let enabled = refused.is_none();
+        let response = ui.add_enabled(enabled, button).hint(hint);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, dye.what()));
+        ui.painter().rect_filled(
+            Rect::from_min_size(response.rect.right_bottom() - vec2(9.0, 9.0), vec2(7.0, 7.0)),
+            1.0,
+            color::color32(now.unwrap_or(self.color)),
+        );
+        if !enabled {
+            return;
+        }
+        let named = |hex: &str, name: &str| match name.is_empty() {
+            true => hex.to_string(),
+            false => format!("{name}  {hex}"),
+        };
+        let palette = self
+            .scene
+            .bundle
+            .doc
+            .palette
+            .iter()
+            .filter_map(|s| color::rgba_of(&s.color).map(|rgba| (rgba, named(&s.color, &s.name))))
+            .collect();
+        let recent = self
+            .settings
+            .recent
+            .iter()
+            .filter_map(|hex| color::rgba_of(hex).map(|rgba| (rgba, format!("{hex}, used lately"))))
+            .collect();
+        let picked = color::Square::new(ui, ("dye", dye.what()), now.unwrap_or(self.color), dye.what())
+            .current(self.color)
+            .upward(self.bar_above)
+            .colours("palette", palette)
+            .colours("recent", recent)
+            .under(ui, &response);
+        if let Some(rgba) = picked.and_then(color::Pick::chosen) {
+            self.check(|e| e.dye(dye, rgba));
+        }
+    }
+
+    fn recolour_picked_to(&mut self, target: [f32; 4]) -> Result<()> {
         let sets = self.chosen_marks().map_or(Vec::new(), |(_, chosen)| {
             let colours: Vec<_> = chosen.iter().map(|(_, m)| m.color()).collect();
             klad_core::color::recolour(&colours, target)
@@ -4549,7 +5137,9 @@ impl Editor {
             .filter(|p| !p.ids.is_empty())
             .collect();
         if let Some(cel) = self.scene.active_cel().filter(|_| !ids.is_empty() || !more.is_empty()) {
-            self.tool = Tool::Strokes;
+            if self.tool != Tool::Select {
+                self.tool = Tool::Strokes;
+            }
             self.picked = Some(Picked {
                 more,
                 ..Picked::whole(cel, ids)
@@ -4758,16 +5348,6 @@ impl Editor {
                 props.push(("name".into(), json!(name)));
             }
         });
-        if let Some(paint) = self.paint_editor(ui, id, &node) {
-            props.push(("fill".into(), serde_json::to_value(paint)?));
-        }
-        if let Shape::Rays(rays) = &node.shape {
-            let changed = ui.horizontal_wrapped(|ui| self.rays_section(ui, id, rays)).inner;
-            if let Some(Value::Object(fields)) = changed {
-                props.extend(fields);
-            }
-        }
-        props.extend(self.shape_fields(ui, id, &node));
         let t = node.transform;
         ui.horizontal(|ui| {
             if let Some(v) = self.number(
@@ -4828,6 +5408,16 @@ impl Editor {
                 props.push(("transform.sy".into(), json!(v)));
             }
         });
+        if let Some(paint) = self.paint_editor(ui, id, &node) {
+            props.push(("fill".into(), serde_json::to_value(paint)?));
+        }
+        if let Shape::Rays(rays) = &node.shape {
+            let changed = ui.horizontal_wrapped(|ui| self.rays_section(ui, id, rays)).inner;
+            if let Some(Value::Object(fields)) = changed {
+                props.extend(fields);
+            }
+        }
+        props.extend(self.shape_fields(ui, id, &node));
         ui.horizontal(|ui| {
             if let Some(v) = self.number(
                 ui,
@@ -5128,9 +5718,9 @@ impl Editor {
 
     fn mask_hint(&self) -> &'static str {
         if self.brush == "eraser" {
-            "the eraser is on: it shows the layer again where the mask hid it (E switches back to the brush)"
+            "the eraser shows the layer again where the mask hid it (E switches back to the brush)"
         } else {
-            "the brush hides the layer where you paint (any colour); the eraser (E) shows it again"
+            "the brush hides the layer where you paint (any colour), the red marks what is hidden; the eraser (E) shows it again; untick show the mask in red, in Layer settings, to see the layer without it"
         }
     }
 
@@ -5172,6 +5762,7 @@ impl Editor {
             return self.set(&id, props);
         }
         self.set(&id, std::mem::take(&mut props))?;
+        self.adjust_section(ui, &layer)?;
         self.map_section(ui, &layer)?;
         ui.horizontal_wrapped(|ui| {
             self.command_check(ui, Cmd::ToggleLocked, "locked");
@@ -5206,7 +5797,6 @@ impl Editor {
         if layer.map.is_none() {
             self.depth_section(ui, &layer)?;
         }
-        self.adjust_section(ui, &layer)?;
         self.effects_section(ui, &layer)?;
         self.animation_section(ui, &id)
     }
@@ -5219,16 +5809,53 @@ impl Editor {
             return self.height_panel(ui);
         }
         let mut picked: Option<[f32; 4]> = None;
+        let edit = match self.scene.bundle.doc.pixel_art() {
+            true => {
+                let edit = self.palette_part(ui);
+                self.colour_mixer(ui, &mut picked);
+                edit
+            }
+            false => {
+                self.colour_mixer(ui, &mut picked);
+                self.palette_part(ui)
+            }
+        };
+        if !self.settings.recent.is_empty() {
+            ui.label("recent");
+            let recent = self.settings.recent.clone();
+            let current = color::hex(self.color);
+            ui.horizontal_wrapped(|ui| {
+                recent.iter().for_each(|hex| {
+                    if let Some(rgba) = color::rgba_of(hex)
+                        && color::swatch(ui, rgba, hex.eq_ignore_ascii_case(&current), 24.0)
+                            .hint(format!("{hex}, used lately"))
+                            .clicked()
+                    {
+                        picked = Some(rgba);
+                    }
+                });
+            });
+        }
+        if let Some(rgba) = picked {
+            self.pick_new_colour(rgba);
+        }
+        match edit {
+            Some(edit) => self.apply(vec![Op::Palette(edit)]),
+            None => Ok(()),
+        }
+    }
+
+    fn colour_mixer(&mut self, ui: &mut egui::Ui, picked: &mut Option<[f32; 4]>) {
         let mut hsva = self.hsva;
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             if color::picker(ui, &mut hsva, 150.0).changed() {
                 self.color = hsva.rgba();
                 self.hsva = hsva;
             }
             ui.vertical(|ui| {
-                color::swatch(ui, self.color, false, 44.0).hint("the current colour");
-                ui.add_space(4.0);
+                ui.spacing_mut().item_spacing.y = 1.0;
                 ui.horizontal(|ui| {
+                    color::swatch(ui, self.color, false, 28.0).hint("the current colour");
                     if let Some(text) = self.text(
                         ui,
                         "colour.hex",
@@ -5237,7 +5864,7 @@ impl Editor {
                         "type #rrggbb or #rrggbbaa and press Return",
                     ) {
                         match color::rgba_of(&text) {
-                            Some(rgba) => picked = Some(rgba),
+                            Some(rgba) => *picked = Some(rgba),
                             None => self.say(
                                 Tone::Refused,
                                 format!("{text} is not a colour: type it as #rrggbb or #rrggbbaa, for example #c8a070"),
@@ -5245,17 +5872,12 @@ impl Editor {
                         }
                     }
                 });
-                let mut alpha = self.color[3];
-                if ui
-                    .add(egui::Slider::new(&mut alpha, 0.0..=1.0).text("alpha"))
-                    .hint("how see-through the colour is")
-                    .changed()
-                {
-                    let [r, g, b, _] = self.color;
-                    self.set_colour([r, g, b, alpha]);
-                }
+                self.colour_channels(ui);
             });
         });
+    }
+
+    fn palette_part(&mut self, ui: &mut egui::Ui) -> Option<klad_core::ops::PaletteEdit> {
         ui.label("palette");
         let edit = self.palette_row(ui);
         let variants: Vec<String> = self
@@ -5307,30 +5929,95 @@ impl Editor {
                 self.command_button(ui, Cmd::RemoveVariant, Some("remove variant"));
             }
         });
-        let edit = edit.or(show.map(|name| klad_core::ops::PaletteEdit::Variant { name }));
-        if !self.settings.recent.is_empty() {
-            ui.label("recent");
-            let recent = self.settings.recent.clone();
-            let current = color::hex(self.color);
-            ui.horizontal_wrapped(|ui| {
-                recent.iter().for_each(|hex| {
-                    if let Some(rgba) = color::rgba_of(hex)
-                        && color::swatch(ui, rgba, hex.eq_ignore_ascii_case(&current), 24.0)
-                            .hint(format!("{hex}, used lately"))
-                            .clicked()
-                    {
-                        picked = Some(rgba);
-                    }
-                });
+        edit.or(show.map(|name| klad_core::ops::PaletteEdit::Variant { name }))
+    }
+
+    fn colour_channels(&mut self, ui: &mut egui::Ui) {
+        let mut model = self.settings.colour_model;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().button_padding.x = 4.0;
+            color::Model::ALL.into_iter().for_each(|m| {
+                if ui.selectable_label(model == m, m.name()).hint(m.about()).clicked() {
+                    model = m;
+                }
             });
+        });
+        if model != self.settings.colour_model {
+            self.settings.colour_model = model;
+            self.settings_dirty = true;
         }
-        if let Some(rgba) = picked {
-            self.pick_new_colour(rgba);
+        let mut mixing = match self.mixing {
+            Some(m) if m.model == model && m.of == self.color => m,
+            kept => {
+                let keep = match kept {
+                    Some(m) if m.model == model => m.values,
+                    _ => [self.hsva.h * 360.0, self.hsva.s * 100.0, self.hsva.v * 100.0],
+                };
+                Mixing {
+                    model,
+                    values: model.values(self.color, keep),
+                    of: self.color,
+                }
+            }
+        };
+        let mut alpha = self.color[3] * 100.0;
+        let [r, g, b, _] = self.color;
+        let row = |ui: &mut egui::Ui, channel: &color::Channel, value: &mut f32, ramp: &dyn Fn(f32) -> [f32; 3]| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.add_sized(
+                    [10.0, crate::theme::TARGET],
+                    egui::Label::new(egui::RichText::new(channel.name).color(crate::theme::WEAK)),
+                );
+                let width = (ui.available_width() - 48.0).max(CHANNEL_TRACK);
+                let slid = color::channel_slider(ui, channel, value, width, ramp).changed();
+                let typed = ui
+                    .add(
+                        egui::DragValue::new(value)
+                            .range(channel.lo..=channel.hi)
+                            .speed((channel.hi - channel.lo) / 200.0)
+                            .fixed_decimals(0),
+                    )
+                    .hint(channel.about)
+                    .changed();
+                slid || typed
+            })
+            .inner
+        };
+        let values = mixing.values;
+        let rows: Vec<bool> = model
+            .channels()
+            .iter()
+            .enumerate()
+            .map(|(i, channel)| {
+                let ramp = |v: f32| {
+                    let mut at = values;
+                    at[i] = v;
+                    model.rgb(at)
+                };
+                row(ui, channel, &mut mixing.values[i], &ramp)
+            })
+            .collect();
+        let mixed = rows.contains(&true);
+        let faded = row(ui, &ALPHA, &mut alpha, &|v| {
+            let t = v / 100.0;
+            [r, g, b].map(|c| 0.5 + (c - 0.5) * t)
+        });
+        if mixed {
+            let [r, g, b] = model.rgb(mixing.values).map(|c| c.clamp(0.0, 1.0));
+            self.set_colour([r, g, b, self.color[3]]);
+            if matches!(model, color::Model::Hsv | color::Model::Hsl) {
+                self.hsva.h = (mixing.values[0] / 360.0).rem_euclid(1.0);
+            }
+            mixing.of = self.color;
         }
-        match edit {
-            Some(edit) => self.apply(vec![Op::Palette(edit)]),
-            None => Ok(()),
+        if faded {
+            let [r, g, b, _] = self.color;
+            self.set_colour([r, g, b, alpha / 100.0]);
+            mixing.of = self.color;
         }
+        self.mixing = Some(mixing);
     }
 
     fn fill_panel(&mut self, ui: &mut egui::Ui) {
@@ -5349,7 +6036,7 @@ impl Editor {
             FillRef::Layer(id) => layers
                 .iter()
                 .find(|(l, _)| l == id)
-                .map_or(id.clone(), |(_, name)| format!("{name} ({id})")),
+                .map_or_else(|| "a layer that is gone".to_string(), |(_, name)| name.clone()),
         };
         let mut reference = self.fill.reference.clone();
         ui.horizontal_wrapped(|ui| {
@@ -5371,22 +6058,33 @@ impl Editor {
         });
         self.fill.reference = reference;
         let f = &mut self.fill;
-        ui.add(egui::Slider::new(&mut f.gap, 0.0..=fill::MAX_GAP).text("close gaps px"))
-            .hint("openings in the lines up to this wide count as closed");
-        ui.add(egui::Slider::new(&mut f.tolerance, 0.0..=1.0).text("tolerance"))
-            .hint("how different a pixel may be from where you click and still fill");
-        ui.add(egui::Slider::new(&mut f.expand, 0.0..=fill::MAX_EXPAND).text("grow under lines px"))
-            .hint("the fill reaches this far under the lines, so no paper shows between line and colour");
-        ui.add(egui::Slider::new(&mut f.opacity, 0.05..=1.0).text("opacity"))
-            .hint("the fill's opacity");
-        ui.small("click inside lines to fill, drag a loop to lasso fill");
+        options::whole(ui, "close gaps px", |ui| {
+            ui.add(egui::Slider::new(&mut f.gap, 0.0..=fill::MAX_GAP).text("close gaps px"))
+        })
+        .hint("openings in the lines up to this wide count as closed");
+        options::whole(ui, "tolerance", |ui| {
+            ui.add(egui::Slider::new(&mut f.tolerance, 0.0..=1.0).text("tolerance"))
+        })
+        .hint("how different a pixel may be from where you click and still fill");
+        options::whole(ui, "grow under lines px", |ui| {
+            ui.add(egui::Slider::new(&mut f.expand, 0.0..=fill::MAX_EXPAND).text("grow under lines px"))
+        })
+        .hint("the fill reaches this far under the lines, so no paper shows between line and colour");
+        options::whole(ui, "opacity", |ui| {
+            ui.add(egui::Slider::new(&mut f.opacity, 0.05..=1.0).text("opacity"))
+        })
+        .hint("the fill's opacity");
+        options::note(
+            ui,
+            egui::RichText::new("click inside lines to fill, drag a loop to lasso fill")
+                .small()
+                .color(crate::theme::WEAK),
+        );
         ui.horizontal_wrapped(|ui| {
             self.command_button(ui, Cmd::Refill, Some("refill this drawing"));
             self.command_button(ui, Cmd::ShowGaps, Some("show gaps"));
         });
-        if !self.scene.can_paint() {
-            ui.colored_label(Color32::LIGHT_YELLOW, "pick a paint layer to fill on");
-        }
+        self.paint_note(ui);
     }
 
     fn pen_panel(&mut self, ui: &mut egui::Ui) {
@@ -5417,6 +6115,19 @@ impl Editor {
                         .text(format!("recorded {:.3}", curve.apply(raw))),
                 );
                 ui.label(egui::RichText::new(format!("heaviest press seen {peak:.3}")).color(crate::theme::WEAK));
+            });
+            ui.end_row();
+            prefs::row_label(ui, "Tilt");
+            let (tx, ty) = self.readout.tilt;
+            let lean = (tx * tx + ty * ty).sqrt().min(1.0);
+            ui.vertical(|ui| {
+                ui.add(egui::ProgressBar::new(lean).desired_width(280.0).text(format!("tilt {lean:.2}")));
+                ui.label(
+                    egui::RichText::new(
+                        "lean the pen while it touches: the bar follows when the pen sends tilt. The Pencil grows and lightens as it leans",
+                    )
+                    .color(crate::theme::WEAK),
+                );
             });
             ui.end_row();
             prefs::row_label(ui, "Lightest");
@@ -5493,6 +6204,45 @@ impl Editor {
     }
 }
 
+fn regraded(paint: klad_core::doc::Paint, target: [f32; 4]) -> Option<klad_core::doc::Paint> {
+    use klad_core::doc::Paint;
+    let regrade = |stops: &mut Vec<klad_core::doc::Stop>| {
+        let colours: Vec<[f32; 4]> = stops.iter().map(|s| color::rgba_of(&s.1).unwrap_or(target)).collect();
+        let moved = klad_core::color::recolour(&colours, [target[0], target[1], target[2], 1.0]);
+        stops
+            .iter_mut()
+            .zip(colours.iter().zip(moved))
+            .for_each(|(stop, (was, now))| {
+                stop.1 = klad_core::color::to_hex([now[0], now[1], now[2], was[3]]);
+            });
+    };
+    match paint {
+        Paint::Solid(_) => None,
+        Paint::Linear { mut linear } => {
+            regrade(&mut linear.stops);
+            Some(Paint::Linear { linear })
+        }
+        Paint::Radial { mut radial } => {
+            regrade(&mut radial.stops);
+            Some(Paint::Radial { radial })
+        }
+    }
+}
+
+fn erases_any(buffer: &StrokeBuffer, raster: Option<&Raster>) -> bool {
+    let Some(raster) = raster else {
+        return false;
+    };
+    buffer.touched().iter().any(|&i| {
+        buffer.grid().at(i).zip(raster.at(i)).is_some_and(|(cover, px)| {
+            cover
+                .iter()
+                .zip(px.as_chunks::<4>().0)
+                .any(|(c, p)| *c > 0.0 && f32::from(p[3]) > 0.0)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5553,6 +6303,7 @@ mod tests {
                 ],
                 slop: 0.5,
                 crossed: true,
+                outside: false,
             };
             let committed = drag.mark_transform();
             let a = committed.affine(committed.pivot.unwrap_or([0.0, 0.0]));
@@ -5577,6 +6328,26 @@ mod tests {
             ..picked.clone()
         };
         assert!(cut.key().starts_with("c4:3,12:cut"));
+    }
+
+    #[test]
+    fn a_library_brush_starts_without_its_taper_by_hand_and_a_brush_of_the_drawing_keeps_its_own() {
+        let set = BrushSet::presets();
+        let ink = set.def("ink").unwrap();
+        assert!(ink.taper[0] > 0.0, "the ink brush tapers strokes drawn from a path");
+        assert_eq!(hand_taper("ink", ink), [0.0, 0.0]);
+        assert_eq!(hand_taper("ink-1a2b3c", ink), [0.0, 0.0], "a variant of it too");
+        let own = BrushDef {
+            taper: [30.0, 5.0],
+            ..ink.clone()
+        };
+        assert_eq!(hand_taper("ink-1a2b3c", &own), [30.0, 5.0]);
+        assert_eq!(hand_taper("quill", &own), [30.0, 5.0]);
+        assert_eq!(
+            hand_taper("quill", ink),
+            ink.taper,
+            "a brush of the drawing keeps what it was saved with"
+        );
     }
 
     #[test]

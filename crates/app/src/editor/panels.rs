@@ -10,6 +10,46 @@ use anyhow::Result;
 use egui::{Align, Color32, Id, Key, Layout as Flow, Margin, Modifiers, RichText, Sense, UiBuilder, vec2};
 use std::time::{Duration, Instant};
 
+const SETTLE: u8 = 12;
+const FINDER_CHROME: f32 = 200.0;
+const FINDER_LEAST: f32 = 120.0;
+const FINDER_MOST: f32 = 440.0;
+const MENU_CHROME: f32 = 72.0;
+const MENU_LEAST: f32 = 120.0;
+const WINDOW_GAP: f32 = 8.0;
+const WINDOW_LEAST: f32 = 160.0;
+const CASCADE: egui::Vec2 = vec2(32.0, 32.0);
+
+#[derive(Clone, Copy, Default)]
+struct Placing {
+    opened: u32,
+    seen: u64,
+    frames: u8,
+    settled: bool,
+    size: Option<egui::Vec2>,
+    offset: egui::Vec2,
+}
+
+fn open_windows() -> Id {
+    Id::unique("klad open windows")
+}
+
+fn window_area(ctx: &egui::Context) -> egui::Rect {
+    let screen = ctx.content_rect();
+    egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.max.y - layout::STATUS))
+}
+
+pub(super) fn window_room(ctx: &egui::Context) -> f32 {
+    let chrome = ctx.global_style().spacing.window_margin.sum().y + 2.0;
+    (window_area(ctx).height() - 2.0 * WINDOW_GAP - chrome).max(WINDOW_LEAST)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Spot {
+    Middle,
+    At(egui::Pos2),
+}
+
 fn colour_of(tone: Tone) -> Color32 {
     match tone {
         Tone::Info => theme::TEXT,
@@ -64,7 +104,13 @@ impl Editor {
             theme::install(&ctx);
             self.themed = true;
         }
+        if !self.folder_is_there() {
+            return;
+        }
         theme::clear_hints(&ctx);
+        if ctx.options(|o| o.zoom_with_keyboard) {
+            ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        }
         if (ctx.zoom_factor() - self.settings.ui_scale).abs() > 1e-3 {
             ctx.set_zoom_factor(self.settings.ui_scale);
         }
@@ -73,10 +119,9 @@ impl Editor {
             lock(&self.stats).frame_ms.push(dt * 1000.0);
         }
         self.pointer = ui.input(|i| i.pointer.latest_pos()).or(self.pointer);
-        self.keys_busy = ctx.egui_wants_keyboard_input()
-            || self.palette.is_some()
-            || self.windows.settings
-            || self.capturing.is_some();
+        self.field_had_focus = ctx.egui_wants_keyboard_input();
+        self.keys_busy =
+            self.field_had_focus || self.palette.is_some() || self.windows.settings || self.capturing.is_some();
         self.check(|e| e.sync());
         self.tend_jobs();
         self.follow_pixel_check();
@@ -93,23 +138,37 @@ impl Editor {
             .exact_size(layout::STATUS)
             .resizable(false)
             .show(ui, |ui| self.status_line(ui));
+        self.fold_for_stills();
+        self.timeline_shown = 0.0;
         if self.settings.layout.shows_timeline() {
             let folded = self.settings.layout.timeline_folded;
-            let (lo, hi) = Layout::timeline_range(window);
+            let margin = egui::Frame::side_top_panel(&ctx.global_style()).total_margin().sum().y;
+            let scale = self.settings.ui_scale;
+            let (target, lo, hi) = self
+                .settings
+                .layout
+                .timeline_size(window, scale, self.timeline_rows + margin);
             let panel = match folded {
                 true => egui::Panel::bottom("timeline folded")
-                    .exact_size(layout::TIMELINE_FOLDED)
+                    .exact_size(self.timeline_bar + margin)
                     .resizable(false),
-                false => egui::Panel::bottom("timeline")
-                    .default_size(self.settings.layout.timeline_height)
+                false => egui::Panel::bottom(("timeline", (target * 2.0).round() as i32))
+                    .default_size(target)
                     .size_range(lo..=hi)
                     .resizable(true),
             };
             let shown = panel.show(ui, |ui| self.check(|e| e.timeline_panel(ui)));
             let height = shown.response.rect.height();
-            if !folded && !pressing && (height - self.settings.layout.timeline_height).abs() > 0.5 {
-                self.settings.layout.timeline_height = height;
-                self.settings_dirty = true;
+            self.timeline_shown = height;
+            let moved = !folded && (height - target).abs() > 0.5;
+            match (pressing, moved || self.timeline_dragged) {
+                (true, true) => self.timeline_dragged = true,
+                (false, true) if self.timeline_dragged => {
+                    self.timeline_dragged = false;
+                    self.settings.layout.keep_timeline_height(height, scale);
+                    self.settings_dirty = true;
+                }
+                _ => {}
             }
         }
         if self.settings.layout.shows_strip() {
@@ -139,7 +198,10 @@ impl Editor {
         }
         let panels = ms(start);
         let drawing = Instant::now();
-        egui::CentralPanel::no_frame().show(ui, |ui| self.check(|e| e.canvas(ui)));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.check(|e| e.canvas(ui));
+            self.toasts(ui);
+        });
         lock(&self.stats).canvas_ms.push(ms(drawing) as f32);
         let after = Instant::now();
         self.windows(&ctx);
@@ -206,6 +268,7 @@ impl Editor {
     fn tend_jobs(&mut self) {
         self.jobs.poll().into_iter().for_each(|e| {
             let took = e.took.as_secs_f32();
+            self.job_ended = Some(Instant::now());
             match e.outcome {
                 Outcome::Rerun => self.say_job(
                     Tone::Info,
@@ -226,16 +289,23 @@ impl Editor {
                     let detail = if text.is_empty() {
                         String::new()
                     } else {
-                        format!(": {text}")
+                        format!(": {}", self.job_words(&text))
                     };
                     self.measure("last job", format!("{} in {took:.1} s{detail}", e.name));
-                    self.say_job(Tone::Done, format!("{} done in {took:.1} s{detail}", e.name));
+                    if e.tag == Tag::Export {
+                        self.exported(&e.stdout, &e.output);
+                    }
+                    match e.tag == Tag::Export && !text.is_empty() {
+                        true => self.say_job(Tone::Done, text),
+                        false => self.say_job(Tone::Done, format!("{} done{detail}", e.name)),
+                    }
                 }
                 Outcome::Failed(text) => {
                     if e.tag == Tag::Inbetween {
                         self.between.report = super::between::report(&e.output);
                     }
-                    self.say_job(Tone::Error, crate::report::job_failed(&e.name, &text))
+                    let why = self.job_words(&text);
+                    self.say_job(Tone::Error, crate::report::job_failed(&e.name, &why))
                 }
                 Outcome::Cancelled => self.say_job(Tone::Info, format!("{} cancelled", e.name)),
             }
@@ -259,11 +329,11 @@ impl Editor {
             true => other.y + 6.0 + gap,
             false => self.strip_foot[size],
         };
+        ui.spacing_mut().scroll = theme::shown_scroll();
         egui::ScrollArea::vertical()
             .id_salt("strip")
             .max_height((height - foot_now - gap).max(0.0))
             .auto_shrink([false, true])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .scroll_source(egui::scroll_area::ScrollSource {
                 drag: egui::scroll_area::DragScroll::Never,
                 ..egui::scroll_area::ScrollSource::default()
@@ -345,7 +415,7 @@ impl Editor {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         commands::MENUS.iter().for_each(|m| {
-            ui.menu_button(m.title, |ui| self.menu_items(ui, m.items))
+            ui.menu_button(m.title, |ui| scrolled_menu(ui, |ui| self.menu_items(ui, m.items)))
                 .response
                 .hint(commands::menu_hint(m));
         });
@@ -358,7 +428,7 @@ impl Editor {
             }
             commands::Item::Run(cmd) => self.menu_entry(ui, cmd),
             commands::Item::Sub(title, inner) => {
-                ui.menu_button(title, |ui| self.menu_items(ui, inner));
+                ui.menu_button(title, |ui| scrolled_menu(ui, |ui| self.menu_items(ui, inner)));
             }
             commands::Item::Recent => {
                 ui.menu_button("Open recent", |ui| {
@@ -388,7 +458,7 @@ impl Editor {
         });
     }
 
-    fn menu_entry(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
+    pub(super) fn menu_entry(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
         let label = commands::menu_label(cmd);
         let can = self.can_run(cmd).is_none();
         let keys = self.bindings.menu_key(cmd);
@@ -544,26 +614,37 @@ impl Editor {
 
     fn dock(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
+        ui.spacing_mut().scroll = theme::shown_scroll();
         self.dock_room = ui.available_height();
-        let bodies = self.settings.layout.bodies(ui.available_height());
+        self.dock_fit.chosen = self.dock_kept;
+        self.folded_for_room = self.settings.layout.folded_for_room(self.dock_room, &self.dock_fit);
+        let bodies = self.settings.layout.bodies(self.dock_room, &self.dock_fit);
         let mut previous: Option<(Pane, bool)> = None;
-        bodies.into_iter().for_each(|(pane, body)| {
-            self.pane_title(ui, pane, body.is_none(), previous);
-            if let Some(height) = body {
-                egui::ScrollArea::vertical()
-                    .id_salt(("pane", pane))
-                    .max_height(height)
-                    .min_scrolled_height(height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 5.0;
-                        egui::Frame::new()
-                            .inner_margin(Margin::symmetric(8, 6))
-                            .show(ui, |ui| self.check(|e| e.pane_body(ui, pane)));
-                    });
-            }
-            previous = Some((pane, body.is_some()));
-        });
+        let content: Vec<(Pane, f32)> = bodies
+            .into_iter()
+            .filter_map(|(pane, body)| {
+                self.pane_title(ui, pane, body.is_none(), previous);
+                previous = Some((pane, body.is_some()));
+                body.map(|height| match pane {
+                    Pane::Layers => (pane, self.layers_body(ui, height)),
+                    _ => {
+                        let shown = egui::ScrollArea::vertical()
+                            .id_salt(("pane", pane))
+                            .max_height(height)
+                            .min_scrolled_height(height)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 5.0;
+                                egui::Frame::new()
+                                    .inner_margin(Margin::symmetric(8, 6))
+                                    .show(ui, |ui| self.check(|e| e.pane_body(ui, pane)));
+                            });
+                        (pane, shown.content_size.y)
+                    }
+                })
+            })
+            .collect();
+        self.dock_fit.content = content;
     }
 
     fn pane_title(&mut self, ui: &mut egui::Ui, pane: Pane, collapsed: bool, previous: Option<(Pane, bool)>) {
@@ -618,11 +699,16 @@ impl Editor {
                 self.check(|e| e.layer_header(ui));
             }
         });
-        if toggle.clicked()
-            && let Some(p) = self.settings.layout.pane_mut(pane)
-        {
-            p.collapsed = !p.collapsed;
-            self.settings_dirty = true;
+        if toggle.clicked() {
+            match collapsed {
+                true => self.show_pane(pane),
+                false => {
+                    if let Some(p) = self.settings.layout.pane_mut(pane) {
+                        p.collapsed = true;
+                    }
+                    self.settings_dirty = true;
+                }
+            }
         }
         if close {
             self.settings.layout.toggle(pane);
@@ -637,7 +723,7 @@ impl Editor {
                 self.brush_tiles(ui);
                 Ok(())
             }
-            Pane::Layers => self.layers_pane(ui),
+            Pane::Layers => Ok(()),
             Pane::Inspector => match (self.tool, self.selection.clone()) {
                 _ if self.on_marks() => {
                     self.strokes_inspector(ui)?;
@@ -736,6 +822,16 @@ impl Editor {
         let mut cancel = None;
         let mut open_log = false;
         ui.horizontal_centered(|ui| {
+            if self.settings.layout.hidden {
+                if ui
+                    .button(format!("{} show the panels (Tab)", icon::SIDEBAR))
+                    .hint("the panels are hidden: this or Tab brings them back")
+                    .clicked()
+                {
+                    self.queued.push(Cmd::HideAll);
+                }
+                ui.separator();
+            }
             let frames = self.scene.bundle.doc.timeline.frames;
             ui.label(RichText::new(format!("frame {} of {frames}", self.shown_frame())).strong());
             if self.timeline.player.is_some() {
@@ -831,42 +927,80 @@ impl Editor {
             work.push(format!("loading frame {}", self.scene.frame));
         }
         work.extend(self.preparing_text());
+        if self.maps.making {
+            work.push("making the light maps".to_string());
+        }
+        if self.depth.preparing {
+            work.push("preparing the planes".to_string());
+        }
         work
     }
 
     pub(super) fn window(
         ctx: &egui::Context,
         id: &str,
-        (title, at): (String, egui::Pos2),
+        (title, spot): (String, Spot),
         open: &mut bool,
         add: impl FnOnce(&mut egui::Ui),
     ) {
-        egui::Window::new(&title)
-            .id(Id::unique(id))
-            .default_pos(at)
+        let key = Id::unique(id);
+        let frame = ctx.cumulative_frame_nr();
+        let mut place = ctx.data(|d| d.get_temp::<Placing>(key)).unwrap_or_default();
+        let mut others: Vec<(Id, u64)> = ctx.data(|d| d.get_temp(open_windows())).unwrap_or_default();
+        others.retain(|(id, seen)| *id != key && seen + 1 >= frame);
+        if place.seen + 1 < frame && matches!(spot, Spot::Middle) {
+            place = Placing {
+                opened: place.opened + 1,
+                offset: CASCADE * others.len() as f32,
+                ..Placing::default()
+            };
+        }
+        let others_open = others.len();
+        others.push((key, frame));
+        ctx.data_mut(|d| d.insert_temp(open_windows(), others));
+        let area = key.with(place.opened);
+        let window = egui::Window::new(&title)
+            .id(area)
             .title_bar(false)
             .resizable(true)
             .default_width(360.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&title).strong());
-                    ui.with_layout(Flow::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(icon::CLOSE).size(theme::ICON))
-                                    .frame(false)
-                                    .min_size(vec2(theme::TARGET, theme::TARGET)),
-                            )
-                            .hint(format!("close {title}"))
-                            .clicked()
-                        {
-                            *open = false;
-                        }
-                    });
+            .max_height(window_room(ctx))
+            .constrain_to(window_area(ctx));
+        let middle = ctx.content_rect().center() + place.offset;
+        let size = ctx.memory(|m| m.area_rect(area)).map(|r| r.size());
+        let window = match (spot, size) {
+            (Spot::At(at), _) => window.default_pos(at),
+            (Spot::Middle, Some(size)) if !place.settled => {
+                place.offset = CASCADE * others_open as f32;
+                place.frames += 1;
+                place.settled = place.frames >= SETTLE || place.size.is_some_and(|was| (was - size).length() < 0.5);
+                place.size = Some(size);
+                window.current_pos(ctx.content_rect().center() + place.offset - size / 2.0)
+            }
+            (Spot::Middle, _) => window.default_pos(middle - vec2(180.0, 160.0)),
+        };
+        place.seen = frame;
+        ctx.data_mut(|d| d.insert_temp(key, place));
+        window.show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&title).strong());
+                ui.with_layout(Flow::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(icon::CLOSE).size(theme::ICON))
+                                .frame(false)
+                                .min_size(vec2(theme::TARGET, theme::TARGET)),
+                        )
+                        .hint(format!("close {title}"))
+                        .clicked()
+                    {
+                        *open = false;
+                    }
                 });
-                ui.separator();
-                add(ui);
             });
+            ui.separator();
+            add(ui);
+        });
     }
 
     fn windows(&mut self, ctx: &egui::Context) {
@@ -877,18 +1011,15 @@ impl Editor {
         let layout = &self.settings.layout;
         let dock = if layout.shows_dock() { layout.dock_width } else { 0.0 };
         let strip = if layout.shows_strip() { layout::STRIP } else { 0.0 };
-        let timeline = if layout.shows_timeline() {
-            layout.timeline_height
-        } else {
-            0.0
-        };
+        let timeline = self.timeline_shown;
         let above = screen.bottom() - layout::STATUS - timeline;
-        let numbers_at = egui::pos2(screen.right() - dock - 380.0, screen.top() + 16.0);
-        let settings_at = egui::pos2(screen.center().x - 180.0, screen.top() + 60.0);
-        let log_at = egui::pos2(screen.left() + strip + 16.0, (above - 380.0).max(screen.top() + 16.0));
-        let near_timeline = egui::pos2(screen.left() + strip + 16.0, (above - 300.0).max(screen.top() + 16.0));
+        let numbers_at = Spot::At(egui::pos2(screen.right() - dock - 380.0, screen.top() + 16.0));
+        let log_at = Spot::At(egui::pos2(
+            screen.left() + strip + 16.0,
+            (above - 380.0).max(screen.top() + 16.0),
+        ));
         self.palette_window(ctx);
-        self.toasts(ctx);
+        self.upright_chip(ctx);
         if self.settings.layout.numbers && self.settings.developer {
             let mut open = true;
             Self::window(
@@ -909,7 +1040,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "brush",
-                (format!("{} Brush", icon::BRUSH), settings_at),
+                (format!("{} Brush", icon::BRUSH), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.brush_window_ui(ui)),
             );
@@ -920,7 +1051,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "report",
-                (format!("{} Report a problem", icon::LOG), settings_at),
+                (format!("{} Report a problem", icon::LOG), Spot::Middle),
                 &mut open,
                 |ui| self.report_panel(ui),
             );
@@ -931,7 +1062,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "about",
-                (format!("{} About klad", icon::INFO), settings_at),
+                (format!("{} About klad", icon::INFO), Spot::Middle),
                 &mut open,
                 |ui| self.about_panel(ui),
             );
@@ -953,7 +1084,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "onion",
-                (format!("{} Onion skin", icon::ONION), near_timeline),
+                (format!("{} Onion skin", icon::ONION), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.onion_settings(ui)),
             );
@@ -974,14 +1105,18 @@ impl Editor {
                 })
                 .unwrap_or_default();
             let frame = self.scene.frame;
+            let blocked = self.link_blocked();
             let thumbs: Vec<_> = drawings.iter().map(|(id, _)| self.thumb(ctx, id)).collect();
             Self::window(
                 ctx,
                 "link",
-                (format!("{} Show a drawing here", icon::LINK), near_timeline),
+                (format!("{} Show a drawing here", icon::LINK), Spot::Middle),
                 &mut open,
                 |ui| {
-                    ui.label(format!("frame {frame} will show the drawing you pick, as a link"));
+                    match &blocked {
+                        Some(why) => ui.colored_label(theme::REFUSED, why.as_str()),
+                        None => ui.label(format!("frame {frame} will show the drawing you pick, as a link")),
+                    };
                     ui.horizontal_wrapped(|ui| {
                         drawings.iter().zip(&thumbs).for_each(|((id, f), thumb)| {
                             let text = format!("frame {f}");
@@ -996,8 +1131,10 @@ impl Editor {
                                 None => egui::Button::new(text),
                             };
                             if ui
-                                .add(button)
-                                .hint(format!("show {id} again here; drawing on it changes both"))
+                                .add_enabled(blocked.is_none(), button)
+                                .hint(format!(
+                                    "show the drawing of frame {f} again here; drawing on it changes both"
+                                ))
                                 .clicked()
                             {
                                 chosen = Some(id.clone());
@@ -1016,8 +1153,8 @@ impl Editor {
             let mut open = true;
             Self::window(
                 ctx,
-                "export",
-                (format!("{} Export", icon::EXPORT), near_timeline),
+                self.export.what.title(),
+                (format!("{} {}", icon::EXPORT, self.export.what.title()), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.export_window(ui)),
             );
@@ -1028,7 +1165,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "pixels",
-                (format!("{} Pixels of a picture", icon::PIXELS), near_timeline),
+                (format!("{} Pixels of a picture", icon::PIXELS), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.pixels_window(ui)),
             );
@@ -1039,7 +1176,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "tiles",
-                (format!("{} Tileset", icon::PIXELS), near_timeline),
+                (format!("{} Tileset", icon::PIXELS), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.tiles_window(ui)),
             );
@@ -1050,7 +1187,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "paintover",
-                (format!("{} Paint over", icon::BRUSH), settings_at),
+                (format!("{} Paint over", icon::BRUSH), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.paintover_window(ui)),
             );
@@ -1061,7 +1198,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "compare",
-                (format!("{} Compared with the reference", icon::INFO), settings_at),
+                (format!("{} Compared with the reference", icon::INFO), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.compare_window(ui)),
             );
@@ -1072,7 +1209,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "font",
-                (format!("{} Add a font", icon::PLUS), near_timeline),
+                (format!("{} Add a font", icon::PLUS), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.font_window(ui)),
             );
@@ -1083,7 +1220,7 @@ impl Editor {
             Self::window(
                 ctx,
                 "between",
-                (format!("{} In-betweens", icon::INBETWEEN), near_timeline),
+                (format!("{} In-betweens", icon::INBETWEEN), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.between_window(ui)),
             );
@@ -1097,12 +1234,31 @@ impl Editor {
             Self::window(
                 ctx,
                 "clip",
-                (format!("{} {title}", icon::CLIP_BAR), near_timeline),
+                (format!("{} {title}", icon::CLIP_BAR), Spot::Middle),
                 &mut open,
                 |ui| self.check(|e| e.clip_window(ui)),
             );
             self.windows.clip &= open;
         }
+    }
+
+    fn upright_chip(&mut self, ctx: &egui::Context) {
+        let Some(degrees) = self.view.and_then(|v| v.turned()) else {
+            return;
+        };
+        let rect = self.canvas_rect;
+        egui::Area::new(Id::unique("upright"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(egui::pos2(rect.center().x, rect.top() + 8.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("view turned {degrees:.0}\u{b0}")).color(theme::WEAK));
+                        self.command_button(ui, Cmd::ResetRotation, Some("upright"));
+                    });
+                });
+            });
     }
 
     fn numbers_panel(&mut self, ui: &mut egui::Ui) {
@@ -1180,37 +1336,46 @@ impl Editor {
         });
     }
 
-    fn toasts(&mut self, ctx: &egui::Context) {
-        let now = Instant::now();
-        let screen = ctx.content_rect();
-        let shown: Vec<Message> = self.messages.toasts(now).into_iter().cloned().collect();
+    fn toasts(&mut self, ui: &mut egui::Ui) {
+        const WIDTH: f32 = 380.0;
+        let shown: Vec<Message> = self.messages.toasts(Instant::now()).into_iter().cloned().collect();
+        let canvas = self.canvas_rect;
+        self.held_messages.clear();
+        if shown.is_empty() || canvas.width() <= 0.0 || canvas.height() <= 0.0 {
+            return;
+        }
         let mut dismiss = None;
-        let canvas = Some(self.canvas_rect).filter(|r| r.width() > 0.0 && r.height() > 0.0);
-        let left = canvas.map_or(screen.left(), |r| r.left()) + 12.0;
-        let mut bottom = canvas.map_or(screen.bottom() - layout::STATUS, |r| r.bottom()) - 12.0;
-        shown.iter().rev().for_each(|m| {
-            let (pos, pivot) = (egui::pos2(left, bottom), egui::Align2::LEFT_BOTTOM);
-            bottom -= 40.0;
-            let sticky = m.tone == Tone::Error;
-            egui::Area::new(Id::unique(("toast", m.id)))
-                .order(egui::Order::Tooltip)
-                .pivot(pivot)
-                .fixed_pos(pos)
-                .interactable(sticky)
-                .constrain(true)
-                .show(ctx, |ui| {
+        let mut held = Vec::new();
+        let room = canvas.shrink(12.0);
+        let stack = egui::UiBuilder::new()
+            .max_rect(room)
+            .layout(egui::Layout::bottom_up(egui::Align::Min));
+        ui.scope_builder(stack, |ui| {
+            ui.set_clip_rect(canvas);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            shown.iter().rev().for_each(|m| {
+                let sticky = m.tone == Tone::Error;
+                let sense = match sticky {
+                    true => Sense::click_and_drag(),
+                    false => Sense::hover(),
+                };
+                let toast = ui.scope_builder(egui::UiBuilder::new().id_salt(("toast", m.id)).sense(sense), |ui| {
                     egui::Frame::popup(ui.style())
                         .fill(Color32::from_gray(30))
                         .stroke(egui::Stroke::new(1.0, colour_of(m.tone)))
                         .show(ui, |ui| {
-                            ui.set_max_width(380.0);
+                            ui.set_max_width(WIDTH);
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(icon_of(m.tone))
                                         .color(colour_of(m.tone))
                                         .size(theme::ICON),
                                 );
-                                ui.label(&m.text);
+                                let words = WIDTH - theme::ICON - if sticky { theme::TARGET + 12.0 } else { 6.0 };
+                                ui.scope(|ui| {
+                                    ui.set_max_width(words);
+                                    ui.add(egui::Label::new(&m.text).wrap().selectable(false));
+                                });
                                 if sticky
                                     && ui
                                         .add(
@@ -1224,7 +1389,12 @@ impl Editor {
                             });
                         });
                 });
+                if sticky {
+                    held.push(toast.response.rect);
+                }
+            });
         });
+        self.held_messages = held;
         if let Some(id) = dismiss {
             self.messages.dismiss(id);
         }
@@ -1264,7 +1434,7 @@ impl Editor {
                         .desired_width(f32::INFINITY),
                 )
                 .labelled_by(label.id)
-                .hint("type a few letters; arrows pick, Return runs, Esc closes");
+                .hint("type a word for what you want to do; arrows pick, Return runs, Esc closes");
             if !state.opened {
                 edit.request_focus();
                 state.opened = true;
@@ -1276,37 +1446,41 @@ impl Editor {
                 run = found.get(state.selected).copied();
             }
             ui.add_space(4.0);
-            egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
-                if found.is_empty() {
-                    ui.label("nothing matches");
-                }
-                found.iter().enumerate().for_each(|(i, cmd)| {
-                    let spec = cmd.spec();
-                    let reason = self.can_run(*cmd);
-                    let colour = if reason.is_some() { theme::WEAK } else { theme::TEXT };
-                    let row = ui
-                        .add(
-                            egui::Button::new(RichText::new(format!("{}  {}", spec.icon, spec.name)).color(colour))
-                                .right_text(RichText::new(self.bindings.label(*cmd)).color(theme::WEAK))
-                                .selected(i == state.selected)
-                                .min_size(vec2(ui.available_width(), theme::TARGET)),
-                        )
-                        .hint(self.command_hint(*cmd));
-                    if i == state.selected && (down || up) {
-                        row.scroll_to_me(None);
+            let room = (ui.ctx().content_rect().height() - FINDER_CHROME).clamp(FINDER_LEAST, FINDER_MOST);
+            egui::ScrollArea::vertical()
+                .max_height(room)
+                .min_scrolled_height(room)
+                .show(ui, |ui| {
+                    if found.is_empty() {
+                        ui.label("nothing matches");
                     }
-                    if let Some(reason) = reason.filter(|_| !spec.is_hold()) {
-                        ui.label(
-                            RichText::new(format!("    {}: {reason}", spec.group.name()))
-                                .small()
-                                .color(theme::WEAK),
-                        );
-                    }
-                    if row.clicked() {
-                        run = Some(*cmd);
-                    }
+                    found.iter().enumerate().for_each(|(i, cmd)| {
+                        let spec = cmd.spec();
+                        let reason = self.can_run(*cmd);
+                        let colour = if reason.is_some() { theme::WEAK } else { theme::TEXT };
+                        let row = ui
+                            .add(
+                                egui::Button::new(RichText::new(format!("{}  {}", spec.icon, spec.name)).color(colour))
+                                    .right_text(RichText::new(self.bindings.label(*cmd)).color(theme::WEAK))
+                                    .selected(i == state.selected)
+                                    .min_size(vec2(ui.available_width(), theme::TARGET)),
+                            )
+                            .hint(self.command_hint(*cmd));
+                        if i == state.selected && (down || up) {
+                            row.scroll_to_me(None);
+                        }
+                        if let Some(reason) = reason.filter(|_| !spec.is_hold()) {
+                            ui.label(
+                                RichText::new(format!("    {}: {reason}", spec.group.name()))
+                                    .small()
+                                    .color(theme::WEAK),
+                            );
+                        }
+                        if row.clicked() {
+                            run = Some(*cmd);
+                        }
+                    });
                 });
-            });
         });
         match run {
             Some(cmd) => self.queued.push(cmd),
@@ -1314,6 +1488,14 @@ impl Editor {
             None => {}
         }
     }
+}
+
+fn scrolled_menu(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let room = (ui.ctx().content_rect().height() - MENU_CHROME).max(MENU_LEAST);
+    egui::ScrollArea::vertical()
+        .max_height(room)
+        .min_scrolled_height(room)
+        .show(ui, add);
 }
 
 pub(super) fn real_image((w, h): (u32, u32), cols: usize, tiles: &[(usize, Vec<half::f16>)]) -> egui::ColorImage {
