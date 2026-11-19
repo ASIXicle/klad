@@ -6,9 +6,26 @@ Nothing yet.
 
 ## 0.4.0 (2026-11-19)
 
-The editor after a full audit: it fits a small screen, says what it does and why it cannot, and keys follow what you work in. New: an Export menu by kind, a right-click menu, colour sliders, zoom keys, text you can select, a starter palette for pixel art and `klad apply --steps`.
+The editor after a full audit: every tool, command and window was walked through the way a person uses them, and what fell short is fixed.
+
+What is new:
+
+- **It fits a small screen.** On a 1440 by 900 window the canvas went from a third of the window to more than half: the timeline folds for stills, the panels share the height, menus and windows fit, and **Hide panels** (Tab) leaves a button to bring them back.
+- **It says what it does.** Plain messages without internal ids. A tool on a locked or hidden layer says so, and a command that cannot run says why.
+- **Keys follow what you work in.** Click a frame and **cmd C**, **V**, **D**, **Delete** and **A** act on frames; press on the canvas and they act on strokes again. **cmd +** and **cmd -** zoom, **cmd 0** fits, **cmd ←** and **cmd →** go to the first and the last frame.
+- **Export by kind.** **File > Export** has an entry for each kind: image, frames, sprite sheet, GIF, Aseprite file and Godot. Each window shows only what that kind uses and says where the file will go.
+- **Selections.** **S** drags a box, or a loop. A right click opens copy, paste, duplicate, delete and **Move to new layer**. Shapes copy and paste, the selection's colour picker holds the palette and recent colours, and turned boxes stay turned.
+- **Colour.** Mix with **HSV**, **HSL**, **RGB** or **Lab** sliders beside the wheel.
+- **Text.** Select inside a text while you type it; **cmd Z** takes back the typing in one step. On a pixel layer, text becomes hard-edged pixels (`klad pixel --text` from the command line).
+- **Pixel art and animation.** A starter palette of eight ramps, new frames on ones, drags in the timeline that select, repeating the selected frames, a paste on a held frame that gives the frame its own drawing, a pencil that answers to the pen's tilt, and an eraser with its own size.
+- **Any tool on any layer.** The brush and the fill on a vector layer paint on a new paint layer above it; the pen and the shape tool on a paint layer make a vector layer above it.
+- **For agents.** `klad apply --steps` makes each line of a script an edit of its own, paced with `--delay`, so a drawing can be watched as it appears. The editor names the agent's changes, and undo says whose step it takes back.
+- **Safer with an agent beside you.** The editor reads the drawing before it writes and never writes over a change it has not read; a drawing whose folder is renamed while it is open is followed.
+- The brush no longer tapers the strokes you draw by hand unless you ask for it.
 
 Drawings are saved in format `klad/8`, as in 0.3.0; older drawings open unchanged.
+
+### Every change
 
 - **cmd V** after clicking a frame pastes the strokes or pixels you copied last; it pastes frames only when frames were what you copied last.
 - An adjustment layer's own settings come first in **Layer settings**, and a new adjustment layer makes room for them.
